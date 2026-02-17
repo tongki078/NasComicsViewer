@@ -139,9 +139,6 @@ fun NasComicApp() {
                 
                 repository.scanComicFolders(targetPath, maxDepth = 3)
                     .onStart { 
-                        // Once flow starts, we can hide full loading and show streaming indicator
-                        // But finding the first item might take time, so keep isLoading true until first emit?
-                        // Let's keep isLoading true for a bit or until first item.
                         isScanning = true
                     }
                     .onCompletion { 
@@ -150,7 +147,6 @@ fun NasComicApp() {
                     }
                     .collect { file ->
                         currentFiles.add(file)
-                        // Once we have at least one item, hide the big loading spinner
                         if (isLoading) isLoading = false
                     }
                 
@@ -232,7 +228,6 @@ fun NasComicApp() {
         val currentCategoryPath = categories.getOrNull(selectedCategoryIndex)?.path
         if (currentCategoryPath != null && currentPath != currentCategoryPath && currentPath != "$currentCategoryPath/") {
             val parent = currentPath.trimEnd('/').substringBeforeLast('/') + "/"
-            // If going back to root category, re-scan instead of loadPath
             if (parent == currentCategoryPath || parent == "$currentCategoryPath/") {
                 scanCategory(currentCategoryPath)
             } else {
@@ -300,7 +295,7 @@ fun NasComicApp() {
                 Box(Modifier.weight(1f)) {
                     if (isEpisodeList) {
                         EpisodeListView(
-                            files = currentFiles, // List<NasFile> works with SnapshotStateList
+                            files = currentFiles,
                             folderPath = currentPath,
                             posterRepository = posterRepository,
                             onFileClick = { openZipFile(it) },
@@ -320,7 +315,7 @@ fun NasComicApp() {
             }
         }
         
-        // Loading Overlay (Only for initial blocking load or zip download)
+        // Loading Overlay
         if (isLoading) {
             Box(
                 modifier = Modifier
@@ -371,24 +366,21 @@ fun FolderGridView(
                 Text("No comics found", color = Color.Gray)
             }
         } else {
-            Box(Modifier.fillMaxSize()) {
-                LazyVerticalGrid(
-                    columns = GridCells.Adaptive(minSize = 100.dp),
-                    contentPadding = PaddingValues(16.dp),
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
-                    verticalArrangement = Arrangement.spacedBy(16.dp),
-                    modifier = Modifier.fillMaxSize()
-                ) {
-                    items(directories) { file ->
-                        ComicCard(file, nasRepository, posterRepository, onClick = { onFolderClick(file) })
-                    }
-                    
-                    // Show small spinner at bottom if still scanning
-                    if (isScanning) {
-                        item {
-                            Box(Modifier.fillMaxWidth().height(100.dp), contentAlignment = Alignment.Center) {
-                                CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
-                            }
+            LazyVerticalGrid(
+                columns = GridCells.Adaptive(minSize = 100.dp),
+                contentPadding = PaddingValues(16.dp),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                verticalArrangement = Arrangement.spacedBy(16.dp),
+                modifier = Modifier.fillMaxSize()
+            ) {
+                items(directories) { file ->
+                    ComicCard(file, nasRepository, posterRepository, onClick = { onFolderClick(file) })
+                }
+                
+                if (isScanning) {
+                    item {
+                        Box(Modifier.fillMaxWidth().height(100.dp), contentAlignment = Alignment.Center) {
+                            CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
                         }
                     }
                 }
@@ -396,4 +388,286 @@ fun FolderGridView(
         }
     }
 }
-// ... Existing EpisodeListView, ComicCard, WebtoonViewer are kept as is ...
+
+@Composable
+fun EpisodeListView(
+    files: List<NasFile>,
+    folderPath: String,
+    posterRepository: org.nas.comicsviewer.data.PosterRepository,
+    onFileClick: (NasFile) -> Unit,
+    onBack: () -> Unit
+) {
+    val title = folderPath.trimEnd('/').substringAfterLast('/')
+    val cleanTitle = cleanTitle(title)
+    
+    var posterBitmap by remember { mutableStateOf<ImageBitmap?>(null) }
+    LaunchedEffect(cleanTitle) {
+        try {
+            val url = posterRepository.searchPoster(cleanTitle)
+            if (url != null) {
+                val bytes = posterRepository.downloadImageFromUrl(url)
+                posterBitmap = bytes?.toImageBitmap()
+            }
+        } catch (e: Exception) {}
+    }
+
+    Column(Modifier.fillMaxSize()) {
+        Box(modifier = Modifier.fillMaxWidth().height(220.dp)) {
+            if (posterBitmap != null) {
+                Image(
+                    bitmap = posterBitmap!!,
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.7f)) 
+                )
+            } else {
+                Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surfaceVariant))
+            }
+            
+            Row(
+                modifier = Modifier.fillMaxSize().padding(16.dp).statusBarsPadding(),
+                verticalAlignment = Alignment.Bottom
+            ) {
+                Card(
+                    shape = RoundedCornerShape(8.dp),
+                    elevation = CardDefaults.cardElevation(8.dp),
+                    modifier = Modifier.width(100.dp).aspectRatio(0.7f)
+                ) {
+                    if (posterBitmap != null) {
+                        Image(
+                            bitmap = posterBitmap!!,
+                            contentDescription = null,
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    } else {
+                        Box(Modifier.fillMaxSize().background(Color.Gray))
+                    }
+                }
+                Spacer(Modifier.width(16.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        text = title,
+                        style = MaterialTheme.typography.headlineSmall,
+                        color = Color.White,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        text = "Total ${files.count { it.name.endsWith(".zip") || it.name.endsWith(".cbz") }} Episodes",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = Color.White.copy(alpha = 0.7f)
+                    )
+                }
+            }
+            IconButton(
+                onClick = onBack,
+                modifier = Modifier.align(Alignment.TopStart).statusBarsPadding().padding(8.dp)
+            ) {
+                Text("⬅", style = MaterialTheme.typography.headlineMedium, color = Color.White)
+            }
+        }
+
+        LazyColumn(
+            contentPadding = PaddingValues(16.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+            modifier = Modifier.fillMaxSize()
+        ) {
+            val episodes = files.filter { 
+                val n = it.name.lowercase()
+                n.endsWith(".zip") || n.endsWith(".cbz")
+            }.sortedBy { it.name }
+
+            items(episodes) { file ->
+                Card(
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.surface,
+                        contentColor = MaterialTheme.colorScheme.onSurface
+                    ),
+                    modifier = Modifier.fillMaxWidth().clickable { onFileClick(file) }
+                ) {
+                    Column {
+                        Row(
+                            modifier = Modifier.padding(16.dp).fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Card(
+                                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+                                modifier = Modifier.size(50.dp, 36.dp),
+                                shape = RoundedCornerShape(4.dp)
+                            ) {
+                                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                    Text("EP", style = MaterialTheme.typography.labelSmall, color = Color.Gray)
+                                }
+                            }
+                            Spacer(Modifier.width(16.dp))
+                            Text(
+                                text = file.name,
+                                style = MaterialTheme.typography.bodyLarge,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                        HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant, thickness = 0.5.dp)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun ComicCard(
+    file: NasFile,
+    nasRepository: org.nas.comicsviewer.data.NasRepository,
+    posterRepository: org.nas.comicsviewer.data.PosterRepository,
+    onClick: () -> Unit
+) {
+    var thumbnail by remember { mutableStateOf<ImageBitmap?>(null) }
+    
+    LaunchedEffect(file) {
+        try {
+            val cleanName = cleanTitle(file.name)
+            val posterUrl = posterRepository.searchPoster(cleanName)
+            if (posterUrl != null) {
+                val bytes = posterRepository.downloadImageFromUrl(posterUrl)
+                if (bytes != null) thumbnail = bytes.toImageBitmap()
+            }
+        } catch (e: Exception) {}
+    }
+
+    Column(
+        modifier = Modifier
+            .width(100.dp)
+            .clickable(onClick = onClick)
+    ) {
+        Card(
+            shape = RoundedCornerShape(8.dp),
+            modifier = Modifier.aspectRatio(0.7f).fillMaxWidth(),
+            elevation = CardDefaults.cardElevation(defaultElevation = 4.dp)
+        ) {
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                if (thumbnail != null) {
+                    Image(
+                        bitmap = thumbnail!!,
+                        contentDescription = null,
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                } else {
+                    Box(
+                        modifier = Modifier.fillMaxSize()
+                            .background(Brush.verticalGradient(colors = listOf(Color(0xFF2196F3), Color(0xFF1565C0)))),
+                        contentAlignment = Alignment.Center
+                    ) {
+                         Text("📁", style = MaterialTheme.typography.displayMedium)
+                    }
+                }
+            }
+        }
+        Spacer(modifier = Modifier.height(8.dp))
+        Text(
+            text = file.name,
+            style = MaterialTheme.typography.bodyMedium,
+            color = Color.White,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+            textAlign = TextAlign.Start
+        )
+    }
+}
+
+@Composable
+fun WebtoonViewer(
+    zipPath: String,
+    images: List<String>,
+    zipManager: org.nas.comicsviewer.data.ZipManager,
+    onClose: () -> Unit,
+    showControls: Boolean,
+    onToggleControls: () -> Unit
+) {
+    val listState = rememberLazyListState()
+    val scope = rememberCoroutineScope()
+    val currentPage by remember { derivedStateOf { listState.firstVisibleItemIndex } }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black)
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null
+            ) { onToggleControls() }
+    ) {
+        LazyColumn(
+            state = listState,
+            modifier = Modifier.fillMaxSize(),
+        ) {
+            itemsIndexed(images) { index, imageName ->
+                var imageBitmap by remember { mutableStateOf<ImageBitmap?>(null) }
+                LaunchedEffect(imageName) {
+                    withContext(Dispatchers.Default) {
+                        val bytes = zipManager.extractImage(zipPath, imageName)
+                        val bitmap = bytes?.toImageBitmap()
+                        imageBitmap = bitmap
+                    }
+                }
+                Box(
+                    modifier = Modifier.fillMaxWidth(),
+                    contentAlignment = Alignment.Center
+                ) {
+                    if (imageBitmap != null) {
+                        Image(
+                            bitmap = imageBitmap!!,
+                            contentDescription = null,
+                            modifier = Modifier.fillMaxWidth(),
+                            contentScale = ContentScale.FillWidth
+                        )
+                    } else {
+                        Box(
+                            modifier = Modifier.fillMaxWidth().height(300.dp).background(Color(0xFF1E1E1E)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            CircularProgressIndicator(color = Color.White)
+                        }
+                    }
+                }
+            }
+        }
+        
+        AnimatedVisibility(
+            visible = showControls,
+            enter = slideInVertically() + fadeIn(),
+            exit = slideOutVertically() + fadeOut(),
+            modifier = Modifier.align(Alignment.TopCenter)
+        ) {
+            Row(
+                modifier = Modifier.background(Color.Black.copy(alpha = 0.8f)).statusBarsPadding().padding(16.dp).fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("${currentPage + 1} / ${images.size}", color = Color.White, style = MaterialTheme.typography.titleMedium)
+                IconButton(onClick = onClose) { Text("❌", color = Color.White, style = MaterialTheme.typography.headlineMedium) }
+            }
+        }
+        
+        AnimatedVisibility(
+            visible = showControls,
+            enter = slideInVertically(initialOffsetY = { it }) + fadeIn(),
+            exit = slideOutVertically(targetOffsetY = { it }) + fadeOut(),
+            modifier = Modifier.align(Alignment.BottomCenter)
+        ) {
+             Column(
+                modifier = Modifier.background(Color.Black.copy(alpha = 0.8f)).navigationBarsPadding().padding(16.dp).fillMaxWidth()
+            ) {
+                Slider(
+                    value = currentPage.toFloat(),
+                    onValueChange = { newValue -> scope.launch { listState.scrollToItem(newValue.toInt()) } },
+                    valueRange = 0f..(images.size - 1).coerceAtLeast(0).toFloat(),
+                )
+            }
+        }
+    }
+}
