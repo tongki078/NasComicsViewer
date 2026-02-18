@@ -10,6 +10,8 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.withContext
+import java.io.File
+import java.io.FileOutputStream
 import java.util.Properties
 
 actual fun provideNasRepository(): NasRepository = AndroidNasRepository.getInstance()
@@ -24,7 +26,7 @@ class AndroidNasRepository private constructor() : NasRepository {
         fun getInstance() = instance ?: synchronized(this) { instance ?: AndroidNasRepository().also { instance = it } }
     }
 
-    override fun setCredentials(username: String, password: String) { this.username = username; this.password = password }
+    override fun setCredentials(u: String, p: String) { this.username = u; this.password = p }
     override fun getCredentials() = Pair(username, password)
 
     private fun getContext(): CIFSContext {
@@ -33,34 +35,31 @@ class AndroidNasRepository private constructor() : NasRepository {
                 setProperty("jcifs.smb.client.minVersion", "SMB202")
                 setProperty("jcifs.smb.client.maxVersion", "SMB311")
                 setProperty("jcifs.smb.client.connTimeout", "10000")
-                setProperty("jcifs.smb.client.sessionTimeout", "60000")
+                setProperty("jcifs.smb.client.sessionTimeout", "30000")
             }
             baseContext = BaseContext(PropertyConfiguration(props))
         }
         return if (username.isNotEmpty()) baseContext!!.withCredentials(NtlmPasswordAuthenticator(username, password)) else baseContext!!
     }
 
-    private fun getSafeSmbFile(url: String, context: CIFSContext): SmbFile {
-        if (!url.startsWith("smb://")) return SmbFile(url, context)
-        if (url.contains("%")) return SmbFile(url, context)
-        val parts = url.substring(6).split("/").filter { it.isNotEmpty() }
-        var file = SmbFile("smb://${parts[0]}/", context)
-        for (i in 1 until parts.size) {
-            file = SmbFile(file, parts[i] + if (i < parts.size - 1 || url.endsWith("/")) "/" else "")
-        }
-        return file
+    // 특수문자(# 등) 대응을 위한 최소한의 안전 장치
+    private fun getSafeUrl(url: String): String {
+        return if (url.contains("#") && !url.contains("%23")) {
+            url.replace("#", "%23")
+        } else url
     }
 
     override suspend fun listFiles(url: String): List<NasFile> = withContext(Dispatchers.IO) {
         try {
-            getSafeSmbFile(url, getContext()).listFiles()?.map { 
+            val smbFile = SmbFile(getSafeUrl(url), getContext())
+            smbFile.listFiles()?.map { 
                 NasFile(it.name.trim('/'), it.isDirectory, it.canonicalPath) 
             }?.sortedWith(compareBy({ !it.isDirectory }, { it.name })) ?: emptyList()
         } catch (e: Exception) { emptyList() }
     }
 
     override suspend fun getFileContent(url: String): ByteArray = withContext(Dispatchers.IO) {
-        try { getSafeSmbFile(url, getContext()).inputStream.use { it.readBytes() } } catch (e: Exception) { ByteArray(0) }
+        try { SmbFile(getSafeUrl(url), getContext()).inputStream.use { it.readBytes() } } catch (e: Exception) { ByteArray(0) }
     }
 
     override suspend fun downloadFile(url: String, destinationPath: String, onProgress: (Float) -> Unit) {}
@@ -73,12 +72,18 @@ class AndroidNasRepository private constructor() : NasRepository {
     private suspend fun kotlinx.coroutines.flow.FlowCollector<NasFile>.scanRecursive(url: String, depth: Int, max: Int) {
         if (depth > max) return
         try {
-            val smbFile = getSafeSmbFile(url, getContext())
+            val smbFile = SmbFile(getSafeUrl(url), getContext())
             val children = smbFile.listFiles() ?: return
+            
+            // 만화책이 있는 폴더인지 확인
             if (children.any { it.name.lowercase().let { n -> n.endsWith(".zip") || n.endsWith(".cbz") } }) {
                 emit(NasFile(smbFile.name.trim('/'), true, smbFile.canonicalPath))
+                // 만화 폴더를 찾았더라도 하위 폴더에 다른 작품이 있을 수 있으므로 계속 탐색
             }
-            children.filter { it.isDirectory }.forEach { scanRecursive(it.canonicalPath, depth + 1, max) }
+
+            children.filter { it.isDirectory }.forEach { 
+                scanRecursive(it.canonicalPath, depth + 1, max) 
+            }
         } catch (e: Exception) {}
     }
 }

@@ -1,20 +1,15 @@
 package org.nas.comicsviewer.data
 
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
-import org.json.JSONObject
 import java.io.File
-import java.net.HttpURLConnection
-import java.net.URL
 import java.security.MessageDigest
 
 actual fun providePosterRepository(): PosterRepository = AndroidPosterRepository.getInstance()
 
 class AndroidPosterRepository private constructor() : PosterRepository {
-    private val apiUrl = "https://graphql.anilist.co"
     private var database: ComicDatabase? = null
-    private val EMPTY_URL = "NOT_FOUND"
+    private val nasRepository: NasRepository by lazy { provideNasRepository() }
 
     companion object {
         @Volatile private var instance: AndroidPosterRepository? = null
@@ -31,103 +26,64 @@ class AndroidPosterRepository private constructor() : PosterRepository {
         dir
     }
 
-    override suspend fun searchPoster(title: String): String? {
-        val cleanQuery = title.trim()
-        if (cleanQuery.length < 2) return null
-        
-        val titleHash = md5(cleanQuery)
-        
-        // 1. DB 캐시 확인
-        val cachedResult = database?.posterCacheQueries?.getPoster(titleHash)?.executeAsOneOrNull()
-        if (cachedResult?.poster_url != null) {
-            return if (cachedResult.poster_url == EMPTY_URL) null else cachedResult.poster_url
-        }
-
-        // 2. API 검색
-        return withContext(Dispatchers.IO) {
-            val result = performSearchWithRetry(cleanQuery)
-            
-            // 결과 저장 (검색 실패 시에도 EMPTY_URL 저장하여 반복 검색 방지)
-            try {
-                database?.posterCacheQueries?.upsertPoster(
-                    title_hash = titleHash,
-                    poster_url = result ?: EMPTY_URL,
-                    cached_at = System.currentTimeMillis()
-                )
-            } catch (e: Exception) {
-                e.printStackTrace()
-            }
-            result
-        }
-    }
-
-    private suspend fun performSearchWithRetry(query: String): String? {
-        // 시도 1: 전체 제목
-        var result = executeAniListQuery(query)
-        if (result != null) return result
-
-        // 시도 2: 너무 긴 경우 잘라내어 시도 (앞에서부터 3단어 정도)
-        val words = query.split(" ")
-        if (words.size > 2) {
-            val shortened = words.take(3).joinToString(" ")
-            if (shortened != query) {
-                delay(100) // API 매너
-                result = executeAniListQuery(shortened)
-                if (result != null) return result
-            }
-        }
-        
-        return null
-    }
-
-    private fun executeAniListQuery(search: String): String? {
+    override suspend fun getMetadata(path: String): ComicMetadata = withContext(Dispatchers.IO) {
         try {
-            val query = """
-                query (${'$'}search: String) {
-                    Page(page: 1, perPage: 1) {
-                        media(search: ${'$'}search, type: MANGA, isAdult: false, sort: SEARCH_MATCH) {
-                            coverImage { extraLarge }
-                        }
+            // 폴더가 아닌 파일(ZIP) 경로가 들어온 경우 부모 폴더 경로를 사용
+            val targetPath = if (path.lowercase().endsWith(".zip") || path.lowercase().endsWith(".cbz")) {
+                path.substringBeforeLast("/") + "/"
+            } else path
+
+            val files = nasRepository.listFiles(targetPath)
+            if (files.isEmpty()) return@withContext ComicMetadata()
+
+            var metadata = ComicMetadata()
+            
+            // 1. kavita.yaml 찾기
+            val yamlFile = files.find { it.name.lowercase() == "kavita.yaml" }
+            if (yamlFile != null) {
+                val content = String(nasRepository.getFileContent(yamlFile.path))
+                metadata = metadata.copy(
+                    title = parseYamlValue(content, "localizedName") ?: parseYamlValue(content, "name"),
+                    author = parseYamlValue(content, "writer"),
+                    summary = parseYamlValue(content, "summary")
+                )
+                
+                // 지정된 커버 이미지 찾기
+                val coverFileName = parseYamlValue(content, "cover")
+                if (coverFileName != null) {
+                    val coverFile = files.find { it.name.equals(coverFileName, ignoreCase = true) }
+                    if (coverFile != null) {
+                        return@withContext metadata.copy(posterUrl = coverFile.path)
                     }
                 }
-            """.trimIndent()
-
-            val jsonBody = JSONObject().apply {
-                put("query", query)
-                put("variables", JSONObject().put("search", search))
             }
 
-            val conn = URL(apiUrl).openConnection() as HttpURLConnection
-            conn.apply {
-                requestMethod = "POST"
-                setRequestProperty("Content-Type", "application/json")
-                doOutput = true
-                connectTimeout = 8000
-                readTimeout = 8000
+            // 2. YAML에 커버 지정이 없거나 YAML이 없는 경우: 폴더 내 공통 이미지 찾기
+            val commonPosterNames = listOf("poster.jpg", "poster.png", "cover.jpg", "cover.png", "folder.jpg")
+            val posterFile = files.find { f -> commonPosterNames.any { it.equals(f.name, ignoreCase = true) } }
+            
+            if (posterFile != null) {
+                return@withContext metadata.copy(posterUrl = posterFile.path)
             }
 
-            conn.outputStream.use { it.write(jsonBody.toString().toByteArray()) }
-
-            val responseCode = conn.responseCode
-            if (responseCode == 200) {
-                val response = conn.inputStream.bufferedReader().use { it.readText() }
-                val mediaList = JSONObject(response).optJSONObject("data")
-                    ?.optJSONObject("Page")?.optJSONArray("media")
-                if (mediaList != null && mediaList.length() > 0) {
-                    return mediaList.getJSONObject(0).getJSONObject("coverImage").optString("extraLarge")
-                }
-            } else if (responseCode == 429) {
-                // Rate limit hit
-                System.err.println("AniList Rate Limit Hit!")
-            }
+            // 3. 마지막 수단: 폴더 내 첫 번째 이미지 파일 사용 (파일명 오름차순)
+            val firstImage = files.filter { !it.isDirectory }
+                .sortedBy { it.name }
+                .find { it.name.lowercase().let { n -> n.endsWith(".jpg") || n.endsWith(".jpeg") || n.endsWith(".png") || n.endsWith(".webp") } }
+                
+            return@withContext metadata.copy(posterUrl = firstImage?.path)
         } catch (e: Exception) {
-            e.printStackTrace()
+            ComicMetadata()
         }
-        return null
+    }
+
+    private fun parseYamlValue(content: String, key: String): String? {
+        // "key: value" 또는 "key: 'value'" 형태 대응
+        val regex = Regex("""^$key\s*:\s*["']?([^"'\n\r]+)["']?""", RegexOption.MULTILINE)
+        return regex.find(content)?.groupValues?.get(1)?.trim()
     }
 
     override suspend fun downloadImageFromUrl(url: String): ByteArray? {
-        if (url == EMPTY_URL) return null
         val urlHash = md5(url)
         val cacheFile = File(cacheDir, "img_$urlHash")
         
@@ -137,22 +93,12 @@ class AndroidPosterRepository private constructor() : PosterRepository {
 
         return withContext(Dispatchers.IO) {
             try {
-                val conn = URL(url).openConnection() as HttpURLConnection
-                conn.apply {
-                    connectTimeout = 10000
-                    readTimeout = 15000
+                val bytes = nasRepository.getFileContent(url)
+                if (bytes.isNotEmpty()) {
+                    cacheFile.writeBytes(bytes)
                 }
-                
-                if (conn.responseCode == 200) {
-                    val bytes = conn.inputStream.use { it.readBytes() }
-                    if (bytes.isNotEmpty()) {
-                        try { cacheFile.writeBytes(bytes) } catch (e: Exception) {}
-                    }
-                    bytes
-                } else null
-            } catch (e: Exception) {
-                null
-            }
+                bytes
+            } catch (e: Exception) { null }
         }
     }
 

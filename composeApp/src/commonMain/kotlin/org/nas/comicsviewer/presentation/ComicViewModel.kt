@@ -11,6 +11,7 @@ import kotlinx.coroutines.launch
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 
 data class ComicBrowserUiState(
     val categories: List<NasFile> = emptyList(),
@@ -23,7 +24,8 @@ data class ComicBrowserUiState(
     val currentPath: String? = null,
     val pathHistory: List<String> = emptyList(),
     val totalFoundCount: Int = 0,
-    val isSeriesView: Boolean = false
+    val isSeriesView: Boolean = false,
+    val isIntroShowing: Boolean = true
 )
 
 class ComicViewModel(
@@ -57,20 +59,22 @@ class ComicViewModel(
                 _uiState.update { it.copy(categories = categories) }
                 if (categories.isNotEmpty()) {
                     scanCategory(categories[0].path, 0)
+                } else {
+                    _uiState.update { it.copy(errorMessage = "서버에서 폴더 목록을 가져올 수 없습니다.") }
                 }
             } catch (e: Exception) {
-                _uiState.update { it.copy(errorMessage = "카테고리 로드 실패: ${e.message}") }
+                _uiState.update { it.copy(errorMessage = "연결 실패: ${e.message}") }
             } finally {
-                _uiState.update { it.copy(isLoading = false) }
+                // 어떤 경우에도 인트로는 닫아서 메인 UI를 보여줌
+                delay(500)
+                _uiState.update { it.copy(isLoading = false, isIntroShowing = false) }
             }
         }
     }
 
     fun onHome() {
         val categories = _uiState.value.categories
-        if (categories.isNotEmpty()) {
-            scanCategory(categories[0].path, 0)
-        }
+        if (categories.isNotEmpty()) scanCategory(categories[0].path, 0)
     }
 
     fun scanCategory(path: String, index: Int? = null, isBack: Boolean = false) {
@@ -98,16 +102,12 @@ class ComicViewModel(
             scanComicFoldersUseCase.execute(path)
                 .onCompletion { 
                     _uiState.update { it.copy(isScanning = false) } 
-                    loadNextPage()
+                    if (allScannedFiles.isNotEmpty() && _uiState.value.currentFiles.isEmpty()) loadNextPage()
                 }
                 .collect { file ->
                     allScannedFiles.add(file)
-                    // 발견될 때마다 이름순 정렬 유지
-                    allScannedFiles.sortWith(compareBy { it.name })
-                    
+                    allScannedFiles.sortBy { it.name }
                     _uiState.update { it.copy(totalFoundCount = allScannedFiles.size) }
-                    
-                    // 첫 페이지 분량만큼은 즉시 UI 반영
                     if (_uiState.value.currentFiles.size < PAGE_SIZE) {
                         _uiState.update { it.copy(currentFiles = allScannedFiles.take(PAGE_SIZE)) }
                     }
@@ -117,12 +117,9 @@ class ComicViewModel(
 
     fun loadNextPage() {
         if (_uiState.value.isSeriesView) return
-        
         val currentCount = _uiState.value.currentFiles.size
         if (allScannedFiles.size <= currentCount) return
-
-        val nextItems = allScannedFiles.take(currentCount + PAGE_SIZE)
-        _uiState.update { it.copy(currentFiles = nextItems) }
+        _uiState.update { it.copy(currentFiles = allScannedFiles.take(currentCount + PAGE_SIZE)) }
     }
 
     fun onFileClick(file: NasFile) {
@@ -130,39 +127,23 @@ class ComicViewModel(
             viewModelScope.launch { _onOpenZipRequested.emit(file) }
             return
         }
-
         scanJob?.cancel()
         allScannedFiles.clear()
-
         viewModelScope.launch {
             _uiState.update { it.copy(isLoading = true) }
             try {
                 val files = nasRepository.listFiles(file.path)
-                val zips = files.filter { 
-                    val n = it.name.lowercase()
-                    n.endsWith(".zip") || n.endsWith(".cbz") || n.endsWith(".rar") 
-                }
-                
+                val zips = files.filter { it.name.lowercase().let { n -> n.endsWith(".zip") || n.endsWith(".cbz") } }
                 if (zips.isNotEmpty()) {
                     val sortedZips = zips.sortedBy { it.name }
-                    _uiState.update { state ->
-                        state.copy(
-                            currentPath = file.path,
-                            pathHistory = state.pathHistory + file.path,
-                            currentFiles = sortedZips,
-                            isScanning = false,
-                            isLoading = false,
-                            totalFoundCount = sortedZips.size,
-                            isSeriesView = true
-                        )
-                    }
+                    _uiState.update { it.copy(currentPath = file.path, pathHistory = it.pathHistory + file.path, currentFiles = sortedZips, isLoading = false, isSeriesView = true) }
                     allScannedFiles.addAll(sortedZips)
                 } else {
                     _uiState.update { it.copy(isLoading = false) }
                     scanCategory(file.path)
                 }
             } catch (e: Exception) {
-                _uiState.update { it.copy(isLoading = false, errorMessage = e.message) }
+                _uiState.update { it.copy(isLoading = false, errorMessage = "폴더 접근 실패: ${e.message}") }
             }
         }
     }
@@ -171,20 +152,10 @@ class ComicViewModel(
         val history = _uiState.value.pathHistory
         if (history.size > 1) {
             val newHistory = history.dropLast(1)
-            val prevPath = newHistory.last()
-            val categoryIndex = _uiState.value.categories.indexOfFirst { it.path == prevPath }
             _uiState.update { it.copy(pathHistory = newHistory) }
-            scanCategory(prevPath, if (categoryIndex != -1) categoryIndex else null, isBack = true)
-        } else {
-            onHome()
-        }
+            scanCategory(newHistory.last(), isBack = true)
+        } else onHome()
     }
 
-    fun showError(message: String) {
-        _uiState.update { it.copy(errorMessage = message, isLoading = false) }
-    }
-
-    fun clearError() {
-        _uiState.update { it.copy(errorMessage = null) }
-    }
+    fun clearError() { _uiState.update { it.copy(errorMessage = null) } }
 }
