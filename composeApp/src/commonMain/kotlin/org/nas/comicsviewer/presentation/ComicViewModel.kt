@@ -11,7 +11,6 @@ import kotlinx.coroutines.launch
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.delay
 
 data class ComicBrowserUiState(
     val categories: List<NasFile> = emptyList(),
@@ -23,7 +22,8 @@ data class ComicBrowserUiState(
     val errorMessage: String? = null,
     val currentPath: String? = null,
     val pathHistory: List<String> = emptyList(),
-    val totalFoundCount: Int = 0
+    val totalFoundCount: Int = 0,
+    val isSeriesView: Boolean = false
 )
 
 class ComicViewModel(
@@ -59,7 +59,7 @@ class ComicViewModel(
                     scanCategory(categories[0].path, 0)
                 }
             } catch (e: Exception) {
-                _uiState.update { it.copy(errorMessage = "Failed to load categories: ${e.message}") }
+                _uiState.update { it.copy(errorMessage = "카테고리 로드 실패: ${e.message}") }
             } finally {
                 _uiState.update { it.copy(isLoading = false) }
             }
@@ -73,48 +73,56 @@ class ComicViewModel(
         }
     }
 
-    fun scanCategory(path: String, index: Int? = null) {
+    fun scanCategory(path: String, index: Int? = null, isBack: Boolean = false) {
         scanJob?.cancel()
         allScannedFiles.clear()
         
         scanJob = viewModelScope.launch {
             _uiState.update { state -> 
+                val newHistory = when {
+                    index != null -> listOf(path)
+                    isBack -> state.pathHistory
+                    else -> if (state.pathHistory.lastOrNull() == path) state.pathHistory else state.pathHistory + path
+                }
                 state.copy(
                     selectedCategoryIndex = index ?: state.selectedCategoryIndex,
                     currentPath = path,
-                    pathHistory = if (index != null) listOf(path) else state.pathHistory + path,
+                    pathHistory = newHistory,
                     isScanning = true, 
                     currentFiles = emptyList(),
-                    totalFoundCount = 0
+                    totalFoundCount = 0,
+                    isSeriesView = false
                 )
             }
             
             scanComicFoldersUseCase.execute(path)
                 .onCompletion { 
                     _uiState.update { it.copy(isScanning = false) } 
-                    if (_uiState.value.currentFiles.isEmpty() && allScannedFiles.isNotEmpty()) {
-                        loadNextPage()
-                    }
+                    loadNextPage()
                 }
                 .collect { file ->
                     allScannedFiles.add(file)
+                    // 발견될 때마다 이름순 정렬 유지
+                    allScannedFiles.sortWith(compareBy { it.name })
+                    
                     _uiState.update { it.copy(totalFoundCount = allScannedFiles.size) }
                     
-                    if (allScannedFiles.size <= PAGE_SIZE) {
-                        _uiState.update { it.copy(currentFiles = allScannedFiles.toList()) }
+                    // 첫 페이지 분량만큼은 즉시 UI 반영
+                    if (_uiState.value.currentFiles.size < PAGE_SIZE) {
+                        _uiState.update { it.copy(currentFiles = allScannedFiles.take(PAGE_SIZE)) }
                     }
                 }
         }
     }
 
     fun loadNextPage() {
+        if (_uiState.value.isSeriesView) return
+        
         val currentCount = _uiState.value.currentFiles.size
         if (allScannedFiles.size <= currentCount) return
 
-        val nextItems = allScannedFiles.drop(currentCount).take(PAGE_SIZE)
-        if (nextItems.isNotEmpty()) {
-            _uiState.update { it.copy(currentFiles = it.currentFiles + nextItems) }
-        }
+        val nextItems = allScannedFiles.take(currentCount + PAGE_SIZE)
+        _uiState.update { it.copy(currentFiles = nextItems) }
     }
 
     fun onFileClick(file: NasFile) {
@@ -123,31 +131,32 @@ class ComicViewModel(
             return
         }
 
+        scanJob?.cancel()
+        allScannedFiles.clear()
+
         viewModelScope.launch {
             _uiState.update { it.copy(isLoading = true) }
             try {
                 val files = nasRepository.listFiles(file.path)
-                val zips = files.filter { it.name.lowercase().endsWith(".zip") || it.name.lowercase().endsWith(".cbz") }
+                val zips = files.filter { 
+                    val n = it.name.lowercase()
+                    n.endsWith(".zip") || n.endsWith(".cbz") || n.endsWith(".rar") 
+                }
                 
                 if (zips.isNotEmpty()) {
-                    if (zips.size == 1) {
-                        _onOpenZipRequested.emit(zips[0])
-                        _uiState.update { it.copy(isLoading = false) }
-                    } else {
-                        val sortedZips = zips.sortedBy { it.name }
-                        _uiState.update { state ->
-                            state.copy(
-                                currentPath = file.path,
-                                pathHistory = state.pathHistory + file.path,
-                                currentFiles = sortedZips,
-                                isScanning = false,
-                                isLoading = false,
-                                totalFoundCount = sortedZips.size
-                            )
-                        }
-                        allScannedFiles.clear()
-                        allScannedFiles.addAll(sortedZips)
+                    val sortedZips = zips.sortedBy { it.name }
+                    _uiState.update { state ->
+                        state.copy(
+                            currentPath = file.path,
+                            pathHistory = state.pathHistory + file.path,
+                            currentFiles = sortedZips,
+                            isScanning = false,
+                            isLoading = false,
+                            totalFoundCount = sortedZips.size,
+                            isSeriesView = true
+                        )
                     }
+                    allScannedFiles.addAll(sortedZips)
                 } else {
                     _uiState.update { it.copy(isLoading = false) }
                     scanCategory(file.path)
@@ -159,14 +168,23 @@ class ComicViewModel(
     }
 
     fun onBack() {
-        if (_uiState.value.pathHistory.size > 1) {
-            val newHistory = _uiState.value.pathHistory.dropLast(1)
+        val history = _uiState.value.pathHistory
+        if (history.size > 1) {
+            val newHistory = history.dropLast(1)
             val prevPath = newHistory.last()
-            
             val categoryIndex = _uiState.value.categories.indexOfFirst { it.path == prevPath }
-            
-            scanCategory(prevPath, if (categoryIndex != -1) categoryIndex else null)
             _uiState.update { it.copy(pathHistory = newHistory) }
+            scanCategory(prevPath, if (categoryIndex != -1) categoryIndex else null, isBack = true)
+        } else {
+            onHome()
         }
+    }
+
+    fun showError(message: String) {
+        _uiState.update { it.copy(errorMessage = message, isLoading = false) }
+    }
+
+    fun clearError() {
+        _uiState.update { it.copy(errorMessage = null) }
     }
 }

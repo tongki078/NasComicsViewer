@@ -14,9 +14,10 @@ interface NasRepository {
     suspend fun getFileContent(url: String): ByteArray
     suspend fun downloadFile(url: String, destinationPath: String, onProgress: (Float) -> Unit)
     fun getTempFilePath(fileName: String): String
-    
-    // Returns a Flow that emits comic folders as they are found
     fun scanComicFolders(url: String, maxDepth: Int = 3): Flow<NasFile>
+    
+    // Add method to get credentials for other managers
+    fun getCredentials(): Pair<String, String>
 }
 
 expect fun provideNasRepository(): NasRepository

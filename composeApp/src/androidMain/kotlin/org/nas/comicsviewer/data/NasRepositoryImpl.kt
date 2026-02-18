@@ -36,6 +36,10 @@ class AndroidNasRepository private constructor() : NasRepository {
         this.username = username
         this.password = password
     }
+    
+    override fun getCredentials(): Pair<String, String> {
+        return Pair(username, password)
+    }
 
     private fun getContext(): CIFSContext {
         if (baseContext == null) {
@@ -43,38 +47,43 @@ class AndroidNasRepository private constructor() : NasRepository {
                 setProperty("jcifs.smb.client.minVersion", "SMB202")
                 setProperty("jcifs.smb.client.maxVersion", "SMB311")
                 setProperty("jcifs.smb.client.ipcSigningEnforced", "false")
-                // Disable resource intensive features
-                setProperty("jcifs.smb.client.connTimeout", "5000")
-                setProperty("jcifs.smb.client.sessionTimeout", "10000")
+                setProperty("jcifs.smb.client.connTimeout", "10000")
+                setProperty("jcifs.smb.client.sessionTimeout", "30000")
             }
             val config = PropertyConfiguration(properties)
             baseContext = BaseContext(config)
         }
-
         var context = baseContext!!
         if (username.isNotEmpty()) {
             val auth = NtlmPasswordAuthenticator(username, password)
             context = context.withCredentials(auth)
         }
-
         return context
+    }
+
+    // 획기적인 경로 보호: 모든 특수문자를 안전하게 변환
+    private fun getSafeUrl(url: String): String {
+        return url.replace("%", "%25")
+                  .replace("#", "%23")
+                  .replace("[", "%5B")
+                  .replace("]", "%5D")
+                  .replace("{", "%7B")
+                  .replace("}", "%7D")
+                  .replace(" ", "%20")
+                  .replace("^", "%5E")
     }
 
     override suspend fun listFiles(url: String): List<NasFile> {
         return withContext(Dispatchers.IO) {
             try {
                 val context = getContext()
-                val smbFile = SmbFile(url, context)
-
+                val smbFile = SmbFile(getSafeUrl(url), context)
                 if (smbFile.isDirectory) {
                     smbFile.listFiles()?.map { file ->
-                        val fileName = file.name
-                        val nextUrl = if (url.endsWith("/")) "$url$fileName" else "$url/$fileName"
-
                         NasFile(
-                            name = fileName.trim('/'),
+                            name = file.name.trim('/'),
                             isDirectory = file.isDirectory,
-                            path = nextUrl
+                            path = file.canonicalPath
                         )
                     }?.sortedWith(compareBy({ !it.isDirectory }, { it.name })) ?: emptyList()
                 } else {
@@ -91,7 +100,7 @@ class AndroidNasRepository private constructor() : NasRepository {
         return withContext(Dispatchers.IO) {
             try {
                 val context = getContext()
-                val smbFile = SmbFile(url, context)
+                val smbFile = SmbFile(getSafeUrl(url), context)
                 smbFile.inputStream.use { it.readBytes() }
             } catch (e: Exception) {
                 e.printStackTrace()
@@ -104,25 +113,19 @@ class AndroidNasRepository private constructor() : NasRepository {
         withContext(Dispatchers.IO) {
             try {
                 val context = getContext()
-                val smbFile = SmbFile(url, context)
+                val smbFile = SmbFile(getSafeUrl(url), context)
                 val destinationFile = File(destinationPath)
-                
                 destinationFile.parentFile?.mkdirs()
-
                 val totalBytes = smbFile.length()
                 var bytesReadTotal = 0L
-                val buffer = ByteArray(16384) // 16KB buffer for faster download
-
+                val buffer = ByteArray(16384) 
                 smbFile.inputStream.use { input ->
                     FileOutputStream(destinationFile).use { output ->
                         var bytesRead: Int
                         while (input.read(buffer).also { bytesRead = it } != -1) {
                             output.write(buffer, 0, bytesRead)
                             bytesReadTotal += bytesRead
-                            
-                            if (totalBytes > 0) {
-                                onProgress(bytesReadTotal.toFloat() / totalBytes)
-                            }
+                            if (totalBytes > 0) onProgress(bytesReadTotal.toFloat() / totalBytes)
                         }
                     }
                 }
@@ -140,44 +143,28 @@ class AndroidNasRepository private constructor() : NasRepository {
     }
 
     override fun scanComicFolders(url: String, maxDepth: Int): Flow<NasFile> = flow {
-        scanRecursiveEmit(url, 0, maxDepth)
+        scanRecursiveEmit(url, 0, 5) // 충분한 깊이로 탐색
     }.flowOn(Dispatchers.IO)
 
     private suspend fun kotlinx.coroutines.flow.FlowCollector<NasFile>.scanRecursiveEmit(url: String, currentDepth: Int, maxDepth: Int) {
         if (currentDepth > maxDepth) return
-        
         try {
             val context = getContext() 
-            val smbFile = SmbFile(url, context)
-            
+            val smbFile = SmbFile(getSafeUrl(url), context)
             if (!smbFile.isDirectory) return
-
             val files = smbFile.listFiles() ?: return
-            
             val hasComics = files.any { 
                 val n = it.name.lowercase()
-                !it.isDirectory && (n.endsWith(".zip") || n.endsWith(".cbz"))
+                !it.isDirectory && (n.endsWith(".zip") || n.endsWith(".cbz") || n.endsWith(".rar"))
             }
-
             if (hasComics) {
-                val folderName = smbFile.name.trimEnd('/')
-                emit(NasFile(
-                    name = folderName,
-                    isDirectory = true,
-                    path = url
-                ))
-                return 
+                emit(NasFile(name = smbFile.name.trim('/'), isDirectory = true, path = smbFile.canonicalPath))
             }
-
             files.filter { it.isDirectory }
                 .sortedBy { it.name }
                 .forEach { subFolder ->
-                    val subName = subFolder.name
-                    val nextUrl = if (url.endsWith("/")) "$url$subName" else "$url/$subName"
-                    scanRecursiveEmit(nextUrl, currentDepth + 1, maxDepth)
+                    scanRecursiveEmit(subFolder.canonicalPath, currentDepth + 1, maxDepth)
                 }
-        } catch (e: Exception) {
-            // Ignore errors
-        }
+        } catch (e: Exception) {}
     }
 }
