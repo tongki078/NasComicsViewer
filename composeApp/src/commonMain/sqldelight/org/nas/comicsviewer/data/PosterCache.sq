@@ -1,0 +1,12 @@
+CREATE TABLE poster_cache (
+    title_hash TEXT NOT NULL PRIMARY KEY,
+    poster_url TEXT,
+    cached_at INTEGER NOT NULL
+);
+
+upsertPoster:
+INSERT OR REPLACE INTO poster_cache (title_hash, poster_url, cached_at)
+VALUES (?, ?, ?);
+
+getPoster:
+SELECT poster_url FROM poster_cache WHERE title_hash = ?;

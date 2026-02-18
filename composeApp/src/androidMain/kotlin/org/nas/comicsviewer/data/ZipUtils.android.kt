@@ -1,5 +1,6 @@
 package org.nas.comicsviewer.data
 
+import org.nas.comicsviewer.domain.model.ComicInfo
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.util.zip.ZipFile
@@ -44,6 +45,26 @@ class AndroidZipManager : ZipManager {
             }
         } catch (e: Exception) {
             e.printStackTrace()
+            null
+        }
+    }
+
+    override fun getComicInfo(zipPath: String): ComicInfo? {
+        return try {
+            ZipFile(zipPath).use { zip ->
+                val entry = zip.getEntry("ComicInfo.xml") ?: return null
+                zip.getInputStream(entry).use { input ->
+                    val content = input.reader().readText()
+                    
+                    // Simple XML parsing
+                    val series = content.substringAfter("<Series>", "").substringBefore("</Series>", "")
+                    val title = content.substringAfter("<Title>", "").substringBefore("</Title>", "")
+                    // Add other fields as needed...
+                    
+                    ComicInfo(series = series.ifEmpty { null }, title = title.ifEmpty { null })
+                }
+            }
+        } catch (e: Exception) {
             null
         }
     }

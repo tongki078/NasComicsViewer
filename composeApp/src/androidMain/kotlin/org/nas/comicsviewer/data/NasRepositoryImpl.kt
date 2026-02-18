@@ -14,12 +14,23 @@ import java.io.File
 import java.io.FileOutputStream
 import java.util.Properties
 
-actual fun provideNasRepository(): NasRepository = AndroidNasRepository()
+actual fun provideNasRepository(): NasRepository = AndroidNasRepository.getInstance()
 
-class AndroidNasRepository : NasRepository {
+class AndroidNasRepository private constructor() : NasRepository {
 
     private var username = ""
     private var password = ""
+    private var baseContext: CIFSContext? = null
+
+    companion object {
+        @Volatile
+        private var instance: AndroidNasRepository? = null
+        fun getInstance(): AndroidNasRepository {
+            return instance ?: synchronized(this) {
+                instance ?: AndroidNasRepository().also { instance = it }
+            }
+        }
+    }
 
     override fun setCredentials(username: String, password: String) {
         this.username = username
@@ -27,14 +38,20 @@ class AndroidNasRepository : NasRepository {
     }
 
     private fun getContext(): CIFSContext {
-        val properties = Properties().apply {
-            setProperty("jcifs.smb.client.minVersion", "SMB202")
-            setProperty("jcifs.smb.client.maxVersion", "SMB311")
-            setProperty("jcifs.smb.client.ipcSigningEnforced", "false")
+        if (baseContext == null) {
+            val properties = Properties().apply {
+                setProperty("jcifs.smb.client.minVersion", "SMB202")
+                setProperty("jcifs.smb.client.maxVersion", "SMB311")
+                setProperty("jcifs.smb.client.ipcSigningEnforced", "false")
+                // Disable resource intensive features
+                setProperty("jcifs.smb.client.connTimeout", "5000")
+                setProperty("jcifs.smb.client.sessionTimeout", "10000")
+            }
+            val config = PropertyConfiguration(properties)
+            baseContext = BaseContext(config)
         }
-        val config = PropertyConfiguration(properties)
-        var context: CIFSContext = BaseContext(config)
 
+        var context = baseContext!!
         if (username.isNotEmpty()) {
             val auth = NtlmPasswordAuthenticator(username, password)
             context = context.withCredentials(auth)
@@ -45,21 +62,26 @@ class AndroidNasRepository : NasRepository {
 
     override suspend fun listFiles(url: String): List<NasFile> {
         return withContext(Dispatchers.IO) {
-            val context = getContext()
-            val smbFile = SmbFile(url, context)
+            try {
+                val context = getContext()
+                val smbFile = SmbFile(url, context)
 
-            if (smbFile.isDirectory) {
-                smbFile.listFiles().map { file ->
-                    val fileName = file.name
-                    val nextUrl = if (url.endsWith("/")) "$url$fileName" else "$url/$fileName"
+                if (smbFile.isDirectory) {
+                    smbFile.listFiles()?.map { file ->
+                        val fileName = file.name
+                        val nextUrl = if (url.endsWith("/")) "$url$fileName" else "$url/$fileName"
 
-                    NasFile(
-                        name = fileName.trim('/'),
-                        isDirectory = file.isDirectory,
-                        path = nextUrl
-                    )
-                }.sortedWith(compareBy({ !it.isDirectory }, { it.name }))
-            } else {
+                        NasFile(
+                            name = fileName.trim('/'),
+                            isDirectory = file.isDirectory,
+                            path = nextUrl
+                        )
+                    }?.sortedWith(compareBy({ !it.isDirectory }, { it.name })) ?: emptyList()
+                } else {
+                    emptyList()
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
                 emptyList()
             }
         }
@@ -80,31 +102,35 @@ class AndroidNasRepository : NasRepository {
 
     override suspend fun downloadFile(url: String, destinationPath: String, onProgress: (Float) -> Unit) {
         withContext(Dispatchers.IO) {
-            val context = getContext()
-            val smbFile = SmbFile(url, context)
-            val destinationFile = File(destinationPath)
-            
-            // Ensure parent dirs exist
-            destinationFile.parentFile?.mkdirs()
+            try {
+                val context = getContext()
+                val smbFile = SmbFile(url, context)
+                val destinationFile = File(destinationPath)
+                
+                destinationFile.parentFile?.mkdirs()
 
-            val totalBytes = smbFile.length()
-            var bytesReadTotal = 0L
-            val buffer = ByteArray(8192) // 8KB buffer
+                val totalBytes = smbFile.length()
+                var bytesReadTotal = 0L
+                val buffer = ByteArray(16384) // 16KB buffer for faster download
 
-            smbFile.inputStream.use { input ->
-                FileOutputStream(destinationFile).use { output ->
-                    var bytesRead: Int
-                    while (input.read(buffer).also { bytesRead = it } != -1) {
-                        output.write(buffer, 0, bytesRead)
-                        bytesReadTotal += bytesRead
-                        
-                        if (totalBytes > 0) {
-                            onProgress(bytesReadTotal.toFloat() / totalBytes)
+                smbFile.inputStream.use { input ->
+                    FileOutputStream(destinationFile).use { output ->
+                        var bytesRead: Int
+                        while (input.read(buffer).also { bytesRead = it } != -1) {
+                            output.write(buffer, 0, bytesRead)
+                            bytesReadTotal += bytesRead
+                            
+                            if (totalBytes > 0) {
+                                onProgress(bytesReadTotal.toFloat() / totalBytes)
+                            }
                         }
                     }
                 }
+                onProgress(1f)
+            } catch (e: Exception) {
+                e.printStackTrace()
+                throw e
             }
-            onProgress(1f) // Ensure 100% at end
         }
     }
 
@@ -121,13 +147,6 @@ class AndroidNasRepository : NasRepository {
         if (currentDepth > maxDepth) return
         
         try {
-            // Re-create context? Usually reusing context is safer but here we need to ensure thread safety?
-            // Since this is in flow context, sequential?
-            // Better to instantiate context fresh or ensure thread safety.
-            // But for simplicity, let's just assume `getContext()` creates fresh or safe context.
-            // Our getContext() creates new context every time, which is heavy but safe.
-            // Ideally optimize context creation. For now keep simple.
-            
             val context = getContext() 
             val smbFile = SmbFile(url, context)
             
@@ -135,14 +154,12 @@ class AndroidNasRepository : NasRepository {
 
             val files = smbFile.listFiles() ?: return
             
-            // Check if this folder contains comic files (ZIP/CBZ)
             val hasComics = files.any { 
                 val n = it.name.lowercase()
                 !it.isDirectory && (n.endsWith(".zip") || n.endsWith(".cbz"))
             }
 
             if (hasComics) {
-                // Found! Emit result
                 val folderName = smbFile.name.trimEnd('/')
                 emit(NasFile(
                     name = folderName,
@@ -152,7 +169,6 @@ class AndroidNasRepository : NasRepository {
                 return 
             }
 
-            // Go deeper - Sort subfolders to emit in order
             files.filter { it.isDirectory }
                 .sortedBy { it.name }
                 .forEach { subFolder ->
