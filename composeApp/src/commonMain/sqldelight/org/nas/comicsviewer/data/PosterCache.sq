@@ -4,9 +4,27 @@ CREATE TABLE poster_cache (
     cached_at INTEGER NOT NULL
 );
 
+CREATE TABLE recent_search (
+    query TEXT NOT NULL PRIMARY KEY,
+    searched_at INTEGER NOT NULL
+);
+
 upsertPoster:
 INSERT OR REPLACE INTO poster_cache (title_hash, poster_url, cached_at)
 VALUES (?, ?, ?);
 
 getPoster:
 SELECT poster_url FROM poster_cache WHERE title_hash = ?;
+
+insertRecentSearch:
+INSERT OR REPLACE INTO recent_search (query, searched_at)
+VALUES (?, ?);
+
+getRecentSearches:
+SELECT query FROM recent_search ORDER BY searched_at DESC LIMIT 10;
+
+deleteRecentSearch:
+DELETE FROM recent_search WHERE query = ?;
+
+clearRecentSearches:
+DELETE FROM recent_search;

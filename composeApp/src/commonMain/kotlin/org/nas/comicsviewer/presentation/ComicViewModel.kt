@@ -23,7 +23,12 @@ data class ComicBrowserUiState(
     val isIntroShowing: Boolean = true,
     val selectedMetadata: ComicMetadata? = null,
     val seriesEpisodes: List<NasFile> = emptyList(),
-    val selectedZipPath: String? = null
+    val selectedZipPath: String? = null,
+    // 검색 관련 상태
+    val isSearchMode: Boolean = false,
+    val searchQuery: String = "",
+    val searchResults: List<NasFile> = emptyList(),
+    val recentSearches: List<String> = emptyList()
 )
 
 class ComicViewModel(
@@ -38,9 +43,13 @@ class ComicViewModel(
     val uiState: StateFlow<ComicBrowserUiState> = _uiState.asStateFlow()
 
     private var scanJob: Job? = null
-    private var prefetchJob: Job? = null // 백그라운드 수집용 잡
+    private var prefetchJob: Job? = null
     private val allScannedFiles = mutableListOf<NasFile>()
     private val PAGE_SIZE = 24
+
+    init {
+        loadRecentSearches()
+    }
 
     fun initialize(rootUrl: String, username: String, password: String) {
         setCredentialsUseCase.execute(username, password)
@@ -70,7 +79,7 @@ class ComicViewModel(
 
     fun scanCategory(path: String, index: Int? = null, isBack: Boolean = false) {
         scanJob?.cancel()
-        prefetchJob?.cancel() // 새 스캔 시작 시 이전 수집 중단
+        prefetchJob?.cancel()
         allScannedFiles.clear()
         
         scanJob = viewModelScope.launch {
@@ -89,7 +98,8 @@ class ComicViewModel(
                     isSeriesView = false,
                     selectedMetadata = null,
                     seriesEpisodes = emptyList(),
-                    selectedZipPath = null
+                    selectedZipPath = null,
+                    isSearchMode = false
                 )
             }
             scanComicFoldersUseCase.execute(path).collect { file ->
@@ -100,27 +110,21 @@ class ComicViewModel(
                 }
             }
             _uiState.update { it.copy(isScanning = false) }
-            
-            // [획기적 추가] 스캔 완료 후 백그라운드에서 포스터 미리 수집 시작
             startPosterPrefetch()
         }
     }
 
-    // 백그라운드에서 모든 만화의 포스터를 하나씩 미리 캐싱하는 로직
     private fun startPosterPrefetch() {
         prefetchJob = viewModelScope.launch {
             allScannedFiles.forEach { file ->
-                // 이미 캐시된 포스터가 있는지 확인하고 없으면 가져옴
-                // PosterRepository.getMetadata 내부에서 SQLite 캐시를 확인하므로 안전함
                 posterRepository.getMetadata(file.path)
-                // NAS 부하 방지를 위해 0.5초 간격으로 조용히 작업
                 delay(500)
             }
         }
     }
 
     fun loadNextPage() {
-        if (_uiState.value.isSeriesView) return
+        if (_uiState.value.isSeriesView || _uiState.value.isSearchMode) return
         val currentCount = _uiState.value.currentFiles.size
         _uiState.update { it.copy(currentFiles = allScannedFiles.take(currentCount + PAGE_SIZE)) }
     }
@@ -149,7 +153,8 @@ class ComicViewModel(
                         isLoading = false,
                         isSeriesView = true,
                         selectedMetadata = metadata,
-                        selectedZipPath = null
+                        selectedZipPath = null,
+                        isSearchMode = false
                     ) }
                 } else {
                     _uiState.update { it.copy(isLoading = false) }
@@ -161,11 +166,64 @@ class ComicViewModel(
         }
     }
 
+    // 검색 관련 함수 추가
+    fun toggleSearchMode(enabled: Boolean) {
+        _uiState.update { it.copy(isSearchMode = enabled, searchQuery = "", searchResults = emptyList()) }
+        if (enabled) loadRecentSearches()
+    }
+
+    fun updateSearchQuery(query: String) {
+        _uiState.update { it.copy(searchQuery = query) }
+        if (query.length >= 2) {
+            performSearch(query)
+        } else {
+            _uiState.update { it.copy(searchResults = emptyList()) }
+        }
+    }
+
+    private fun performSearch(query: String) {
+        val results = allScannedFiles.filter { it.name.contains(query, ignoreCase = true) }
+        _uiState.update { it.copy(searchResults = results) }
+    }
+
+    fun onSearchSubmit(query: String) {
+        if (query.isBlank()) return
+        viewModelScope.launch {
+            try {
+                posterRepository.insertRecentSearch(query)
+                loadRecentSearches()
+            } catch (e: Exception) { e.printStackTrace() }
+        }
+        performSearch(query)
+    }
+
+    private fun loadRecentSearches() {
+        viewModelScope.launch {
+            try {
+                val history = posterRepository.getRecentSearches()
+                _uiState.update { it.copy(recentSearches = history) }
+            } catch (e: Exception) { e.printStackTrace() }
+        }
+    }
+
+    fun clearRecentSearches() {
+        viewModelScope.launch {
+            try {
+                posterRepository.clearRecentSearches()
+                loadRecentSearches()
+            } catch (e: Exception) { e.printStackTrace() }
+        }
+    }
+
     fun closeViewer() {
         _uiState.update { it.copy(selectedZipPath = null) }
     }
 
     fun onBack() {
+        if (_uiState.value.isSearchMode) {
+            toggleSearchMode(false)
+            return
+        }
         if (_uiState.value.selectedZipPath != null) {
             closeViewer()
             return

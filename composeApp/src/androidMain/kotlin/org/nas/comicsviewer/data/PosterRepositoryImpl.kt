@@ -5,7 +5,6 @@ import kotlinx.coroutines.withContext
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
-import java.security.MessageDigest
 import java.nio.charset.Charset
 
 actual fun providePosterRepository(): PosterRepository = AndroidPosterRepository.getInstance()
@@ -39,9 +38,9 @@ class AndroidPosterRepository private constructor() : PosterRepository {
             val cached = database?.posterCacheQueries?.getPoster(pathHash)?.executeAsOneOrNull()
             if (cached?.poster_url != null && cached.poster_url != NOT_FOUND && cached.poster_url.contains("|||")) {
                 val parts = cached.poster_url.split("|||")
-                if (parts.size >= 4 && parts[0].isNotBlank()) {
+                if (parts.size >= 4) {
                     return@withContext ComicMetadata(
-                        posterUrl = parts[0],
+                        posterUrl = parts[0].ifBlank { null },
                         title = parts[1].ifBlank { null },
                         author = parts[2].ifBlank { null },
                         summary = parts[3].ifBlank { null }
@@ -89,7 +88,6 @@ class AndroidPosterRepository private constructor() : PosterRepository {
             if (posterPath == null) {
                 val firstZip = files.find { it.name.lowercase().let { n -> n.endsWith(".zip") || n.endsWith(".cbz") } }
                 if (firstZip != null) {
-                    // 압축 파일 자체를 썸네일 소스로 지정 (나중에 download 단계에서 처리)
                     posterPath = "zip_thumb://${firstZip.path}"
                 }
             }
@@ -107,6 +105,35 @@ class AndroidPosterRepository private constructor() : PosterRepository {
             ComicMetadata()
         }
     }
+
+    // --- 검색 관련 메서드 구현 ---
+    override suspend fun insertRecentSearch(query: String) {
+        withContext(Dispatchers.IO) {
+            try {
+                database?.posterCacheQueries?.insertRecentSearch(query, System.currentTimeMillis())
+            } catch (e: Exception) { e.printStackTrace() }
+        }
+    }
+
+    override suspend fun getRecentSearches(): List<String> {
+        return withContext(Dispatchers.IO) {
+            try {
+                database?.posterCacheQueries?.getRecentSearches()?.executeAsList() ?: emptyList()
+            } catch (e: Exception) { 
+                e.printStackTrace()
+                emptyList() 
+            }
+        }
+    }
+
+    override suspend fun clearRecentSearches() {
+        withContext(Dispatchers.IO) {
+            try {
+                database?.posterCacheQueries?.clearRecentSearches()
+            } catch (e: Exception) { e.printStackTrace() }
+        }
+    }
+    // -------------------------
 
     private fun parseAggressive(content: String, key: String): String? {
         val regex = Regex("""(?i)$key\s*:\s*["']?([^"'\r\n]+)""", RegexOption.MULTILINE)
@@ -135,31 +162,32 @@ class AndroidPosterRepository private constructor() : PosterRepository {
 
         return withContext(Dispatchers.IO) {
             try {
+                var bytes: ByteArray? = null
                 if (url.startsWith("http")) {
                     val conn = URL(url).openConnection() as HttpURLConnection
                     conn.connectTimeout = 10000; conn.readTimeout = 15000
                     if (conn.responseCode == 200) {
-                        val bytes = conn.inputStream.use { it.readBytes() }
-                        if (bytes.isNotEmpty()) cacheFile.writeBytes(bytes)
-                        bytes
-                    } else null
+                        bytes = conn.inputStream.use { it.readBytes() }
+                    }
                 } else if (url.startsWith("zip_thumb://")) {
-                    // [획기적 추가] 압축 파일에서 첫 페이지 추출 로직
                     val zipPath = url.substring(12)
-                    var thumbBytes: ByteArray? = null
                     try {
-                        zipManager.streamAllImages(zipPath, {}) { _, bytes ->
-                            thumbBytes = bytes
-                            throw Exception("STOP") // 첫 장만 얻고 즉시 중단
+                        // 첫 장만 읽고 예외를 던져 중단시키는 방식 (효율성)
+                        zipManager.streamAllImages(zipPath, {}) { _, b ->
+                            bytes = b
+                            throw Exception("STOP_READING")
                         }
-                    } catch (e: Exception) { }
-                    if (thumbBytes != null) cacheFile.writeBytes(thumbBytes!!)
-                    thumbBytes
+                    } catch (e: Exception) { 
+                        if (e.message != "STOP_READING") e.printStackTrace() 
+                    }
                 } else {
-                    val bytes = nasRepository.getFileContent(url)
-                    if (bytes.isNotEmpty()) cacheFile.writeBytes(bytes)
-                    bytes
+                    bytes = nasRepository.getFileContent(url)
                 }
+                
+                if (bytes != null && bytes!!.isNotEmpty()) {
+                    cacheFile.writeBytes(bytes!!)
+                    bytes
+                } else null
             } catch (e: Exception) { null }
         }
     }

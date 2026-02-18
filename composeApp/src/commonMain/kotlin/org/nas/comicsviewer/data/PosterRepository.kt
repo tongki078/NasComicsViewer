@@ -8,11 +8,14 @@ data class ComicMetadata(
 )
 
 interface PosterRepository {
-    // 획기적 변경: 포스터 주소뿐만 아니라 메타데이터 전체를 가져옴
     suspend fun getMetadata(path: String): ComicMetadata
-    
     suspend fun downloadImageFromUrl(url: String): ByteArray?
     fun setDatabase(database: ComicDatabase)
+    
+    // 검색 기록 관련
+    suspend fun insertRecentSearch(query: String)
+    suspend fun getRecentSearches(): List<String>
+    suspend fun clearRecentSearches()
 }
 
 expect fun providePosterRepository(): PosterRepository
