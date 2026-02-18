@@ -1,5 +1,8 @@
 package org.nas.comicsviewer.data
 
+import kotlinx.serialization.Serializable // 추가
+
+@Serializable // 추가
 data class ComicMetadata(
     val title: String? = null,
     val author: String? = null,

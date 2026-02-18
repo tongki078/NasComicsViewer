@@ -1,7 +1,9 @@
 package org.nas.comicsviewer.data
 
 import kotlinx.coroutines.flow.Flow
+import kotlinx.serialization.Serializable // 추가
 
+@Serializable // 추가
 data class NasFile(
     val name: String,
     val isDirectory: Boolean,
