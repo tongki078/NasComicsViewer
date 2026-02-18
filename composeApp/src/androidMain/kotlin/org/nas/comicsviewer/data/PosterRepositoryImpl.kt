@@ -6,12 +6,14 @@ import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
 import java.security.MessageDigest
+import java.nio.charset.Charset
 
 actual fun providePosterRepository(): PosterRepository = AndroidPosterRepository.getInstance()
 
 class AndroidPosterRepository private constructor() : PosterRepository {
     private var database: ComicDatabase? = null
     private val nasRepository: NasRepository by lazy { provideNasRepository() }
+    private val zipManager: ZipManager by lazy { provideZipManager() }
     private val NOT_FOUND = "NOT_FOUND"
 
     companion object {
@@ -31,31 +33,27 @@ class AndroidPosterRepository private constructor() : PosterRepository {
 
     override suspend fun getMetadata(path: String): ComicMetadata = withContext(Dispatchers.IO) {
         val pathHash = md5(path)
-        println("DEBUG_POSTER: [STEP 1] Start scanning path: $path")
         
-        // 1. DB 캐시 확인 및 복구
+        // 1. DB 캐시 확인
         try {
             val cached = database?.posterCacheQueries?.getPoster(pathHash)?.executeAsOneOrNull()
-            if (cached?.poster_url != null && cached.poster_url != NOT_FOUND) {
-                println("DEBUG_POSTER: [CACHE] Found in DB: ${cached.poster_url}")
+            if (cached?.poster_url != null && cached.poster_url != NOT_FOUND && cached.poster_url.contains("|||")) {
                 val parts = cached.poster_url.split("|||")
-                if (parts.size >= 4) {
+                if (parts.size >= 4 && parts[0].isNotBlank()) {
                     return@withContext ComicMetadata(
-                        posterUrl = parts[0].ifBlank { null },
+                        posterUrl = parts[0],
                         title = parts[1].ifBlank { null },
                         author = parts[2].ifBlank { null },
                         summary = parts[3].ifBlank { null }
                     )
                 }
             }
-        } catch (e: Exception) {
-            println("DEBUG_POSTER: [ERROR] Cache check fail: ${e.message}")
-        }
+        } catch (e: Exception) { }
 
-        // 2. 실시간 스캔 및 데이터 수집
+        // 2. 실시간 스캔
         try {
             val files = nasRepository.listFiles(path)
-            println("DEBUG_POSTER: [STEP 2] Files in folder: ${files.map { it.name }}")
+            if (files.isEmpty()) return@withContext ComicMetadata()
 
             var metadata = ComicMetadata()
             var posterPath: String? = null
@@ -63,23 +61,22 @@ class AndroidPosterRepository private constructor() : PosterRepository {
             // A. kavita.yaml 파싱
             val yamlFile = files.find { it.name.lowercase() == "kavita.yaml" }
             if (yamlFile != null) {
-                println("DEBUG_POSTER: [STEP 3] Found kavita.yaml, reading content...")
-                val content = String(nasRepository.getFileContent(yamlFile.path), Charsets.UTF_8)
-                
-                metadata = metadata.copy(
-                    title = parseYamlValue(content, "localizedName") ?: parseYamlValue(content, "name"),
-                    author = parseYamlValue(content, "writer"),
-                    summary = parseYamlValue(content, "summary")
-                )
-                
-                posterPath = parseYamlValue(content, "poster_url") ?: 
-                             parseYamlValue(content, "cover")?.let { name -> 
-                                 files.find { it.name.equals(name, ignoreCase = true) }?.path 
-                             }
-                println("DEBUG_POSTER: [YAML RESULT] Title: ${metadata.title}, Author: ${metadata.author}, Poster: $posterPath")
+                val bytes = nasRepository.getFileContent(yamlFile.path)
+                if (bytes.isNotEmpty()) {
+                    val content = decodeText(bytes)
+                    metadata = metadata.copy(
+                        title = parseAggressive(content, "localizedName") ?: parseAggressive(content, "name"),
+                        author = parseAggressive(content, "writer") ?: parseAggressive(content, "author"),
+                        summary = parseAggressive(content, "summary")
+                    )
+                    posterPath = parseAggressive(content, "poster_url") ?: 
+                                 parseAggressive(content, "cover")?.let { name -> 
+                                     files.find { it.name.equals(name, ignoreCase = true) }?.path 
+                                 }
+                }
             }
 
-            // B. 폴더 내 이미지 검색 (YAML에 포스터 정보가 없을 때만)
+            // B. 폴백 1: 폴더 내 이미지 파일 직접 찾기
             if (posterPath == null) {
                 val common = listOf("poster", "cover", "folder", "thumbnail")
                 posterPath = files.find { f ->
@@ -88,30 +85,50 @@ class AndroidPosterRepository private constructor() : PosterRepository {
                 }?.path
             }
 
-            // 3. SQLite에 통합 정보 저장 (구분자 ||| 사용)
+            // C. 폴백 2 (핵심): 압축 파일 내부의 첫 번째 이미지 추출
+            if (posterPath == null) {
+                val firstZip = files.find { it.name.lowercase().let { n -> n.endsWith(".zip") || n.endsWith(".cbz") } }
+                if (firstZip != null) {
+                    // 압축 파일 자체를 썸네일 소스로 지정 (나중에 download 단계에서 처리)
+                    posterPath = "zip_thumb://${firstZip.path}"
+                }
+            }
+
+            // 3. SQLite 통합 저장
             val combinedData = "${posterPath ?: ""}|||${metadata.title ?: ""}|||${metadata.author ?: ""}|||${metadata.summary ?: ""}"
             database?.posterCacheQueries?.upsertPoster(
                 title_hash = pathHash,
                 poster_url = combinedData,
                 cached_at = System.currentTimeMillis()
             )
-            println("DEBUG_POSTER: [STEP 4] Metadata saved to SQLite")
 
             return@withContext metadata.copy(posterUrl = posterPath)
         } catch (e: Exception) {
-            println("DEBUG_POSTER: [FATAL] Global scan error: ${e.message}")
             ComicMetadata()
         }
     }
 
-    private fun parseYamlValue(content: String, key: String): String? {
-        val regex = Regex("""^\s*$key\s*:\s*(.*)$""", RegexOption.MULTILINE)
-        val value = regex.find(content)?.groupValues?.get(1)?.trim()?.removeSurrounding("'")?.removeSurrounding("\"")
-        return if (value.isNullOrBlank()) null else value
+    private fun parseAggressive(content: String, key: String): String? {
+        val regex = Regex("""(?i)$key\s*:\s*["']?([^"'\r\n]+)""", RegexOption.MULTILINE)
+        return regex.find(content)?.groupValues?.get(1)?.trim()?.let { 
+            val clean = it.split(" #")[0].trim().removeSurrounding("\"").removeSurrounding("'")
+            if (clean == "null" || clean.isBlank()) null else clean 
+        }
+    }
+
+    private fun decodeText(bytes: ByteArray): String {
+        val encodings = listOf("UTF-8", "UTF-16", "CP949")
+        for (enc in encodings) {
+            try {
+                val text = String(bytes, Charset.forName(enc))
+                if (text.contains(":")) return if (text.startsWith("\uFEFF")) text.substring(1) else text
+            } catch (e: Exception) {}
+        }
+        return String(bytes, Charsets.UTF_8)
     }
 
     override suspend fun downloadImageFromUrl(url: String): ByteArray? {
-        if (url.isBlank()) return null
+        if (url.isBlank() || url == NOT_FOUND) return null
         val urlHash = md5(url)
         val cacheFile = File(cacheDir, "img_$urlHash")
         if (cacheFile.exists()) return cacheFile.readBytes()
@@ -120,21 +137,30 @@ class AndroidPosterRepository private constructor() : PosterRepository {
             try {
                 if (url.startsWith("http")) {
                     val conn = URL(url).openConnection() as HttpURLConnection
-                    conn.apply { connectTimeout = 8000; readTimeout = 8000 }
+                    conn.connectTimeout = 10000; conn.readTimeout = 15000
                     if (conn.responseCode == 200) {
                         val bytes = conn.inputStream.use { it.readBytes() }
                         if (bytes.isNotEmpty()) cacheFile.writeBytes(bytes)
                         bytes
                     } else null
+                } else if (url.startsWith("zip_thumb://")) {
+                    // [획기적 추가] 압축 파일에서 첫 페이지 추출 로직
+                    val zipPath = url.substring(12)
+                    var thumbBytes: ByteArray? = null
+                    try {
+                        zipManager.streamAllImages(zipPath, {}) { _, bytes ->
+                            thumbBytes = bytes
+                            throw Exception("STOP") // 첫 장만 얻고 즉시 중단
+                        }
+                    } catch (e: Exception) { }
+                    if (thumbBytes != null) cacheFile.writeBytes(thumbBytes!!)
+                    thumbBytes
                 } else {
                     val bytes = nasRepository.getFileContent(url)
                     if (bytes.isNotEmpty()) cacheFile.writeBytes(bytes)
                     bytes
                 }
-            } catch (e: Exception) { 
-                println("DEBUG_POSTER: [IMAGE ERROR] Download failed for $url: ${e.message}")
-                null 
-            }
+            } catch (e: Exception) { null }
         }
     }
 

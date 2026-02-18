@@ -203,7 +203,7 @@ fun FolderGridView(state: ComicBrowserUiState, onClick: (NasFile) -> Unit, onPag
     LaunchedEffect(lastIndex) { if (lastIndex >= state.currentFiles.size - 5) onPage() }
 
     LazyVerticalGrid(state = gridState, columns = GridCells.Fixed(3), contentPadding = PaddingValues(16.dp), horizontalArrangement = Arrangement.spacedBy(10.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-        items(state.currentFiles, key = { it.path }) { ComicCard(it, remember { providePosterRepository() }) { onClick(it) } }
+        items(state.currentFiles, key = { it.path }) { file -> ComicCard(file, remember { providePosterRepository() }) { onClick(file) } }
         if (state.isScanning) {
             item(span = { GridItemSpan(maxLineSpan) }) { Box(Modifier.fillMaxWidth().padding(24.dp), Alignment.Center) { CircularProgressIndicator(color = KakaoYellow) } }
         }
