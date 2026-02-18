@@ -1,13 +1,35 @@
 from flask import Flask, jsonify, send_from_directory, request, send_file
 import os
-import yaml
 import zipfile
 import io
 import urllib.parse
+import unicodedata
 
 app = Flask(__name__)
 
-ROOT_DIRECTORY = "/volume2/video/GDS3/GDRIVE/READING/만화"
+# --- Start of Unicode Normalization Fix ---
+# 유니코드 정규화 문제(NFC/NFD)로 인해 '만화' 폴더를 찾지 못하는 문제를 해결합니다.
+# 상위 폴더를 읽어 실제 폴더명을 찾아서 ROOT_DIRECTORY로 설정합니다.
+PARENT_DIRECTORY_FOR_FIX = "/volume2/video/GDS3/GDRIVE/READING"
+TARGET_FOLDER_NAME_FOR_FIX = "만화"
+ROOT_DIRECTORY = os.path.join(PARENT_DIRECTORY_FOR_FIX, TARGET_FOLDER_NAME_FOR_FIX) # 기본 경로
+
+try:
+    if os.path.isdir(PARENT_DIRECTORY_FOR_FIX):
+        found = False
+        for filename in os.listdir(PARENT_DIRECTORY_FOR_FIX):
+            # NFC(Nomalization Form C)로 비교하여 일치하는 폴더명을 찾습니다.
+            if unicodedata.normalize('NFC', filename) == TARGET_FOLDER_NAME_FOR_FIX:
+                ROOT_DIRECTORY = os.path.join(PARENT_DIRECTORY_FOR_FIX, filename)
+                print(f"Found matching directory using Unicode Normalization: {ROOT_DIRECTORY}")
+                found = True
+                break
+        if not found:
+            print(f"Warning: Could not find '{TARGET_FOLDER_NAME_FOR_FIX}' in '{PARENT_DIRECTORY_FOR_FIX}'. Using default path.")
+except Exception as e:
+    print(f"Warning: An error occurred while searching for the directory. Using default path. Error: {e}")
+# --- End of Unicode Normalization Fix ---
+
 
 # --- Helper Functions ---
 def find_first_image_in_zip(zip_path):
@@ -25,7 +47,7 @@ def find_first_image_in_zip(zip_path):
 @app.route('/debug')
 def debug_info():
     info = {}
-    info['root_directory'] = ROOT_DIRECTORY
+    info['root_directory_used'] = ROOT_DIRECTORY
     info['path_exists'] = os.path.exists(ROOT_DIRECTORY)
     if info['path_exists']:
         info['is_directory'] = os.path.isdir(ROOT_DIRECTORY)

@@ -43,8 +43,7 @@ class ComicViewModel(
     private val nasRepository: NasRepository,
     val posterRepository: PosterRepository,
     private val getCategoriesUseCase: GetCategoriesUseCase,
-    private val scanComicFoldersUseCase: ScanComicFoldersUseCase,
-    private val setCredentialsUseCase: SetCredentialsUseCase
+    private val scanComicFoldersUseCase: ScanComicFoldersUseCase
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(ComicBrowserUiState())
@@ -57,10 +56,6 @@ class ComicViewModel(
 
     init {
         loadRecentSearches()
-    }
-
-    fun initialize(rootUrl: String, username: String, password: String) {
-        setCredentialsUseCase.execute(username, password)
         checkServerAndLoadCategories()
     }
 

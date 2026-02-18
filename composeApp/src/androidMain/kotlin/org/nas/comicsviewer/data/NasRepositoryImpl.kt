@@ -29,9 +29,6 @@ class AndroidNasRepository private constructor() : NasRepository {
         fun getInstance() = instance ?: synchronized(this) { instance ?: AndroidNasRepository().also { instance = it } }
     }
 
-    override fun setCredentials(u: String, p: String) {}
-    override fun getCredentials() = Pair("", "")
-
     override suspend fun listFiles(url: String): List<NasFile> = withContext(Dispatchers.IO) {
         try {
             client.get("$baseUrl/files") { url { parameters.append("path", url) } }.body<List<NasFile>>().sortedWith(compareBy({ !it.isDirectory }, { it.name }))

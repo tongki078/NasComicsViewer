@@ -47,9 +47,6 @@ private val TextMuted = Color(0xFF888888)
 fun NasComicApp(viewModel: ComicViewModel) {
     val uiState by viewModel.uiState.collectAsState()
     val zipManager = remember { provideZipManager() }
-    
-    val rootUrl = "smb://192.168.0.2/video/GDS3/GDRIVE/READING/만화/"
-    LaunchedEffect(Unit) { viewModel.initialize(rootUrl, "takumi", "qksthd078!@") }
 
     BackHandler(enabled = uiState.selectedZipPath != null || uiState.pathHistory.size > 1 || uiState.isSearchMode) {
         viewModel.onBack()

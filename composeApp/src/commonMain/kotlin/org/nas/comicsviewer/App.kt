@@ -4,7 +4,6 @@ import androidx.compose.runtime.*
 import org.nas.comicsviewer.data.*
 import org.nas.comicsviewer.domain.usecase.GetCategoriesUseCase
 import org.nas.comicsviewer.domain.usecase.ScanComicFoldersUseCase
-import org.nas.comicsviewer.domain.usecase.SetCredentialsUseCase
 import org.nas.comicsviewer.presentation.ComicViewModel
 import org.nas.comicsviewer.presentation.NasComicApp
 
@@ -22,7 +21,6 @@ fun App(databaseDriverFactory: DatabaseDriverFactory) {
     // 3. UseCases
     val getCategoriesUseCase = remember { GetCategoriesUseCase(nasRepository) }
     val scanComicFoldersUseCase = remember { ScanComicFoldersUseCase(nasRepository) }
-    val setCredentialsUseCase = remember { SetCredentialsUseCase(nasRepository) }
     
     // 4. ViewModel
     val comicViewModel = remember {
@@ -30,8 +28,7 @@ fun App(databaseDriverFactory: DatabaseDriverFactory) {
             nasRepository, 
             posterRepository,
             getCategoriesUseCase, 
-            scanComicFoldersUseCase, 
-            setCredentialsUseCase
+            scanComicFoldersUseCase
         )
     }
 
