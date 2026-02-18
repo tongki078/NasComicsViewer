@@ -9,113 +9,63 @@ import java.io.ByteArrayOutputStream
 import java.util.zip.ZipInputStream
 import java.util.zip.ZipEntry
 import java.nio.charset.Charset
+import java.io.BufferedInputStream
 
 actual fun provideZipManager(): ZipManager = AndroidZipManager()
 
 class AndroidZipManager : ZipManager {
-
     private fun getContext(): CIFSContext {
-        val repo = AndroidNasRepository.getInstance()
-        val (user, pass) = repo.getCredentials()
-        val auth = if (user.isNotEmpty()) jcifs.smb.NtlmPasswordAuthenticator(user, pass) else null
-        val context = jcifs.context.BaseContext(jcifs.config.PropertyConfiguration(java.util.Properties().apply {
+        val (u, p) = AndroidNasRepository.getInstance().getCredentials()
+        val props = java.util.Properties().apply {
             setProperty("jcifs.smb.client.minVersion", "SMB202")
             setProperty("jcifs.smb.client.maxVersion", "SMB311")
             setProperty("jcifs.smb.client.connTimeout", "10000")
             setProperty("jcifs.smb.client.sessionTimeout", "60000")
-        }))
-        return if (auth != null) context.withCredentials(auth) else context
-    }
-
-    private fun getSafeUrl(url: String): String {
-        return url.replace("%", "%25")
-                  .replace("#", "%23")
-                  .replace("[", "%5B")
-                  .replace("]", "%5D")
-                  .replace("{", "%7B")
-                  .replace("}", "%7D")
-                  .replace(" ", "%20")
-                  .replace("^", "%5E")
-    }
-
-    override suspend fun listImagesInZip(filePath: String): List<String> = withContext(Dispatchers.IO) {
-        val urlsToTry = listOf(getSafeUrl(filePath), filePath)
-        val encodings = listOf("UTF-8", "CP949", "EUC-KR")
-
-        for (url in urlsToTry) {
-            try {
-                val smbFile = SmbFile(url, getContext())
-                if (smbFile.exists()) {
-                    for (enc in encodings) {
-                        val images = mutableListOf<String>()
-                        try {
-                            smbFile.inputStream.use { input ->
-                                val zipInput = ZipInputStream(input, Charset.forName(enc))
-                                var entry: ZipEntry? = zipInput.nextEntry
-                                while (entry != null) {
-                                    if (!entry.isDirectory) {
-                                        val name = entry.name.lowercase()
-                                        if (name.endsWith(".jpg") || name.endsWith(".jpeg") || name.endsWith(".png") || name.endsWith(".webp")) {
-                                            images.add(entry.name)
-                                        }
-                                    }
-                                    zipInput.closeEntry()
-                                    entry = zipInput.nextEntry
-                                }
-                            }
-                            if (images.isNotEmpty()) return@withContext images.sorted()
-                        } catch (e: Exception) { }
-                    }
-                }
-            } catch (e: Exception) { }
         }
-        emptyList()
+        val config = jcifs.config.PropertyConfiguration(props)
+        val context = jcifs.context.BaseContext(config)
+        return if (u.isNotEmpty()) context.withCredentials(jcifs.smb.NtlmPasswordAuthenticator(u, p)) else context
     }
 
-    override suspend fun streamAllImages(zipPath: String, onImageExtracted: suspend (String, ByteArray) -> Unit) = withContext(Dispatchers.IO) {
-        val urlsToTry = listOf(getSafeUrl(zipPath), zipPath)
-        val context = getContext()
-        
-        val smbFile = urlsToTry.mapNotNull { url ->
-            try {
-                val f = SmbFile(url, context)
-                if (f.exists()) f else null
-            } catch (e: Exception) {
-                null
-            }
-        }.firstOrNull() ?: return@withContext
+    override suspend fun listImagesInZip(path: String): List<String> = emptyList() // 이제 사용 안함
 
-        val encodings = listOf("UTF-8", "CP949", "EUC-KR")
-        val correctEnc = encodings.firstOrNull { enc ->
+    override suspend fun streamAllImages(path: String, onProgress: (Float) -> Unit, onImage: suspend (String, ByteArray) -> Unit) = withContext(Dispatchers.IO) {
+        val encodings = listOf("CP949", "UTF-8", "EUC-KR")
+        val context = getContext()
+        val smbFile = SmbFile(path, context) // path는 이미 canonicalPath로 인코딩된 상태임
+        val totalSize = smbFile.length().toFloat()
+        
+        var success = false
+        for (enc in encodings) {
+            if (success) break
             try {
                 smbFile.inputStream.use { input ->
-                    ZipInputStream(input, Charset.forName(enc)).nextEntry != null
-                }
-            } catch (e: Exception) {
-                false
-            }
-        } ?: "UTF-8"
-
-        try {
-            smbFile.inputStream.use { input ->
-                val zipInput = ZipInputStream(input, Charset.forName(correctEnc))
-                var entry: ZipEntry? = zipInput.nextEntry
-                while (entry != null) {
-                    if (!entry.isDirectory) {
-                        val name = entry.name.lowercase()
-                        if (name.endsWith(".jpg") || name.endsWith(".jpeg") || name.endsWith(".png") || name.endsWith(".webp")) {
-                            val output = ByteArrayOutputStream()
-                            zipInput.copyTo(output)
-                            onImageExtracted(entry.name, output.toByteArray())
+                    // 128KB 버퍼로 네트워크 대역폭 활용 극대화
+                    val bis = BufferedInputStream(input, 128 * 1024)
+                    val zip = ZipInputStream(bis, Charset.forName(enc))
+                    var entry: ZipEntry? = zip.nextEntry
+                    
+                    if (entry != null) success = true // 읽기 시작했다면 인코딩 맞는 것으로 간주
+                    
+                    var readBytes = 0L
+                    while (entry != null) {
+                        if (!entry.isDirectory && isImage(entry.name)) {
+                            val out = ByteArrayOutputStream()
+                            zip.copyTo(out)
+                            onImage(entry.name, out.toByteArray())
                         }
+                        zip.closeEntry()
+                        entry = zip.nextEntry
+                        // 대략적인 진행률 (압축 해제 위치 기준)
+                        onProgress(0.5f) 
                     }
-                    zipInput.closeEntry()
-                    entry = zipInput.nextEntry
                 }
-            }
-        } catch (e: Exception) {}
+            } catch (e: Exception) {}
+        }
+        onProgress(1.0f)
     }
 
-    override suspend fun extractImage(zipPath: String, imageName: String): ByteArray? = null
-    override fun getComicInfo(zipPath: String): ComicInfo? = null
+    private fun isImage(n: String) = n.lowercase().let { it.endsWith(".jpg") || it.endsWith(".jpeg") || it.endsWith(".png") || it.endsWith(".webp") }
+    override suspend fun extractImage(p: String, n: String): ByteArray? = null
+    override fun getComicInfo(p: String): ComicInfo? = null
 }

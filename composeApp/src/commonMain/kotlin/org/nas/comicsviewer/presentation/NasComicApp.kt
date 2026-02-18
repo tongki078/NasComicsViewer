@@ -6,29 +6,21 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.grid.*
 import androidx.compose.foundation.lazy.*
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.ripple.rememberRipple
 import androidx.compose.material3.*
 import androidx.compose.material3.TabRowDefaults.tabIndicatorOffset
 import androidx.compose.runtime.*
-import androidx.compose.runtime.snapshots.SnapshotStateMap
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.distinctUntilChanged
-import kotlinx.coroutines.flow.filter
-import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import org.nas.comicsviewer.BackHandler
 import org.nas.comicsviewer.data.*
@@ -37,13 +29,8 @@ import org.nas.comicsviewer.toImageBitmap
 @Composable
 fun NasComicApp(viewModel: ComicViewModel) {
     val uiState by viewModel.uiState.collectAsState()
-    val scope = rememberCoroutineScope()
     val zipManager = remember { provideZipManager() }
-    
     var currentZipPath by remember { mutableStateOf<String?>(null) }
-    var zipImages by remember { mutableStateOf<List<String>>(emptyList()) }
-    var showControls by remember { mutableStateOf(true) }
-    var isStreamingLoading by remember { mutableStateOf(false) }
     
     val rootUrl = "smb://192.168.0.2/video/GDS3/GDRIVE/READING/만화/"
 
@@ -51,103 +38,43 @@ fun NasComicApp(viewModel: ComicViewModel) {
         viewModel.initialize(rootUrl, "takumi", "qksthd078!@")
     }
 
-    // 뒤로가기 핸들러 최상위 배치
     BackHandler(enabled = currentZipPath != null || uiState.pathHistory.size > 1) {
-        if (currentZipPath != null) {
-            currentZipPath = null
-            zipImages = emptyList()
-            showControls = true
-        } else {
-            viewModel.onBack()
-        }
-    }
-
-    fun openZipStreaming(file: NasFile) {
-        scope.launch {
-            isStreamingLoading = true
-            try {
-                val images = zipManager.listImagesInZip(file.path)
-                if (images.isNotEmpty()) {
-                    currentZipPath = file.path
-                    zipImages = images
-                    showControls = false
-                } else {
-                    viewModel.showError("만화책 속 이미지를 찾을 수 없습니다. (ZIP 인코딩 또는 경로 문제)")
-                }
-            } catch (e: Exception) {
-                viewModel.showError("연결 오류: ${e.message}")
-            } finally {
-                isStreamingLoading = false
-            }
-        }
+        if (currentZipPath != null) currentZipPath = null else viewModel.onBack()
     }
 
     LaunchedEffect(Unit) {
         viewModel.onOpenZipRequested.collect { file ->
-            openZipStreaming(file)
+            currentZipPath = file.path
         }
     }
 
-    val closeViewer = {
-        currentZipPath = null
-        zipImages = emptyList()
-        showControls = true
-    }
-
-    MaterialTheme(colorScheme = darkColorScheme(
-        background = Color(0xFF111111), 
-        surface = Color(0xFF111111), 
-        onSurface = Color.White, 
-        primary = Color(0xFF00DC64)
-    )) {
-        Box(modifier = Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
+    MaterialTheme(colorScheme = darkColorScheme(background = Color(0xFF111111), primary = Color(0xFF00DC64))) {
+        Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
             if (currentZipPath != null) {
-                 WebtoonViewer(
-                     zipPath = currentZipPath!!, 
-                     images = zipImages, 
-                     zipManager = zipManager, 
-                     onClose = closeViewer, 
-                     showControls = showControls, 
-                     onToggleControls = { showControls = !showControls }
-                 )
+                 WebtoonViewer(currentZipPath!!, zipManager) { currentZipPath = null }
             } else {
                 Column(Modifier.fillMaxSize()) {
-                    // Top Bar
-                    Row(
-                        modifier = Modifier.fillMaxWidth().statusBarsPadding().padding(16.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text("🏠", modifier = Modifier.clickable { viewModel.onHome() }, fontSize = 24.sp)
+                    Row(Modifier.fillMaxWidth().statusBarsPadding().padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Text("🏠", Modifier.clickable { viewModel.onHome() }, fontSize = 24.sp)
                         Spacer(Modifier.width(12.dp))
                         Text("NAS WEBTOON", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
                     }
 
-                    // Tabs
                     if (uiState.categories.isNotEmpty()) {
-                        ScrollableTabRow(
-                            selectedTabIndex = uiState.selectedCategoryIndex,
-                            containerColor = Color.Transparent,
-                            edgePadding = 16.dp,
-                            indicator = { tabPositions ->
-                                if (uiState.selectedCategoryIndex < tabPositions.size) {
-                                    Box(Modifier.tabIndicatorOffset(tabPositions[uiState.selectedCategoryIndex]).height(3.dp).background(MaterialTheme.colorScheme.primary))
-                                }
+                        ScrollableTabRow(selectedTabIndex = uiState.selectedCategoryIndex, edgePadding = 16.dp, indicator = { positions ->
+                            if (uiState.selectedCategoryIndex < positions.size) {
+                                Box(Modifier.tabIndicatorOffset(positions[uiState.selectedCategoryIndex]).height(3.dp).background(MaterialTheme.colorScheme.primary))
                             }
-                        ) {
-                            uiState.categories.forEachIndexed { index, category ->
-                                Tab(
-                                    selected = uiState.selectedCategoryIndex == index,
-                                    onClick = { viewModel.scanCategory(category.path, index) },
-                                    text = { Text(category.name) }
-                                )
+                        }) {
+                            uiState.categories.forEachIndexed { i, cat ->
+                                Tab(selected = uiState.selectedCategoryIndex == i, onClick = { viewModel.scanCategory(cat.path, i) }, text = { Text(cat.name) })
                             }
                         }
                     }
 
-                    // Breadcrumbs
                     if (uiState.pathHistory.size > 1) {
                         Row(Modifier.fillMaxWidth().background(Color(0xFF1A1A1A)).padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                            Text("◀", modifier = Modifier.clickable { viewModel.onBack() }.padding(4.dp))
+                            Text("◀", Modifier.clickable { viewModel.onBack() }.padding(4.dp))
                             Spacer(Modifier.width(8.dp))
                             Text(uiState.currentPath?.split("/")?.lastOrNull() ?: "", fontWeight = FontWeight.Bold)
                         }
@@ -157,24 +84,57 @@ fun NasComicApp(viewModel: ComicViewModel) {
                         if (uiState.isSeriesView) {
                             LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                                 items(uiState.currentFiles) { file ->
-                                    VolumeItem(file, onClick = { viewModel.onFileClick(file) })
+                                    VolumeItem(file) { viewModel.onFileClick(file) }
                                 }
                             }
                         } else {
-                            FolderGridView(uiState, onFileClick = { file -> viewModel.onFileClick(file) }, onLoadNextPage = { viewModel.loadNextPage() })
+                            FolderGridView(uiState, { viewModel.onFileClick(it) }, { viewModel.loadNextPage() })
                         }
                     }
                 }
             }
             
-            if (uiState.isLoading || isStreamingLoading) {
-                Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.5f)).clickable(enabled = false) {}, contentAlignment = Alignment.Center) {
-                    CircularProgressIndicator()
+            if (uiState.isLoading) {
+                Box(Modifier.fillMaxSize().background(Color.Black.copy(0.5f)), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
+            }
+        }
+    }
+}
+
+@Composable
+fun WebtoonViewer(path: String, manager: ZipManager, onClose: () -> Unit) {
+    val listState = rememberLazyListState()
+    val loadedImages = remember { mutableStateListOf<Pair<String, ImageBitmap>>() }
+    var isFinished by remember { mutableStateOf(false) }
+    var showControls by remember { mutableStateOf(true) }
+
+    LaunchedEffect(path) {
+        manager.streamAllImages(path, {}) { name, bytes ->
+            val bitmap = bytes.toImageBitmap()
+            if (bitmap != null) {
+                loadedImages.add(name to bitmap)
+            }
+        }
+        isFinished = true
+    }
+
+    Box(Modifier.fillMaxSize().background(Color.Black).clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) { showControls = !showControls }) {
+        LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
+            items(loadedImages) { (_, bitmap) ->
+                Image(bitmap, null, Modifier.fillMaxWidth(), contentScale = ContentScale.FillWidth)
+            }
+            if (!isFinished) {
+                item {
+                    Box(Modifier.fillMaxWidth().height(300.dp), contentAlignment = Alignment.Center) {
+                        CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
+                    }
                 }
             }
-
-            uiState.errorMessage?.let { msg ->
-                Snackbar(modifier = Modifier.align(Alignment.BottomCenter).padding(16.dp), action = { TextButton(onClick = { viewModel.clearError() }) { Text("확인") } }) { Text(msg) }
+        }
+        if (showControls) {
+            Box(Modifier.align(Alignment.TopCenter).fillMaxWidth().background(Color.Black.copy(0.7f)).statusBarsPadding().padding(16.dp)) {
+                IconButton(onClick = onClose, modifier = Modifier.align(Alignment.CenterStart)) { Text("✕", color = Color.White, fontSize = 24.sp) }
+                Text("${listState.firstVisibleItemIndex + 1} / ${loadedImages.size}", Modifier.align(Alignment.Center), color = Color.White, fontWeight = FontWeight.Bold)
             }
         }
     }
@@ -182,11 +142,7 @@ fun NasComicApp(viewModel: ComicViewModel) {
 
 @Composable
 fun VolumeItem(file: NasFile, onClick: () -> Unit) {
-    Surface(
-        modifier = Modifier.fillMaxWidth().clickable(onClick = onClick),
-        color = Color(0xFF1E1E1E),
-        shape = RoundedCornerShape(8.dp)
-    ) {
+    Surface(modifier = Modifier.fillMaxWidth().clickable(onClick = onClick), color = Color(0xFF1E1E1E), shape = RoundedCornerShape(8.dp)) {
         Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
             Text("📖", fontSize = 24.sp)
             Spacer(Modifier.width(16.dp))
@@ -194,113 +150,45 @@ fun VolumeItem(file: NasFile, onClick: () -> Unit) {
                 Text(file.name, fontWeight = FontWeight.Bold, color = Color.White)
                 Text("ZIP Archive", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
             }
-            Spacer(Modifier.weight(1f))
-            Text("▶", color = Color(0xFF00DC64))
         }
     }
 }
 
 @Composable
-fun FolderGridView(uiState: ComicBrowserUiState, onFileClick: (NasFile) -> Unit, onLoadNextPage: () -> Unit) {
+fun FolderGridView(state: ComicBrowserUiState, onClick: (NasFile) -> Unit, onPage: () -> Unit) {
     val gridState = rememberLazyGridState()
-    val shouldLoadMore = remember { derivedStateOf { 
-        val info = gridState.layoutInfo
-        info.totalItemsCount > 0 && (info.visibleItemsInfo.lastOrNull()?.index ?: 0) >= info.totalItemsCount - 6
-    }}
-
-    LaunchedEffect(shouldLoadMore.value) {
-        if (shouldLoadMore.value && !uiState.isLoading) onLoadNextPage()
-    }
+    val lastIndex by remember { derivedStateOf { gridState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0 } }
+    LaunchedEffect(lastIndex) { if (lastIndex >= state.currentFiles.size - 5) onPage() }
 
     LazyVerticalGrid(state = gridState, columns = GridCells.Fixed(3), contentPadding = PaddingValues(12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-        items(uiState.currentFiles, key = { it.path }) { file ->
-            ComicCard(file, remember { providePosterRepository() }, onClick = { onFileClick(file) })
-        }
-        if (uiState.isScanning || uiState.totalFoundCount > uiState.currentFiles.size) {
-            item(span = { GridItemSpan(maxLineSpan) }) { Box(Modifier.fillMaxWidth().padding(24.dp), contentAlignment = Alignment.Center) { CircularProgressIndicator(Modifier.size(32.dp)) } }
+        items(state.currentFiles) { ComicCard(it, remember { providePosterRepository() }) { onClick(it) } }
+        if (state.isScanning) {
+            item(span = { GridItemSpan(maxLineSpan) }) { Box(Modifier.fillMaxWidth().padding(24.dp), Alignment.Center) { CircularProgressIndicator(Modifier.size(32.dp)) } }
         }
     }
 }
 
 @Composable
-fun ComicCard(file: NasFile, posterRepository: PosterRepository, onClick: () -> Unit) {
-    var thumbnail by remember { mutableStateOf<ImageBitmap?>(null) }
+fun ComicCard(file: NasFile, repo: PosterRepository, onClick: () -> Unit) {
+    var thumb by remember { mutableStateOf<ImageBitmap?>(null) }
     LaunchedEffect(file.path) {
-        try {
-            delay(200)
-            val searchTitle = cleanTitle(if (file.isDirectory) file.name else file.name.substringBeforeLast("."))
-            posterRepository.searchPoster(searchTitle)?.let { url ->
-                posterRepository.downloadImageFromUrl(url)?.let { bytes -> thumbnail = bytes.toImageBitmap() }
-            }
-        } catch (e: Exception) {}
+        // 획기적 개선: 스크롤 시 API 남용 방지를 위해 지연 시간 추가
+        delay(300)
+        val title = if (file.isDirectory) file.name else file.name.substringBeforeLast(".")
+        repo.searchPoster(cleanTitle(title))?.let { url ->
+            repo.downloadImageFromUrl(url)?.let { bytes -> thumb = bytes.toImageBitmap() }
+        }
     }
-
     Column(Modifier.fillMaxWidth().clickable(onClick = onClick)) {
-        Box(Modifier.aspectRatio(0.75f).fillMaxWidth().clip(RoundedCornerShape(4.dp)).background(Color(0xFF222222))) {
-            if (thumbnail != null) Image(thumbnail!!, null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
-            else Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text(if (file.isDirectory) "📁" else "📖", fontSize = 32.sp, modifier = Modifier.alpha(0.3f)) }
-        }
-        Spacer(Modifier.height(4.dp))
-        Text(file.name, style = MaterialTheme.typography.bodySmall, maxLines = 2, overflow = TextOverflow.Ellipsis, color = Color.White)
-    }
-}
-
-@Composable
-fun WebtoonViewer(zipPath: String, images: List<String>, zipManager: ZipManager, onClose: () -> Unit, showControls: Boolean, onToggleControls: () -> Unit) {
-    val listState = rememberLazyListState()
-    val scope = rememberCoroutineScope()
-    val currentPage by remember { derivedStateOf { listState.firstVisibleItemIndex } }
-    
-    val loadedImages = remember { mutableStateMapOf<String, ImageBitmap>() }
-    var isInitialLoading by remember { mutableStateOf(true) }
-
-    LaunchedEffect(zipPath) {
-        zipManager.streamAllImages(zipPath) { name, bytes ->
-            val bitmap = bytes.toImageBitmap()
-            if (bitmap != null) {
-                loadedImages[name] = bitmap
-                isInitialLoading = false
-            }
-        }
-    }
-    
-    Box(Modifier.fillMaxSize().background(Color.Black).clickable(indication = null, interactionSource = remember { MutableInteractionSource() }) { onToggleControls() }) {
-        if (isInitialLoading && loadedImages.isEmpty()) {
-            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
-            }
-        }
-
-        LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
-            items(images) { imageName ->
-                val bitmap = loadedImages[imageName]
-                if (bitmap != null) {
-                    Image(
-                        bitmap = bitmap, 
-                        contentDescription = null, 
-                        contentScale = ContentScale.FillWidth, 
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                } else {
-                    Box(Modifier.fillMaxWidth().height(500.dp), contentAlignment = Alignment.Center) { 
-                        CircularProgressIndicator(Modifier.size(32.dp)) 
-                    }
+        Box(Modifier.aspectRatio(0.75f).clip(RoundedCornerShape(4.dp)).background(Color(0xFF222222))) {
+            if (thumb != null) {
+                Image(thumb!!, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+            } else {
+                Box(Modifier.fillMaxSize(), Alignment.Center) {
+                    Text(if (file.isDirectory) "📁" else "📖", modifier = Modifier.alpha(0.3f), fontSize = 32.sp)
                 }
             }
         }
-
-        AnimatedVisibility(showControls, enter = fadeIn(), exit = fadeOut()) {
-            Box(Modifier.fillMaxSize()) {
-                Row(Modifier.align(Alignment.TopCenter).background(Color.Black.copy(alpha = 0.7f)).statusBarsPadding().padding(16.dp).fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    IconButton(onClick = onClose) { Text("✕", color = Color.White, fontSize = 24.sp) }
-                    Spacer(Modifier.weight(1f))
-                    Text("${currentPage + 1} / ${images.size}", color = Color.White, fontWeight = FontWeight.Bold)
-                    Spacer(Modifier.width(48.dp))
-                }
-                Box(Modifier.align(Alignment.BottomCenter).background(Color.Black.copy(alpha = 0.7f)).navigationBarsPadding().padding(24.dp).fillMaxWidth()) {
-                    Slider(value = currentPage.toFloat(), onValueChange = { scope.launch { listState.scrollToItem(it.toInt()) } }, valueRange = 0f..(images.size - 1).coerceAtLeast(0).toFloat())
-                }
-            }
-        }
+        Text(file.name, style = MaterialTheme.typography.bodySmall, maxLines = 2, color = Color.White, modifier = Modifier.padding(top = 4.dp))
     }
 }

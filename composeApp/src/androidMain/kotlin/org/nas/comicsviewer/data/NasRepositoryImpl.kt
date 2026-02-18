@@ -10,161 +10,75 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.withContext
-import java.io.File
-import java.io.FileOutputStream
 import java.util.Properties
 
 actual fun provideNasRepository(): NasRepository = AndroidNasRepository.getInstance()
 
 class AndroidNasRepository private constructor() : NasRepository {
-
     private var username = ""
     private var password = ""
     private var baseContext: CIFSContext? = null
 
     companion object {
-        @Volatile
-        private var instance: AndroidNasRepository? = null
-        fun getInstance(): AndroidNasRepository {
-            return instance ?: synchronized(this) {
-                instance ?: AndroidNasRepository().also { instance = it }
-            }
-        }
+        @Volatile private var instance: AndroidNasRepository? = null
+        fun getInstance() = instance ?: synchronized(this) { instance ?: AndroidNasRepository().also { instance = it } }
     }
 
-    override fun setCredentials(username: String, password: String) {
-        this.username = username
-        this.password = password
-    }
-    
-    override fun getCredentials(): Pair<String, String> {
-        return Pair(username, password)
-    }
+    override fun setCredentials(username: String, password: String) { this.username = username; this.password = password }
+    override fun getCredentials() = Pair(username, password)
 
     private fun getContext(): CIFSContext {
         if (baseContext == null) {
-            val properties = Properties().apply {
+            val props = Properties().apply {
                 setProperty("jcifs.smb.client.minVersion", "SMB202")
                 setProperty("jcifs.smb.client.maxVersion", "SMB311")
-                setProperty("jcifs.smb.client.ipcSigningEnforced", "false")
                 setProperty("jcifs.smb.client.connTimeout", "10000")
-                setProperty("jcifs.smb.client.sessionTimeout", "30000")
+                setProperty("jcifs.smb.client.sessionTimeout", "60000")
             }
-            val config = PropertyConfiguration(properties)
-            baseContext = BaseContext(config)
+            baseContext = BaseContext(PropertyConfiguration(props))
         }
-        var context = baseContext!!
-        if (username.isNotEmpty()) {
-            val auth = NtlmPasswordAuthenticator(username, password)
-            context = context.withCredentials(auth)
-        }
-        return context
+        return if (username.isNotEmpty()) baseContext!!.withCredentials(NtlmPasswordAuthenticator(username, password)) else baseContext!!
     }
 
-    // 획기적인 경로 보호: 모든 특수문자를 안전하게 변환
-    private fun getSafeUrl(url: String): String {
-        return url.replace("%", "%25")
-                  .replace("#", "%23")
-                  .replace("[", "%5B")
-                  .replace("]", "%5D")
-                  .replace("{", "%7B")
-                  .replace("}", "%7D")
-                  .replace(" ", "%20")
-                  .replace("^", "%5E")
-    }
-
-    override suspend fun listFiles(url: String): List<NasFile> {
-        return withContext(Dispatchers.IO) {
-            try {
-                val context = getContext()
-                val smbFile = SmbFile(getSafeUrl(url), context)
-                if (smbFile.isDirectory) {
-                    smbFile.listFiles()?.map { file ->
-                        NasFile(
-                            name = file.name.trim('/'),
-                            isDirectory = file.isDirectory,
-                            path = file.canonicalPath
-                        )
-                    }?.sortedWith(compareBy({ !it.isDirectory }, { it.name })) ?: emptyList()
-                } else {
-                    emptyList()
-                }
-            } catch (e: Exception) {
-                e.printStackTrace()
-                emptyList()
-            }
+    private fun getSafeSmbFile(url: String, context: CIFSContext): SmbFile {
+        if (!url.startsWith("smb://")) return SmbFile(url, context)
+        if (url.contains("%")) return SmbFile(url, context)
+        val parts = url.substring(6).split("/").filter { it.isNotEmpty() }
+        var file = SmbFile("smb://${parts[0]}/", context)
+        for (i in 1 until parts.size) {
+            file = SmbFile(file, parts[i] + if (i < parts.size - 1 || url.endsWith("/")) "/" else "")
         }
+        return file
     }
 
-    override suspend fun getFileContent(url: String): ByteArray {
-        return withContext(Dispatchers.IO) {
-            try {
-                val context = getContext()
-                val smbFile = SmbFile(getSafeUrl(url), context)
-                smbFile.inputStream.use { it.readBytes() }
-            } catch (e: Exception) {
-                e.printStackTrace()
-                ByteArray(0)
-            }
-        }
+    override suspend fun listFiles(url: String): List<NasFile> = withContext(Dispatchers.IO) {
+        try {
+            getSafeSmbFile(url, getContext()).listFiles()?.map { 
+                NasFile(it.name.trim('/'), it.isDirectory, it.canonicalPath) 
+            }?.sortedWith(compareBy({ !it.isDirectory }, { it.name })) ?: emptyList()
+        } catch (e: Exception) { emptyList() }
     }
 
-    override suspend fun downloadFile(url: String, destinationPath: String, onProgress: (Float) -> Unit) {
-        withContext(Dispatchers.IO) {
-            try {
-                val context = getContext()
-                val smbFile = SmbFile(getSafeUrl(url), context)
-                val destinationFile = File(destinationPath)
-                destinationFile.parentFile?.mkdirs()
-                val totalBytes = smbFile.length()
-                var bytesReadTotal = 0L
-                val buffer = ByteArray(16384) 
-                smbFile.inputStream.use { input ->
-                    FileOutputStream(destinationFile).use { output ->
-                        var bytesRead: Int
-                        while (input.read(buffer).also { bytesRead = it } != -1) {
-                            output.write(buffer, 0, bytesRead)
-                            bytesReadTotal += bytesRead
-                            if (totalBytes > 0) onProgress(bytesReadTotal.toFloat() / totalBytes)
-                        }
-                    }
-                }
-                onProgress(1f)
-            } catch (e: Exception) {
-                e.printStackTrace()
-                throw e
-            }
-        }
+    override suspend fun getFileContent(url: String): ByteArray = withContext(Dispatchers.IO) {
+        try { getSafeSmbFile(url, getContext()).inputStream.use { it.readBytes() } } catch (e: Exception) { ByteArray(0) }
     }
 
-    override fun getTempFilePath(fileName: String): String {
-        val tempDir = System.getProperty("java.io.tmpdir") ?: "/tmp"
-        return File(tempDir, fileName).absolutePath
-    }
+    override suspend fun downloadFile(url: String, destinationPath: String, onProgress: (Float) -> Unit) {}
+    override fun getTempFilePath(fileName: String) = ""
 
     override fun scanComicFolders(url: String, maxDepth: Int): Flow<NasFile> = flow {
-        scanRecursiveEmit(url, 0, 5) // 충분한 깊이로 탐색
+        scanRecursive(url, 0, 5)
     }.flowOn(Dispatchers.IO)
 
-    private suspend fun kotlinx.coroutines.flow.FlowCollector<NasFile>.scanRecursiveEmit(url: String, currentDepth: Int, maxDepth: Int) {
-        if (currentDepth > maxDepth) return
+    private suspend fun kotlinx.coroutines.flow.FlowCollector<NasFile>.scanRecursive(url: String, depth: Int, max: Int) {
+        if (depth > max) return
         try {
-            val context = getContext() 
-            val smbFile = SmbFile(getSafeUrl(url), context)
-            if (!smbFile.isDirectory) return
-            val files = smbFile.listFiles() ?: return
-            val hasComics = files.any { 
-                val n = it.name.lowercase()
-                !it.isDirectory && (n.endsWith(".zip") || n.endsWith(".cbz") || n.endsWith(".rar"))
+            val smbFile = getSafeSmbFile(url, getContext())
+            val children = smbFile.listFiles() ?: return
+            if (children.any { it.name.lowercase().let { n -> n.endsWith(".zip") || n.endsWith(".cbz") } }) {
+                emit(NasFile(smbFile.name.trim('/'), true, smbFile.canonicalPath))
             }
-            if (hasComics) {
-                emit(NasFile(name = smbFile.name.trim('/'), isDirectory = true, path = smbFile.canonicalPath))
-            }
-            files.filter { it.isDirectory }
-                .sortedBy { it.name }
-                .forEach { subFolder ->
-                    scanRecursiveEmit(subFolder.canonicalPath, currentDepth + 1, maxDepth)
-                }
+            children.filter { it.isDirectory }.forEach { scanRecursive(it.canonicalPath, depth + 1, max) }
         } catch (e: Exception) {}
     }
 }
