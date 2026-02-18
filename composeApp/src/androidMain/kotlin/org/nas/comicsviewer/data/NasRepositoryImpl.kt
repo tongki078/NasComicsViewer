@@ -32,6 +32,7 @@ class AndroidNasRepository private constructor() : NasRepository {
             val props = Properties().apply {
                 setProperty("jcifs.smb.client.minVersion", "SMB202")
                 setProperty("jcifs.smb.client.maxVersion", "SMB311")
+                setProperty("jcifs.smb.client.ipcSigningEnforced", "false")
                 setProperty("jcifs.smb.client.connTimeout", "10000")
                 setProperty("jcifs.smb.client.sessionTimeout", "60000")
             }
@@ -45,16 +46,30 @@ class AndroidNasRepository private constructor() : NasRepository {
     }
 
     override suspend fun listFiles(url: String): List<NasFile> = withContext(Dispatchers.IO) {
+        val safeUrl = getSafeUrl(url)
+        println("DEBUG_NAS: Listing files for safeUrl: $safeUrl")
         try {
-            val smbFile = SmbFile(getSafeUrl(url), getContext())
-            smbFile.listFiles()?.map { 
+            val smbFile = SmbFile(safeUrl, getContext())
+            val list = smbFile.listFiles()
+            println("DEBUG_NAS: Found ${list?.size ?: 0} items in $safeUrl")
+            
+            list?.map { 
                 NasFile(it.name.trim('/'), it.isDirectory, it.canonicalPath) 
             }?.sortedWith(compareBy({ !it.isDirectory }, { it.name })) ?: emptyList()
-        } catch (e: Exception) { emptyList() }
+        } catch (e: Exception) {
+            println("DEBUG_NAS: Error listing $safeUrl: ${e.message}")
+            emptyList() 
+        }
     }
 
     override suspend fun getFileContent(url: String): ByteArray = withContext(Dispatchers.IO) {
-        try { SmbFile(getSafeUrl(url), getContext()).inputStream.use { it.readBytes() } } catch (e: Exception) { ByteArray(0) }
+        val safeUrl = getSafeUrl(url)
+        try { 
+            SmbFile(safeUrl, getContext()).inputStream.use { it.readBytes() } 
+        } catch (e: Exception) { 
+            println("DEBUG_NAS: Error getting content from $safeUrl: ${e.message}")
+            ByteArray(0) 
+        }
     }
 
     override suspend fun downloadFile(url: String, path: String, onProgress: (Float) -> Unit) {}

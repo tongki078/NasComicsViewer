@@ -22,8 +22,8 @@ data class ComicBrowserUiState(
     val isSeriesView: Boolean = false,
     val isIntroShowing: Boolean = true,
     val selectedMetadata: ComicMetadata? = null,
-    // [획기적 개선] 상세 페이지 전용 에피소드 리스트 추가
-    val seriesEpisodes: List<NasFile> = emptyList()
+    val seriesEpisodes: List<NasFile> = emptyList(),
+    val selectedZipPath: String? = null
 )
 
 class ComicViewModel(
@@ -36,9 +36,6 @@ class ComicViewModel(
 
     private val _uiState = MutableStateFlow(ComicBrowserUiState())
     val uiState: StateFlow<ComicBrowserUiState> = _uiState.asStateFlow()
-
-    private val _onOpenZipRequested = MutableSharedFlow<NasFile>()
-    val onOpenZipRequested = _onOpenZipRequested.asSharedFlow()
 
     private var scanJob: Job? = null
     private val allScannedFiles = mutableListOf<NasFile>()
@@ -88,7 +85,8 @@ class ComicViewModel(
                     currentFiles = emptyList(),
                     isSeriesView = false,
                     selectedMetadata = null,
-                    seriesEpisodes = emptyList() // 상세 정보 초기화
+                    seriesEpisodes = emptyList(),
+                    selectedZipPath = null
                 )
             }
             scanComicFoldersUseCase.execute(path).collect { file ->
@@ -110,18 +108,14 @@ class ComicViewModel(
 
     fun onFileClick(file: NasFile) {
         if (!file.isDirectory) {
-            viewModelScope.launch { _onOpenZipRequested.emit(file) }
+            _uiState.update { it.copy(selectedZipPath = file.path) }
             return
         }
         
         viewModelScope.launch {
             _uiState.update { it.copy(isLoading = true) }
             try {
-                // 1. 메타데이터(YAML) 로드
                 val metadata = posterRepository.getMetadata(file.path)
-                
-                // 2. 해당 폴더 내부의 진짜 권수(ZIP) 리스트 로드
-                // 경로 끝에 /가 없으면 문제가 생길 수 있으므로 보정
                 val targetPath = if (file.path.endsWith("/")) file.path else "${file.path}/"
                 val filesInFolder = nasRepository.listFiles(targetPath)
                 val volumes = filesInFolder.filter { 
@@ -132,13 +126,13 @@ class ComicViewModel(
                     _uiState.update { it.copy(
                         currentPath = file.path,
                         pathHistory = it.pathHistory + file.path,
-                        seriesEpisodes = volumes, // 전용 리스트에 저장!
+                        seriesEpisodes = volumes,
                         isLoading = false,
                         isSeriesView = true,
-                        selectedMetadata = metadata
+                        selectedMetadata = metadata,
+                        selectedZipPath = null
                     ) }
                 } else {
-                    // ZIP이 없으면 하위 폴더 스캔 (시리즈 속 시리즈인 경우)
                     _uiState.update { it.copy(isLoading = false) }
                     scanCategory(file.path)
                 }
@@ -148,13 +142,25 @@ class ComicViewModel(
         }
     }
 
+    fun closeViewer() {
+        _uiState.update { it.copy(selectedZipPath = null) }
+    }
+
     fun onBack() {
+        if (_uiState.value.selectedZipPath != null) {
+            closeViewer()
+            return
+        }
         val history = _uiState.value.pathHistory
         if (history.size > 1) {
             val newHistory = history.dropLast(1)
             _uiState.update { it.copy(pathHistory = newHistory) }
             scanCategory(newHistory.last(), isBack = true)
         } else onHome()
+    }
+
+    fun showError(message: String) {
+        _uiState.update { it.copy(errorMessage = message, isLoading = false) }
     }
 
     fun clearError() { _uiState.update { it.copy(errorMessage = null) } }

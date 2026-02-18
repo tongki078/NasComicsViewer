@@ -43,25 +43,21 @@ private val TextMuted = Color(0xFF888888)
 fun NasComicApp(viewModel: ComicViewModel) {
     val uiState by viewModel.uiState.collectAsState()
     val zipManager = remember { provideZipManager() }
-    var currentZipPath by remember { mutableStateOf<String?>(null) }
     
     val rootUrl = "smb://192.168.0.2/video/GDS3/GDRIVE/READING/만화/"
     LaunchedEffect(Unit) { viewModel.initialize(rootUrl, "takumi", "qksthd078!@") }
 
-    BackHandler(enabled = currentZipPath != null || uiState.pathHistory.size > 1) {
-        if (currentZipPath != null) currentZipPath = null else viewModel.onBack()
+    BackHandler(enabled = uiState.selectedZipPath != null || uiState.pathHistory.size > 1) {
+        viewModel.onBack()
     }
-
-    LaunchedEffect(Unit) { viewModel.onOpenZipRequested.collect { currentZipPath = it.path } }
 
     MaterialTheme(colorScheme = darkColorScheme(background = BgBlack, surface = BgBlack, primary = TextPureWhite)) {
         Box(Modifier.fillMaxSize().background(BgBlack)) {
             if (uiState.isIntroShowing) {
                 IntroScreen()
-            } else if (currentZipPath != null) {
-                 WebtoonViewer(currentZipPath!!, zipManager) { currentZipPath = null }
+            } else if (uiState.selectedZipPath != null) {
+                 WebtoonViewer(uiState.selectedZipPath!!, zipManager, { viewModel.closeViewer() }, { viewModel.showError(it) })
             } else if (uiState.isSeriesView) {
-                // [수정] 분리된 seriesEpisodes를 사용하도록 변경
                 SeriesDetailScreen(uiState, { viewModel.onFileClick(it) }, { viewModel.onBack() }, viewModel.posterRepository)
             } else {
                 Column(Modifier.fillMaxSize()) {
@@ -74,11 +70,12 @@ fun NasComicApp(viewModel: ComicViewModel) {
                     }
                 }
             }
+            
             if (uiState.isLoading && !uiState.isIntroShowing) {
                 Box(Modifier.fillMaxSize().background(BgBlack.copy(0.5f)), Alignment.Center) { CircularProgressIndicator(color = KakaoYellow) }
             }
             uiState.errorMessage?.let { msg ->
-                Snackbar(Modifier.align(Alignment.BottomCenter).padding(16.dp), action = { TextButton({ viewModel.clearError() }) { Text("OK") } }) { Text(msg) }
+                Snackbar(Modifier.align(Alignment.BottomCenter).padding(16.dp), containerColor = Color(0xFF222222), action = { TextButton({ viewModel.clearError() }) { Text("OK") } }) { Text(msg) }
             }
         }
     }
@@ -125,17 +122,54 @@ fun SeriesDetailScreen(state: ComicBrowserUiState, onVolumeClick: (NasFile) -> U
             Spacer(Modifier.height(16.dp))
         }
 
-        // [핵심 수정] 섞여버린 currentFiles 대신 전용 리스트인 seriesEpisodes 사용
         Column(Modifier.padding(horizontal = 20.dp).padding(bottom = 60.dp)) {
             state.seriesEpisodes.forEach { file ->
                 VolumeItem(file) { onVolumeClick(file) }
                 Spacer(Modifier.height(10.dp))
             }
-            if (state.seriesEpisodes.isEmpty()) {
-                Box(Modifier.fillMaxWidth().padding(40.dp), contentAlignment = Alignment.Center) {
-                    Text("불러올 에피소드가 없습니다.", color = TextMuted)
-                }
+        }
+    }
+}
+
+@Composable
+fun WebtoonViewer(path: String, manager: ZipManager, onClose: () -> Unit, onError: (String) -> Unit) {
+    val listState = rememberLazyListState()
+    val loadedImages = remember { mutableStateListOf<Pair<String, ImageBitmap>>() }
+    var isFinished by remember { mutableStateOf(false) }
+    var showControls by remember { mutableStateOf(true) }
+
+    LaunchedEffect(path) {
+        manager.streamAllImages(path, {}) { name, bytes ->
+            val bitmap = bytes.toImageBitmap()
+            if (bitmap != null) loadedImages.add(name to bitmap)
+        }
+        isFinished = true
+        if (loadedImages.isEmpty()) onError("이미지를 불러올 수 없습니다.")
+    }
+
+    Box(Modifier.fillMaxSize().background(Color.Black).clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) { showControls = !showControls }) {
+        LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
+            items(loadedImages) { (_, bitmap) -> Image(bitmap, null, Modifier.fillMaxWidth(), contentScale = ContentScale.FillWidth) }
+            if (!isFinished) {
+                item { Box(Modifier.fillMaxWidth().height(300.dp), contentAlignment = Alignment.Center) { CircularProgressIndicator(color = KakaoYellow) } }
             }
+        }
+        AnimatedVisibility(showControls, enter = fadeIn(), exit = fadeOut()) {
+            Box(Modifier.align(Alignment.TopCenter).fillMaxWidth().background(BgBlack.copy(0.8f)).statusBarsPadding().padding(16.dp)) {
+                Text("✕", color = TextPureWhite, fontSize = 20.sp, modifier = Modifier.align(Alignment.CenterStart).clickable { onClose() }.padding(8.dp))
+                Text("${listState.firstVisibleItemIndex + 1} / ${loadedImages.size}", Modifier.align(Alignment.Center), color = TextPureWhite, fontWeight = FontWeight.Bold)
+            }
+        }
+    }
+}
+
+@Composable
+fun VolumeItem(file: NasFile, onClick: () -> Unit) {
+    Surface(modifier = Modifier.fillMaxWidth().clickable(onClick = onClick), color = Color(0xFF0A0A0A), shape = RoundedCornerShape(4.dp), border = BorderStroke(0.5.dp, Color(0xFF1A1A1A))) {
+        Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text("📖", fontSize = 16.sp); Spacer(Modifier.width(14.dp))
+            Text(file.name, fontWeight = FontWeight.Medium, color = TextPureWhite, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Spacer(Modifier.weight(1f)); Text("〉", color = TextMuted, fontSize = 12.sp)
         }
     }
 }
@@ -194,48 +228,6 @@ fun ComicCard(file: NasFile, repo: PosterRepository, onClick: () -> Unit) {
         }
         Spacer(Modifier.height(6.dp))
         Text(metadata?.title ?: file.name, style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold, fontSize = 11.sp), maxLines = 2, overflow = TextOverflow.Ellipsis, color = TextPureWhite)
-    }
-}
-
-@Composable
-fun WebtoonViewer(path: String, manager: ZipManager, onClose: () -> Unit) {
-    val listState = rememberLazyListState()
-    val loadedImages = remember { mutableStateListOf<Pair<String, ImageBitmap>>() }
-    var isFinished by remember { mutableStateOf(false) }
-    var showControls by remember { mutableStateOf(true) }
-
-    LaunchedEffect(path) {
-        manager.streamAllImages(path, {}) { name, bytes ->
-            val bitmap = bytes.toImageBitmap()
-            if (bitmap != null) loadedImages.add(name to bitmap)
-        }
-        isFinished = true
-    }
-
-    Box(Modifier.fillMaxSize().background(Color.Black).clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) { showControls = !showControls }) {
-        LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
-            items(loadedImages) { (_, bitmap) -> Image(bitmap, null, Modifier.fillMaxWidth(), contentScale = ContentScale.FillWidth) }
-            if (!isFinished) {
-                item { Box(Modifier.fillMaxWidth().height(300.dp), contentAlignment = Alignment.Center) { CircularProgressIndicator(color = KakaoYellow) } }
-            }
-        }
-        AnimatedVisibility(showControls, enter = fadeIn(), exit = fadeOut()) {
-            Box(Modifier.align(Alignment.TopCenter).fillMaxWidth().background(BgBlack.copy(0.8f)).statusBarsPadding().padding(16.dp)) {
-                Text("✕", color = TextPureWhite, fontSize = 20.sp, modifier = Modifier.align(Alignment.CenterStart).clickable { onClose() }.padding(8.dp))
-                Text("${listState.firstVisibleItemIndex + 1} / ${loadedImages.size}", Modifier.align(Alignment.Center), color = TextPureWhite, fontWeight = FontWeight.Bold)
-            }
-        }
-    }
-}
-
-@Composable
-fun VolumeItem(file: NasFile, onClick: () -> Unit) {
-    Surface(modifier = Modifier.fillMaxWidth().clickable(onClick = onClick), color = Color(0xFF0A0A0A), shape = RoundedCornerShape(4.dp), border = BorderStroke(0.5.dp, Color(0xFF1A1A1A))) {
-        Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text("📖", fontSize = 16.sp); Spacer(Modifier.width(14.dp))
-            Text(file.name, fontWeight = FontWeight.Medium, color = TextPureWhite, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Spacer(Modifier.weight(1f)); Text("〉", color = TextMuted, fontSize = 12.sp)
-        }
     }
 }
 

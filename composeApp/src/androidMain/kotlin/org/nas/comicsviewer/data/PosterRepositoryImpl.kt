@@ -31,98 +31,96 @@ class AndroidPosterRepository private constructor() : PosterRepository {
 
     override suspend fun getMetadata(path: String): ComicMetadata = withContext(Dispatchers.IO) {
         val pathHash = md5(path)
+        println("DEBUG_POSTER: [STEP 1] Start scanning path: $path")
         
-        // 1. SQLite DB 캐시 확인
+        // 1. DB 캐시 확인 및 복구
         try {
             val cached = database?.posterCacheQueries?.getPoster(pathHash)?.executeAsOneOrNull()
-            if (cached?.poster_url != null) {
-                // 이전에 이미지를 못 찾았더라도 한 번 더 시도해볼 가치가 있음 (업데이트 대응)
-                if (cached.poster_url != NOT_FOUND) {
-                    return@withContext ComicMetadata(posterUrl = cached.poster_url)
+            if (cached?.poster_url != null && cached.poster_url != NOT_FOUND) {
+                println("DEBUG_POSTER: [CACHE] Found in DB: ${cached.poster_url}")
+                val parts = cached.poster_url.split("|||")
+                if (parts.size >= 4) {
+                    return@withContext ComicMetadata(
+                        posterUrl = parts[0].ifBlank { null },
+                        title = parts[1].ifBlank { null },
+                        author = parts[2].ifBlank { null },
+                        summary = parts[3].ifBlank { null }
+                    )
                 }
             }
-        } catch (e: Exception) { }
+        } catch (e: Exception) {
+            println("DEBUG_POSTER: [ERROR] Cache check fail: ${e.message}")
+        }
 
-        // 2. 실시간 스캔
+        // 2. 실시간 스캔 및 데이터 수집
         try {
-            // [획기적 개선] 경로 정규화: 폴더면 반드시 슬래시로 끝나야 함
-            val targetPath = if (path.lowercase().let { it.endsWith(".zip") || it.endsWith(".cbz") }) {
-                path.substringBeforeLast("/") + "/"
-            } else if (!path.endsWith("/")) {
-                "$path/"
-            } else path
+            val files = nasRepository.listFiles(path)
+            println("DEBUG_POSTER: [STEP 2] Files in folder: ${files.map { it.name }}")
 
-            val files = nasRepository.listFiles(targetPath)
-            var foundUrl: String? = null
             var metadata = ComicMetadata()
+            var posterPath: String? = null
 
             // A. kavita.yaml 파싱
             val yamlFile = files.find { it.name.lowercase() == "kavita.yaml" }
             if (yamlFile != null) {
-                try {
-                    val bytes = nasRepository.getFileContent(yamlFile.path)
-                    val content = String(bytes, Charsets.UTF_8)
-                    metadata = metadata.copy(
-                        title = parseYamlValue(content, "localizedName") ?: parseYamlValue(content, "name"),
-                        author = parseYamlValue(content, "writer")
-                    )
-                    
-                    foundUrl = parseYamlValue(content, "poster_url") ?: 
-                               parseYamlValue(content, "cover")?.let { name -> 
-                                   files.find { it.name.equals(name, ignoreCase = true) }?.path 
-                               }
-                } catch (e: Exception) { }
+                println("DEBUG_POSTER: [STEP 3] Found kavita.yaml, reading content...")
+                val content = String(nasRepository.getFileContent(yamlFile.path), Charsets.UTF_8)
+                
+                metadata = metadata.copy(
+                    title = parseYamlValue(content, "localizedName") ?: parseYamlValue(content, "name"),
+                    author = parseYamlValue(content, "writer"),
+                    summary = parseYamlValue(content, "summary")
+                )
+                
+                posterPath = parseYamlValue(content, "poster_url") ?: 
+                             parseYamlValue(content, "cover")?.let { name -> 
+                                 files.find { it.name.equals(name, ignoreCase = true) }?.path 
+                             }
+                println("DEBUG_POSTER: [YAML RESULT] Title: ${metadata.title}, Author: ${metadata.author}, Poster: $posterPath")
             }
 
-            // B. 일반적인 이미지 검색
-            if (foundUrl == null) {
-                val commonNames = listOf("poster", "cover", "folder", "thumbnail", "1")
-                foundUrl = files.find { f ->
+            // B. 폴더 내 이미지 검색 (YAML에 포스터 정보가 없을 때만)
+            if (posterPath == null) {
+                val common = listOf("poster", "cover", "folder", "thumbnail")
+                posterPath = files.find { f ->
                     val nameLow = f.name.lowercase().substringBeforeLast(".")
-                    !f.isDirectory && commonNames.any { it == nameLow } && isImagePath(f.name)
+                    common.contains(nameLow) && (f.name.lowercase().endsWith(".jpg") || f.name.lowercase().endsWith(".png"))
                 }?.path
             }
 
-            // C. 폴더 내 첫 번째 이미지
-            if (foundUrl == null) {
-                foundUrl = files.filter { !it.isDirectory && isImagePath(it.name) }
-                    .sortedBy { it.name }.firstOrNull()?.path
-            }
-
-            // 결과 저장 (NOT_FOUND 상태라도 업데이트 함)
+            // 3. SQLite에 통합 정보 저장 (구분자 ||| 사용)
+            val combinedData = "${posterPath ?: ""}|||${metadata.title ?: ""}|||${metadata.author ?: ""}|||${metadata.summary ?: ""}"
             database?.posterCacheQueries?.upsertPoster(
                 title_hash = pathHash,
-                poster_url = foundUrl ?: NOT_FOUND,
+                poster_url = combinedData,
                 cached_at = System.currentTimeMillis()
             )
+            println("DEBUG_POSTER: [STEP 4] Metadata saved to SQLite")
 
-            return@withContext metadata.copy(posterUrl = foundUrl)
+            return@withContext metadata.copy(posterUrl = posterPath)
         } catch (e: Exception) {
+            println("DEBUG_POSTER: [FATAL] Global scan error: ${e.message}")
             ComicMetadata()
         }
     }
 
-    private fun isImagePath(name: String): Boolean {
-        val low = name.lowercase()
-        return low.endsWith(".jpg") || low.endsWith(".png") || low.endsWith(".jpeg") || low.endsWith(".webp")
-    }
-
     private fun parseYamlValue(content: String, key: String): String? {
-        val regex = Regex("""^\s*$key\s*:\s*["']?([^"'\n\r]+)["']?""", RegexOption.MULTILINE)
-        return regex.find(content)?.groupValues?.get(1)?.trim()?.removeSurrounding("'")?.removeSurrounding("\"")
+        val regex = Regex("""^\s*$key\s*:\s*(.*)$""", RegexOption.MULTILINE)
+        val value = regex.find(content)?.groupValues?.get(1)?.trim()?.removeSurrounding("'")?.removeSurrounding("\"")
+        return if (value.isNullOrBlank()) null else value
     }
 
     override suspend fun downloadImageFromUrl(url: String): ByteArray? {
-        if (url == NOT_FOUND) return null
+        if (url.isBlank()) return null
         val urlHash = md5(url)
         val cacheFile = File(cacheDir, "img_$urlHash")
-        if (cacheFile.exists()) return try { cacheFile.readBytes() } catch (e: Exception) { null }
+        if (cacheFile.exists()) return cacheFile.readBytes()
 
         return withContext(Dispatchers.IO) {
             try {
                 if (url.startsWith("http")) {
                     val conn = URL(url).openConnection() as HttpURLConnection
-                    conn.connectTimeout = 5000; conn.readTimeout = 5000
+                    conn.apply { connectTimeout = 8000; readTimeout = 8000 }
                     if (conn.responseCode == 200) {
                         val bytes = conn.inputStream.use { it.readBytes() }
                         if (bytes.isNotEmpty()) cacheFile.writeBytes(bytes)
@@ -133,7 +131,10 @@ class AndroidPosterRepository private constructor() : PosterRepository {
                     if (bytes.isNotEmpty()) cacheFile.writeBytes(bytes)
                     bytes
                 }
-            } catch (e: Exception) { null }
+            } catch (e: Exception) { 
+                println("DEBUG_POSTER: [IMAGE ERROR] Download failed for $url: ${e.message}")
+                null 
+            }
         }
     }
 

@@ -36,8 +36,21 @@ class AndroidZipManager : ZipManager {
 
     override suspend fun streamAllImages(path: String, onProgress: (Float) -> Unit, onImage: suspend (String, ByteArray) -> Unit) = withContext(Dispatchers.IO) {
         val context = getContext()
-        val smbFile = SmbFile(getSafeUrl(path), context)
-        if (!smbFile.exists()) return@withContext
+        // 인코딩된 경로와 원본 경로 모두 시도
+        val urlsToTry = listOf(getSafeUrl(path), path)
+        var smbFile: SmbFile? = null
+        
+        for (url in urlsToTry) {
+            try {
+                val f = SmbFile(url, context)
+                if (f.exists()) {
+                    smbFile = f
+                    break
+                }
+            } catch (e: Exception) {}
+        }
+        
+        if (smbFile == null) return@withContext
 
         val totalSize = smbFile.length().toDouble()
         val encodings = listOf("CP949", "UTF-8", "EUC-KR")
