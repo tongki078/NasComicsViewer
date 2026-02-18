@@ -1,8 +1,11 @@
 package org.nas.comicsviewer.data
 
+import org.nas.comicsviewer.data.ComicDatabase
+
 interface PosterRepository {
     suspend fun searchPoster(title: String): String?
     suspend fun downloadImageFromUrl(url: String): ByteArray?
+    fun setDatabase(database: ComicDatabase)
 }
 
 expect fun providePosterRepository(): PosterRepository

@@ -38,13 +38,11 @@ fun NasComicApp(viewModel: ComicViewModel) {
     val scope = rememberCoroutineScope()
 
     val zipManager = remember { provideZipManager() }
-    val nasRepository = remember { provideNasRepository() }
     
     var currentZipPath by remember { mutableStateOf<String?>(null) }
     var zipImages by remember { mutableStateOf<List<String>>(emptyList()) }
     var showControls by remember { mutableStateOf(true) }
-    var isDownloading by remember { mutableStateOf(false) }
-    var downloadProgress by remember { mutableStateOf(0f) }
+    var isStreamingLoading by remember { mutableStateOf(false) }
     
     val rootUrl = "smb://192.168.0.2/video/GDS3/GDRIVE/READING/만화/"
 
@@ -52,32 +50,29 @@ fun NasComicApp(viewModel: ComicViewModel) {
         viewModel.initialize(rootUrl, "takumi", "qksthd078!@")
     }
 
-    fun openZipFile(file: NasFile) {
+    // Streaming Open (No full download!)
+    fun openZipStreaming(file: NasFile) {
         scope.launch {
-            isDownloading = true
-            downloadProgress = 0f
+            isStreamingLoading = true
             try {
-                val fileNameHash = "full_${file.path.hashCode()}.zip"
-                val tempPath = nasRepository.getTempFilePath(fileNameHash)
-                nasRepository.downloadFile(file.path, tempPath) { progress -> downloadProgress = progress }
-                val images = zipManager.listImagesInZip(tempPath)
+                // Just fetch the list of images from SMB index (very fast)
+                val images = zipManager.listImagesInZip(file.path)
                 if (images.isNotEmpty()) {
-                    currentZipPath = tempPath
+                    currentZipPath = file.path
                     zipImages = images
                     showControls = false
-                } 
+                }
             } catch (e: Exception) {
                 // Handle error
             } finally {
-                isDownloading = false
-                downloadProgress = 0f
+                isStreamingLoading = false
             }
         }
     }
 
     LaunchedEffect(Unit) {
         viewModel.onOpenZipRequested.collect { file ->
-            openZipFile(file)
+            openZipStreaming(file)
         }
     }
 
@@ -231,7 +226,7 @@ fun NasComicApp(viewModel: ComicViewModel) {
             }
             
             // --- LOADING OVERLAYS ---
-            if (uiState.isLoading || isDownloading) {
+            if (uiState.isLoading || isStreamingLoading) {
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
@@ -240,24 +235,13 @@ fun NasComicApp(viewModel: ComicViewModel) {
                     contentAlignment = Alignment.Center
                 ) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        if (isDownloading) {
-                            Text("Downloading Webtoon...", color = Color.White, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                            Spacer(Modifier.height(16.dp))
-                            LinearProgressIndicator(
-                                progress = { downloadProgress }, 
-                                color = MaterialTheme.colorScheme.primary, 
-                                trackColor = Color.Gray.copy(alpha = 0.3f),
-                                modifier = Modifier.width(240.dp).height(6.dp).clip(RoundedCornerShape(3.dp))
-                            )
-                            Spacer(Modifier.height(8.dp))
-                            Text("${(downloadProgress * 100).toInt()}%", color = Color.White.copy(alpha = 0.7f), fontSize = 14.sp)
-                        } else {
-                            CircularProgressIndicator(color = MaterialTheme.colorScheme.primary, strokeWidth = 3.dp)
-                            if (uiState.isScanning) {
-                                Spacer(Modifier.height(16.dp))
-                                Text("Scanning library items...", color = Color.White, style = MaterialTheme.typography.bodyMedium)
-                            }
-                        }
+                        CircularProgressIndicator(color = MaterialTheme.colorScheme.primary, strokeWidth = 3.dp)
+                        Spacer(Modifier.height(16.dp))
+                        Text(
+                            if (isStreamingLoading) "Opening webtoon..." else "Loading...", 
+                            color = Color.White, 
+                            style = MaterialTheme.typography.bodyMedium
+                        )
                     }
                 }
             }

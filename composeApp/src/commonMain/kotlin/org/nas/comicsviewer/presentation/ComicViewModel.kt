@@ -2,6 +2,7 @@ package org.nas.comicsviewer.presentation
 
 import org.nas.comicsviewer.data.NasFile
 import org.nas.comicsviewer.data.NasRepository
+import org.nas.comicsviewer.data.PosterRepository
 import org.nas.comicsviewer.domain.usecase.GetCategoriesUseCase
 import org.nas.comicsviewer.domain.usecase.ScanComicFoldersUseCase
 import org.nas.comicsviewer.domain.usecase.SetCredentialsUseCase
@@ -27,6 +28,7 @@ data class ComicBrowserUiState(
 
 class ComicViewModel(
     private val nasRepository: NasRepository,
+    val posterRepository: PosterRepository,
     private val getCategoriesUseCase: GetCategoriesUseCase,
     private val scanComicFoldersUseCase: ScanComicFoldersUseCase,
     private val setCredentialsUseCase: SetCredentialsUseCase
@@ -98,7 +100,6 @@ class ComicViewModel(
                     allScannedFiles.add(file)
                     _uiState.update { it.copy(totalFoundCount = allScannedFiles.size) }
                     
-                    // Automatically update UI for first page
                     if (allScannedFiles.size <= PAGE_SIZE) {
                         _uiState.update { it.copy(currentFiles = allScannedFiles.toList()) }
                     }
@@ -133,7 +134,6 @@ class ComicViewModel(
                         _onOpenZipRequested.emit(zips[0])
                         _uiState.update { it.copy(isLoading = false) }
                     } else {
-                        // Series folder with multiple volumes
                         val sortedZips = zips.sortedBy { it.name }
                         _uiState.update { state ->
                             state.copy(
@@ -149,7 +149,6 @@ class ComicViewModel(
                         allScannedFiles.addAll(sortedZips)
                     }
                 } else {
-                    // It's a directory containing other manga titles (deep search)
                     _uiState.update { it.copy(isLoading = false) }
                     scanCategory(file.path)
                 }
