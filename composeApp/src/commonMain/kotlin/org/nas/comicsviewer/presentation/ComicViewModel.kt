@@ -1,11 +1,7 @@
 package org.nas.comicsviewer.presentation
 
-import org.nas.comicsviewer.data.NasFile
-import org.nas.comicsviewer.data.NasRepository
-import org.nas.comicsviewer.data.PosterRepository
-import org.nas.comicsviewer.domain.usecase.GetCategoriesUseCase
-import org.nas.comicsviewer.domain.usecase.ScanComicFoldersUseCase
-import org.nas.comicsviewer.domain.usecase.SetCredentialsUseCase
+import org.nas.comicsviewer.data.*
+import org.nas.comicsviewer.domain.usecase.*
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import androidx.lifecycle.ViewModel
@@ -19,13 +15,15 @@ data class ComicBrowserUiState(
     val currentFiles: List<NasFile> = emptyList(),
     val isLoading: Boolean = false,
     val isScanning: Boolean = false,
-    val isPaging: Boolean = false,
     val errorMessage: String? = null,
     val currentPath: String? = null,
     val pathHistory: List<String> = emptyList(),
     val totalFoundCount: Int = 0,
     val isSeriesView: Boolean = false,
-    val isIntroShowing: Boolean = true
+    val isIntroShowing: Boolean = true,
+    val selectedMetadata: ComicMetadata? = null,
+    // [획기적 개선] 상세 페이지 전용 에피소드 리스트 추가
+    val seriesEpisodes: List<NasFile> = emptyList()
 )
 
 class ComicViewModel(
@@ -57,15 +55,10 @@ class ComicViewModel(
             try {
                 val categories = getCategoriesUseCase.execute(rootUrl)
                 _uiState.update { it.copy(categories = categories) }
-                if (categories.isNotEmpty()) {
-                    scanCategory(categories[0].path, 0)
-                } else {
-                    _uiState.update { it.copy(errorMessage = "서버에서 폴더 목록을 가져올 수 없습니다.") }
-                }
+                if (categories.isNotEmpty()) scanCategory(categories[0].path, 0)
             } catch (e: Exception) {
                 _uiState.update { it.copy(errorMessage = "연결 실패: ${e.message}") }
             } finally {
-                // 어떤 경우에도 인트로는 닫아서 메인 UI를 보여줌
                 delay(500)
                 _uiState.update { it.copy(isLoading = false, isIntroShowing = false) }
             }
@@ -80,7 +73,6 @@ class ComicViewModel(
     fun scanCategory(path: String, index: Int? = null, isBack: Boolean = false) {
         scanJob?.cancel()
         allScannedFiles.clear()
-        
         scanJob = viewModelScope.launch {
             _uiState.update { state -> 
                 val newHistory = when {
@@ -94,31 +86,25 @@ class ComicViewModel(
                     pathHistory = newHistory,
                     isScanning = true, 
                     currentFiles = emptyList(),
-                    totalFoundCount = 0,
-                    isSeriesView = false
+                    isSeriesView = false,
+                    selectedMetadata = null,
+                    seriesEpisodes = emptyList() // 상세 정보 초기화
                 )
             }
-            
-            scanComicFoldersUseCase.execute(path)
-                .onCompletion { 
-                    _uiState.update { it.copy(isScanning = false) } 
-                    if (allScannedFiles.isNotEmpty() && _uiState.value.currentFiles.isEmpty()) loadNextPage()
+            scanComicFoldersUseCase.execute(path).collect { file ->
+                allScannedFiles.add(file)
+                allScannedFiles.sortBy { it.name }
+                if (_uiState.value.currentFiles.size < PAGE_SIZE) {
+                    _uiState.update { it.copy(currentFiles = allScannedFiles.take(PAGE_SIZE), totalFoundCount = allScannedFiles.size) }
                 }
-                .collect { file ->
-                    allScannedFiles.add(file)
-                    allScannedFiles.sortBy { it.name }
-                    _uiState.update { it.copy(totalFoundCount = allScannedFiles.size) }
-                    if (_uiState.value.currentFiles.size < PAGE_SIZE) {
-                        _uiState.update { it.copy(currentFiles = allScannedFiles.take(PAGE_SIZE)) }
-                    }
-                }
+            }
+            _uiState.update { it.copy(isScanning = false) }
         }
     }
 
     fun loadNextPage() {
         if (_uiState.value.isSeriesView) return
         val currentCount = _uiState.value.currentFiles.size
-        if (allScannedFiles.size <= currentCount) return
         _uiState.update { it.copy(currentFiles = allScannedFiles.take(currentCount + PAGE_SIZE)) }
     }
 
@@ -127,23 +113,37 @@ class ComicViewModel(
             viewModelScope.launch { _onOpenZipRequested.emit(file) }
             return
         }
-        scanJob?.cancel()
-        allScannedFiles.clear()
+        
         viewModelScope.launch {
             _uiState.update { it.copy(isLoading = true) }
             try {
-                val files = nasRepository.listFiles(file.path)
-                val zips = files.filter { it.name.lowercase().let { n -> n.endsWith(".zip") || n.endsWith(".cbz") } }
-                if (zips.isNotEmpty()) {
-                    val sortedZips = zips.sortedBy { it.name }
-                    _uiState.update { it.copy(currentPath = file.path, pathHistory = it.pathHistory + file.path, currentFiles = sortedZips, isLoading = false, isSeriesView = true) }
-                    allScannedFiles.addAll(sortedZips)
+                // 1. 메타데이터(YAML) 로드
+                val metadata = posterRepository.getMetadata(file.path)
+                
+                // 2. 해당 폴더 내부의 진짜 권수(ZIP) 리스트 로드
+                // 경로 끝에 /가 없으면 문제가 생길 수 있으므로 보정
+                val targetPath = if (file.path.endsWith("/")) file.path else "${file.path}/"
+                val filesInFolder = nasRepository.listFiles(targetPath)
+                val volumes = filesInFolder.filter { 
+                    it.name.lowercase().let { n -> n.endsWith(".zip") || n.endsWith(".cbz") } 
+                }.sortedBy { it.name }
+                
+                if (volumes.isNotEmpty()) {
+                    _uiState.update { it.copy(
+                        currentPath = file.path,
+                        pathHistory = it.pathHistory + file.path,
+                        seriesEpisodes = volumes, // 전용 리스트에 저장!
+                        isLoading = false,
+                        isSeriesView = true,
+                        selectedMetadata = metadata
+                    ) }
                 } else {
+                    // ZIP이 없으면 하위 폴더 스캔 (시리즈 속 시리즈인 경우)
                     _uiState.update { it.copy(isLoading = false) }
                     scanCategory(file.path)
                 }
             } catch (e: Exception) {
-                _uiState.update { it.copy(isLoading = false, errorMessage = "폴더 접근 실패: ${e.message}") }
+                _uiState.update { it.copy(isLoading = false, errorMessage = "에피소드 로드 실패: ${e.message}") }
             }
         }
     }

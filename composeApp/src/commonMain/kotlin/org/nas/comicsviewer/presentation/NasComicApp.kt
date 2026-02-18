@@ -16,6 +16,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -32,13 +33,11 @@ import org.nas.comicsviewer.BackHandler
 import org.nas.comicsviewer.data.*
 import org.nas.comicsviewer.toImageBitmap
 
-// --- STYLE COLORS ---
 private val KakaoYellow = Color(0xFFFEE500)
 private val BgBlack = Color(0xFF000000)
 private val SurfaceGrey = Color(0xFF111111)
-private val CardBorder = Color(0xFF1A1A1A)
 private val TextPureWhite = Color(0xFFFFFFFF)
-private val TextMuted = Color(0xFF777777)
+private val TextMuted = Color(0xFF888888)
 
 @Composable
 fun NasComicApp(viewModel: ComicViewModel) {
@@ -47,273 +46,118 @@ fun NasComicApp(viewModel: ComicViewModel) {
     var currentZipPath by remember { mutableStateOf<String?>(null) }
     
     val rootUrl = "smb://192.168.0.2/video/GDS3/GDRIVE/READING/만화/"
-
-    LaunchedEffect(Unit) {
-        viewModel.initialize(rootUrl, "takumi", "qksthd078!@")
-    }
+    LaunchedEffect(Unit) { viewModel.initialize(rootUrl, "takumi", "qksthd078!@") }
 
     BackHandler(enabled = currentZipPath != null || uiState.pathHistory.size > 1) {
         if (currentZipPath != null) currentZipPath = null else viewModel.onBack()
     }
 
-    LaunchedEffect(Unit) {
-        viewModel.onOpenZipRequested.collect { file ->
-            currentZipPath = file.path
-        }
-    }
+    LaunchedEffect(Unit) { viewModel.onOpenZipRequested.collect { currentZipPath = it.path } }
 
-    MaterialTheme(colorScheme = darkColorScheme(
-        background = BgBlack,
-        surface = BgBlack,
-        primary = TextPureWhite,
-        secondary = KakaoYellow
-    )) {
+    MaterialTheme(colorScheme = darkColorScheme(background = BgBlack, surface = BgBlack, primary = TextPureWhite)) {
         Box(Modifier.fillMaxSize().background(BgBlack)) {
             if (uiState.isIntroShowing) {
                 IntroScreen()
+            } else if (currentZipPath != null) {
+                 WebtoonViewer(currentZipPath!!, zipManager) { currentZipPath = null }
+            } else if (uiState.isSeriesView) {
+                // [수정] 분리된 seriesEpisodes를 사용하도록 변경
+                SeriesDetailScreen(uiState, { viewModel.onFileClick(it) }, { viewModel.onBack() }, viewModel.posterRepository)
             } else {
-                if (currentZipPath != null) {
-                     WebtoonViewer(currentZipPath!!, zipManager) { currentZipPath = null }
-                } else {
-                    Column(Modifier.fillMaxSize()) {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .statusBarsPadding()
-                                .padding(horizontal = 20.dp, vertical = 14.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Home,
-                                contentDescription = "Home",
-                                tint = TextPureWhite,
-                                modifier = Modifier
-                                    .size(28.dp)
-                                    .clickable(
-                                        interactionSource = remember { MutableInteractionSource() },
-                                        indication = null
-                                    ) { viewModel.onHome() }
-                            )
-                            Spacer(Modifier.width(16.dp))
-                            Text(
-                                "NAS WEBTOON",
-                                style = MaterialTheme.typography.titleMedium.copy(
-                                    fontWeight = FontWeight.Black,
-                                    letterSpacing = (-0.5).sp
-                                ),
-                                color = TextPureWhite
-                            )
-                            Spacer(Modifier.weight(1f))
-                        }
-
-                        if (uiState.categories.isNotEmpty()) {
-                            ScrollableTabRow(
-                                selectedTabIndex = uiState.selectedCategoryIndex,
-                                containerColor = BgBlack,
-                                edgePadding = 20.dp,
-                                divider = {},
-                                indicator = { positions ->
-                                    if (uiState.selectedCategoryIndex < positions.size) {
-                                        Box(
-                                            Modifier
-                                                .tabIndicatorOffset(positions[uiState.selectedCategoryIndex])
-                                                .height(2.dp)
-                                                .background(TextPureWhite)
-                                        )
-                                    }
-                                }
-                            ) {
-                                uiState.categories.forEachIndexed { i, cat ->
-                                    Tab(
-                                        selected = uiState.selectedCategoryIndex == i,
-                                        onClick = { viewModel.scanCategory(cat.path, i) },
-                                        text = { 
-                                            Text(
-                                                cat.name,
-                                                fontWeight = if (uiState.selectedCategoryIndex == i) FontWeight.Black else FontWeight.Medium,
-                                                fontSize = 14.sp
-                                            ) 
-                                        },
-                                        selectedContentColor = TextPureWhite,
-                                        unselectedContentColor = TextMuted
-                                    )
-                                }
-                            }
-                        }
-
-                        if (uiState.pathHistory.size > 1) {
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(horizontal = 20.dp, vertical = 10.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Text(
-                                    "〈", 
-                                    color = TextPureWhite, 
-                                    modifier = Modifier.clickable { viewModel.onBack() }.padding(end = 12.dp),
-                                    fontWeight = FontWeight.Black,
-                                    fontSize = 16.sp
-                                )
-                                val currentTitle = uiState.currentPath?.trimEnd('/')?.split("/")?.lastOrNull() ?: ""
-                                Text(
-                                    text = currentTitle,
-                                    style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Bold),
-                                    color = TextPureWhite,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                            }
-                        }
-
-                        Box(Modifier.weight(1f)) {
-                            if (uiState.isSeriesView) {
-                                LazyColumn(
-                                    Modifier.fillMaxSize(),
-                                    contentPadding = PaddingValues(horizontal = 20.dp, vertical = 8.dp),
-                                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                                ) {
-                                    items(uiState.currentFiles) { file ->
-                                        VolumeItem(file) { viewModel.onFileClick(file) }
-                                    }
-                                }
-                            } else {
-                                FolderGridView(uiState, { viewModel.onFileClick(it) }, { viewModel.loadNextPage() })
-                            }
-                        }
+                Column(Modifier.fillMaxSize()) {
+                    TopBar { viewModel.onHome() }
+                    if (uiState.categories.isNotEmpty()) {
+                        CategoryTabs(uiState) { path, index -> viewModel.scanCategory(path, index) }
+                    }
+                    Box(Modifier.weight(1f)) {
+                        FolderGridView(uiState, { viewModel.onFileClick(it) }, { viewModel.loadNextPage() })
                     }
                 }
             }
-            
             if (uiState.isLoading && !uiState.isIntroShowing) {
-                Box(Modifier.fillMaxSize().background(BgBlack.copy(0.5f)), contentAlignment = Alignment.Center) {
-                    CircularProgressIndicator(color = KakaoYellow, strokeWidth = 2.dp, modifier = Modifier.size(32.dp))
-                }
+                Box(Modifier.fillMaxSize().background(BgBlack.copy(0.5f)), Alignment.Center) { CircularProgressIndicator(color = KakaoYellow) }
             }
-
             uiState.errorMessage?.let { msg ->
-                Snackbar(
-                    modifier = Modifier.align(Alignment.BottomCenter).padding(16.dp),
-                    containerColor = Color(0xFF222222),
-                    contentColor = TextPureWhite,
-                    action = { TextButton(onClick = { viewModel.clearError() }) { Text("OK", color = KakaoYellow) } }
-                ) { Text(msg, fontSize = 12.sp) }
+                Snackbar(Modifier.align(Alignment.BottomCenter).padding(16.dp), action = { TextButton({ viewModel.clearError() }) { Text("OK") } }) { Text(msg) }
             }
         }
     }
 }
 
 @Composable
-fun IntroScreen() {
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(BgBlack),
-        contentAlignment = Alignment.Center
-    ) {
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Box(
-                modifier = Modifier
-                    .size(80.dp)
-                    .border(2.dp, TextPureWhite, RoundedCornerShape(12.dp)),
-                contentAlignment = Alignment.Center
-            ) {
-                Box(
-                    modifier = Modifier
-                        .size(30.dp)
-                        .background(KakaoYellow, RoundedCornerShape(2.dp))
-                )
+fun SeriesDetailScreen(state: ComicBrowserUiState, onVolumeClick: (NasFile) -> Unit, onBack: () -> Unit, repo: PosterRepository) {
+    var posterBitmap by remember { mutableStateOf<ImageBitmap?>(null) }
+    val metadata = state.selectedMetadata
+    
+    LaunchedEffect(metadata?.posterUrl) {
+        metadata?.posterUrl?.let { url ->
+            repo.downloadImageFromUrl(url)?.let { posterBitmap = it.toImageBitmap() }
+        }
+    }
+
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
+        Box(Modifier.fillMaxWidth().height(420.dp)) {
+            if (posterBitmap != null) {
+                Image(posterBitmap!!, null, Modifier.fillMaxSize().blur(30.dp).alpha(0.3f), contentScale = ContentScale.Crop)
+                Image(posterBitmap!!, null, Modifier.align(Alignment.BottomCenter).width(240.dp).height(340.dp).clip(RoundedCornerShape(8.dp)).border(0.5.dp, Color.White.copy(0.2f), RoundedCornerShape(8.dp)), contentScale = ContentScale.Crop)
             }
-            Spacer(Modifier.height(24.dp))
-            Text(
-                text = "NAS WEBTOON",
-                style = MaterialTheme.typography.headlineSmall.copy(
-                    fontWeight = FontWeight.Black,
-                    letterSpacing = 2.sp
-                ),
-                color = TextPureWhite
-            )
+            Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color.Transparent, BgBlack))))
+            IconButton(onClick = onBack, modifier = Modifier.statusBarsPadding().padding(8.dp).background(Color.Black.copy(0.3f), CircleShape)) {
+                Text("〈", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 20.sp)
+            }
+        }
+
+        Column(Modifier.padding(horizontal = 24.dp)) {
+            Text(text = metadata?.title ?: "", style = MaterialTheme.typography.headlineMedium.copy(fontWeight = FontWeight.Black), color = TextPureWhite)
             Spacer(Modifier.height(8.dp))
-            Text(
-                text = "Powered by Kavita YAML",
-                style = MaterialTheme.typography.bodySmall,
-                color = TextMuted
-            )
-            Spacer(Modifier.height(48.dp))
-            LinearProgressIndicator(
-                modifier = Modifier.width(120.dp).height(2.dp),
-                color = KakaoYellow,
-                trackColor = Color.White.copy(alpha = 0.1f)
-            )
-        }
-    }
-}
-
-@Composable
-fun WebtoonViewer(path: String, manager: ZipManager, onClose: () -> Unit) {
-    val listState = rememberLazyListState()
-    val loadedImages = remember { mutableStateListOf<Pair<String, ImageBitmap>>() }
-    var isFinished by remember { mutableStateOf(false) }
-    var showControls by remember { mutableStateOf(true) }
-    val currentPage by remember { derivedStateOf { listState.firstVisibleItemIndex } }
-
-    LaunchedEffect(path) {
-        manager.streamAllImages(path, {}) { name, bytes ->
-            val bitmap = bytes.toImageBitmap()
-            if (bitmap != null) loadedImages.add(name to bitmap)
-        }
-        isFinished = true
-    }
-
-    Box(Modifier.fillMaxSize().background(BgBlack).clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) { showControls = !showControls }) {
-        LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
-            items(loadedImages) { (_, bitmap) ->
-                Image(bitmap, null, Modifier.fillMaxWidth(), contentScale = ContentScale.FillWidth)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(text = metadata?.author ?: "작가 미상", color = KakaoYellow, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                Spacer(Modifier.width(12.dp))
+                Surface(color = Color(0xFF222222), shape = RoundedCornerShape(2.dp)) {
+                    Text(text = "연재중", modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp), color = TextMuted, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                }
             }
-            if (!isFinished) {
-                item {
-                    Box(Modifier.fillMaxWidth().height(300.dp), contentAlignment = Alignment.Center) {
-                        CircularProgressIndicator(color = KakaoYellow)
-                    }
+            Spacer(Modifier.height(16.dp))
+            Text(text = metadata?.summary ?: "등록된 줄거리가 없습니다.", color = TextMuted, fontSize = 14.sp, lineHeight = 20.sp, maxLines = 4, overflow = TextOverflow.Ellipsis)
+            
+            Spacer(Modifier.height(40.dp))
+            Text("에피소드 (${state.seriesEpisodes.size})", color = TextPureWhite, fontWeight = FontWeight.Black, fontSize = 18.sp)
+            Spacer(Modifier.height(16.dp))
+        }
+
+        // [핵심 수정] 섞여버린 currentFiles 대신 전용 리스트인 seriesEpisodes 사용
+        Column(Modifier.padding(horizontal = 20.dp).padding(bottom = 60.dp)) {
+            state.seriesEpisodes.forEach { file ->
+                VolumeItem(file) { onVolumeClick(file) }
+                Spacer(Modifier.height(10.dp))
+            }
+            if (state.seriesEpisodes.isEmpty()) {
+                Box(Modifier.fillMaxWidth().padding(40.dp), contentAlignment = Alignment.Center) {
+                    Text("불러올 에피소드가 없습니다.", color = TextMuted)
                 }
             }
         }
-        
-        AnimatedVisibility(showControls, enter = fadeIn(), exit = fadeOut()) {
-            Box(Modifier.align(Alignment.TopCenter).fillMaxWidth().background(BgBlack.copy(0.8f)).statusBarsPadding().padding(16.dp)) {
-                Text(
-                    "✕", 
-                    color = TextPureWhite, 
-                    fontSize = 20.sp, 
-                    modifier = Modifier.align(Alignment.CenterStart).clickable { onClose() }.padding(8.dp)
-                )
-                Text("${currentPage + 1} / ${loadedImages.size}", Modifier.align(Alignment.Center), color = TextPureWhite, fontWeight = FontWeight.Bold, fontSize = 14.sp)
-            }
-        }
     }
 }
 
 @Composable
-fun VolumeItem(file: NasFile, onClick: () -> Unit) {
-    Surface(
-        modifier = Modifier.fillMaxWidth().clickable(onClick = onClick),
-        color = Color(0xFF0A0A0A),
-        shape = RoundedCornerShape(4.dp),
-        border = BorderStroke(0.5.dp, CardBorder)
-    ) {
-        Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text("📖", fontSize = 16.sp)
-            Spacer(Modifier.width(14.dp))
-            Text(
-                text = file.name, 
-                fontWeight = FontWeight.Medium, 
-                color = TextPureWhite, 
-                fontSize = 13.sp, 
-                maxLines = 1, 
-                overflow = TextOverflow.Ellipsis
-            )
-            Spacer(Modifier.weight(1f))
-            Text("〉", color = TextMuted, fontSize = 12.sp)
+fun TopBar(onHomeClick: () -> Unit) {
+    Row(Modifier.fillMaxWidth().statusBarsPadding().padding(horizontal = 20.dp, vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) {
+        Icon(Icons.Default.Home, null, tint = TextPureWhite, modifier = Modifier.size(28.dp).clickable(onClick = onHomeClick))
+        Spacer(Modifier.width(16.dp))
+        Text("NAS WEBTOON", style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Black, letterSpacing = (-0.5).sp), color = TextPureWhite)
+    }
+}
+
+@Composable
+fun CategoryTabs(uiState: ComicBrowserUiState, onTabClick: (String, Int) -> Unit) {
+    ScrollableTabRow(selectedTabIndex = uiState.selectedCategoryIndex, containerColor = BgBlack, edgePadding = 20.dp, divider = {}, indicator = { positions ->
+        if (uiState.selectedCategoryIndex < positions.size) {
+            Box(Modifier.tabIndicatorOffset(positions[uiState.selectedCategoryIndex]).height(2.dp).background(TextPureWhite))
+        }
+    }) {
+        uiState.categories.forEachIndexed { i, cat ->
+            Tab(selected = uiState.selectedCategoryIndex == i, onClick = { onTabClick(cat.path, i) }, text = { Text(cat.name, fontSize = 14.sp) }, selectedContentColor = TextPureWhite, unselectedContentColor = TextMuted)
         }
     }
 }
@@ -324,22 +168,10 @@ fun FolderGridView(state: ComicBrowserUiState, onClick: (NasFile) -> Unit, onPag
     val lastIndex by remember { derivedStateOf { gridState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0 } }
     LaunchedEffect(lastIndex) { if (lastIndex >= state.currentFiles.size - 5) onPage() }
 
-    LazyVerticalGrid(
-        state = gridState,
-        columns = GridCells.Fixed(3),
-        contentPadding = PaddingValues(16.dp),
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp)
-    ) {
-        items(state.currentFiles, key = { it.path }) { file ->
-            ComicCard(file, remember { providePosterRepository() }) { onClick(file) }
-        }
-        if (state.isScanning || state.totalFoundCount > state.currentFiles.size) {
-            item(span = { GridItemSpan(maxLineSpan) }) {
-                Box(Modifier.fillMaxWidth().padding(24.dp), Alignment.Center) {
-                    CircularProgressIndicator(Modifier.size(24.dp), color = KakaoYellow, strokeWidth = 2.dp)
-                }
-            }
+    LazyVerticalGrid(state = gridState, columns = GridCells.Fixed(3), contentPadding = PaddingValues(16.dp), horizontalArrangement = Arrangement.spacedBy(10.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+        items(state.currentFiles, key = { it.path }) { ComicCard(it, remember { providePosterRepository() }) { onClick(it) } }
+        if (state.isScanning) {
+            item(span = { GridItemSpan(maxLineSpan) }) { Box(Modifier.fillMaxWidth().padding(24.dp), Alignment.Center) { CircularProgressIndicator(color = KakaoYellow) } }
         }
     }
 }
@@ -347,73 +179,77 @@ fun FolderGridView(state: ComicBrowserUiState, onClick: (NasFile) -> Unit, onPag
 @Composable
 fun ComicCard(file: NasFile, repo: PosterRepository, onClick: () -> Unit) {
     var thumb by remember { mutableStateOf<ImageBitmap?>(null) }
-    
+    var metadata by remember { mutableStateOf<ComicMetadata?>(null) }
     LaunchedEffect(file.path) {
-        // 획기적 개선: NAS 요청 폭주 방지를 위해 카드별로 랜덤한 미세 지연 시간 추가
-        delay(300 + (file.path.hashCode() % 1000).toLong().coerceAtLeast(0))
-        repo.searchPoster(file.path)?.let { url ->
-            repo.downloadImageFromUrl(url)?.let { bytes -> 
-                if (bytes.isNotEmpty()) thumb = bytes.toImageBitmap() 
+        delay(200L + (file.path.hashCode() % 500).toLong().coerceAtLeast(0))
+        val meta = repo.getMetadata(file.path)
+        metadata = meta
+        meta.posterUrl?.let { url -> repo.downloadImageFromUrl(url)?.let { thumb = it.toImageBitmap() } }
+    }
+    Column(Modifier.fillMaxWidth().clickable(interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = onClick)) {
+        Box(Modifier.aspectRatio(0.72f).fillMaxWidth().clip(RoundedCornerShape(2.dp)).background(SurfaceGrey)) {
+            if (thumb != null) Image(thumb!!, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+            else Box(Modifier.fillMaxSize(), Alignment.Center) { Text("MANGA", color = TextMuted, fontSize = 9.sp, fontWeight = FontWeight.Bold, modifier = Modifier.alpha(0.4f)) }
+            if (file.isDirectory) Text("FOLDER", modifier = Modifier.align(Alignment.BottomStart).padding(4.dp), color = KakaoYellow, fontSize = 7.sp, fontWeight = FontWeight.Black)
+        }
+        Spacer(Modifier.height(6.dp))
+        Text(metadata?.title ?: file.name, style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold, fontSize = 11.sp), maxLines = 2, overflow = TextOverflow.Ellipsis, color = TextPureWhite)
+    }
+}
+
+@Composable
+fun WebtoonViewer(path: String, manager: ZipManager, onClose: () -> Unit) {
+    val listState = rememberLazyListState()
+    val loadedImages = remember { mutableStateListOf<Pair<String, ImageBitmap>>() }
+    var isFinished by remember { mutableStateOf(false) }
+    var showControls by remember { mutableStateOf(true) }
+
+    LaunchedEffect(path) {
+        manager.streamAllImages(path, {}) { name, bytes ->
+            val bitmap = bytes.toImageBitmap()
+            if (bitmap != null) loadedImages.add(name to bitmap)
+        }
+        isFinished = true
+    }
+
+    Box(Modifier.fillMaxSize().background(Color.Black).clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) { showControls = !showControls }) {
+        LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
+            items(loadedImages) { (_, bitmap) -> Image(bitmap, null, Modifier.fillMaxWidth(), contentScale = ContentScale.FillWidth) }
+            if (!isFinished) {
+                item { Box(Modifier.fillMaxWidth().height(300.dp), contentAlignment = Alignment.Center) { CircularProgressIndicator(color = KakaoYellow) } }
+            }
+        }
+        AnimatedVisibility(showControls, enter = fadeIn(), exit = fadeOut()) {
+            Box(Modifier.align(Alignment.TopCenter).fillMaxWidth().background(BgBlack.copy(0.8f)).statusBarsPadding().padding(16.dp)) {
+                Text("✕", color = TextPureWhite, fontSize = 20.sp, modifier = Modifier.align(Alignment.CenterStart).clickable { onClose() }.padding(8.dp))
+                Text("${listState.firstVisibleItemIndex + 1} / ${loadedImages.size}", Modifier.align(Alignment.Center), color = TextPureWhite, fontWeight = FontWeight.Bold)
             }
         }
     }
-    
-    Column(
-        modifier = Modifier.fillMaxWidth().clickable(
-            interactionSource = remember { MutableInteractionSource() },
-            indication = null,
-            onClick = onClick
-        )
-    ) {
-        Box(
-            Modifier
-                .aspectRatio(0.72f)
-                .fillMaxWidth()
-                .clip(RoundedCornerShape(2.dp))
-                .background(SurfaceGrey)
-        ) {
-            if (thumb != null) {
-                Image(thumb!!, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
-            } else {
-                Box(Modifier.fillMaxSize(), Alignment.Center) {
-                    Text(
-                        if (file.isDirectory) "FOLDER" else "MANGA",
-                        color = TextMuted,
-                        fontSize = 9.sp,
-                        fontWeight = FontWeight.Bold,
-                        modifier = Modifier.alpha(0.4f)
-                    )
-                }
-            }
-            
-            if (file.isDirectory) {
-                Box(
-                    Modifier
-                        .fillMaxSize()
-                        .background(Brush.verticalGradient(listOf(Color.Transparent, BgBlack.copy(0.6f))))
-                )
-                Text(
-                    "FOLDER",
-                    modifier = Modifier.align(Alignment.BottomStart).padding(4.dp),
-                    color = KakaoYellow,
-                    fontSize = 7.sp,
-                    fontWeight = FontWeight.Black
-                )
-            }
+}
+
+@Composable
+fun VolumeItem(file: NasFile, onClick: () -> Unit) {
+    Surface(modifier = Modifier.fillMaxWidth().clickable(onClick = onClick), color = Color(0xFF0A0A0A), shape = RoundedCornerShape(4.dp), border = BorderStroke(0.5.dp, Color(0xFF1A1A1A))) {
+        Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text("📖", fontSize = 16.sp); Spacer(Modifier.width(14.dp))
+            Text(file.name, fontWeight = FontWeight.Medium, color = TextPureWhite, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Spacer(Modifier.weight(1f)); Text("〉", color = TextMuted, fontSize = 12.sp)
         }
-        
-        Spacer(Modifier.height(6.dp))
-        
-        Text(
-            text = file.name,
-            style = MaterialTheme.typography.labelSmall.copy(
-                fontWeight = FontWeight.Bold,
-                fontSize = 11.sp,
-                lineHeight = 14.sp
-            ),
-            maxLines = 2,
-            overflow = TextOverflow.Ellipsis,
-            color = TextPureWhite
-        )
+    }
+}
+
+@Composable
+fun IntroScreen() {
+    Box(Modifier.fillMaxSize().background(BgBlack), contentAlignment = Alignment.Center) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Box(Modifier.size(80.dp).border(2.dp, TextPureWhite, RoundedCornerShape(12.dp)), contentAlignment = Alignment.Center) {
+                Box(Modifier.size(30.dp).background(KakaoYellow, RoundedCornerShape(2.dp)))
+            }
+            Spacer(Modifier.height(24.dp))
+            Text("NAS WEBTOON", style = MaterialTheme.typography.headlineSmall.copy(fontWeight = FontWeight.Black, letterSpacing = 2.sp), color = TextPureWhite)
+            Spacer(Modifier.height(48.dp))
+            LinearProgressIndicator(Modifier.width(120.dp).height(2.dp), color = KakaoYellow, trackColor = Color.White.copy(alpha = 0.1f))
+        }
     }
 }
