@@ -38,6 +38,7 @@ class ComicViewModel(
     val uiState: StateFlow<ComicBrowserUiState> = _uiState.asStateFlow()
 
     private var scanJob: Job? = null
+    private var prefetchJob: Job? = null // 백그라운드 수집용 잡
     private val allScannedFiles = mutableListOf<NasFile>()
     private val PAGE_SIZE = 24
 
@@ -69,7 +70,9 @@ class ComicViewModel(
 
     fun scanCategory(path: String, index: Int? = null, isBack: Boolean = false) {
         scanJob?.cancel()
+        prefetchJob?.cancel() // 새 스캔 시작 시 이전 수집 중단
         allScannedFiles.clear()
+        
         scanJob = viewModelScope.launch {
             _uiState.update { state -> 
                 val newHistory = when {
@@ -97,6 +100,22 @@ class ComicViewModel(
                 }
             }
             _uiState.update { it.copy(isScanning = false) }
+            
+            // [획기적 추가] 스캔 완료 후 백그라운드에서 포스터 미리 수집 시작
+            startPosterPrefetch()
+        }
+    }
+
+    // 백그라운드에서 모든 만화의 포스터를 하나씩 미리 캐싱하는 로직
+    private fun startPosterPrefetch() {
+        prefetchJob = viewModelScope.launch {
+            allScannedFiles.forEach { file ->
+                // 이미 캐시된 포스터가 있는지 확인하고 없으면 가져옴
+                // PosterRepository.getMetadata 내부에서 SQLite 캐시를 확인하므로 안전함
+                posterRepository.getMetadata(file.path)
+                // NAS 부하 방지를 위해 0.5초 간격으로 조용히 작업
+                delay(500)
+            }
         }
     }
 
