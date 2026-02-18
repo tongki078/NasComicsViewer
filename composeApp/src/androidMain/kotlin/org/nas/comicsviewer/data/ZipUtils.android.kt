@@ -20,11 +20,11 @@ class AndroidZipManager : ZipManager {
             json(Json { isLenient = true; ignoreUnknownKeys = true })
         }
     }
-    private val baseUrl = "http://192.168.1.100:5555"
+    private val baseUrl = "http://192.168.0.2:5555"
 
     override suspend fun listImagesInZip(filePath: String): List<String> = withContext(Dispatchers.IO) {
         try {
-            client.get("$baseUrl/zip_entries/$filePath").body<List<String>>()
+            client.get("$baseUrl/zip_entries") { url { parameters.append("path", filePath) } }.body<List<String>>()
         } catch (e: Exception) {
             println("Error listing images in zip $filePath: ${e.message}")
             emptyList()
@@ -33,8 +33,12 @@ class AndroidZipManager : ZipManager {
 
     override suspend fun extractImage(zipPath: String, imageName: String): ByteArray? = withContext(Dispatchers.IO) {
         try {
-            val encodedImageName = java.net.URLEncoder.encode(imageName, "UTF-8")
-            client.get("$baseUrl/download_zip_entry/$zipPath?entry=$encodedImageName").body<ByteArray>()
+            client.get("$baseUrl/download_zip_entry") {
+                url {
+                    parameters.append("path", zipPath)
+                    parameters.append("entry", imageName)
+                }
+            }.body()
         } catch (e: Exception) {
             println("Error extracting image $imageName from $zipPath: ${e.message}")
             null
@@ -62,7 +66,6 @@ class AndroidZipManager : ZipManager {
     }
 
     override fun getComicInfo(zipPath: String): ComicInfo? {
-        // 이 기능은 서버 사이드 구현이 필요하며, 현재는 지원되지 않습니다.
         return null
     }
 }

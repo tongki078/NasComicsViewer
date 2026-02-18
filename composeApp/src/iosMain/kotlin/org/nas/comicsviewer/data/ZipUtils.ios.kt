@@ -20,11 +20,11 @@ class IosZipManager : ZipManager {
             json(Json { isLenient = true; ignoreUnknownKeys = true })
         }
     }
-    private val baseUrl = "http://192.168.1.100:5555"
+    private val baseUrl = "http://192.168.0.2:5555"
 
     override suspend fun listImagesInZip(filePath: String): List<String> = withContext(Dispatchers.Default) {
         try {
-            client.get("$baseUrl/zip_entries/$filePath").body<List<String>>()
+            client.get("$baseUrl/zip_entries") { url { parameters.append("path", filePath) } }.body<List<String>>()
         } catch (e: Exception) {
             println("Error listing images in zip $filePath: ${e.message}")
             emptyList()
@@ -33,9 +33,12 @@ class IosZipManager : ZipManager {
 
     override suspend fun extractImage(zipPath: String, imageName: String): ByteArray? = withContext(Dispatchers.Default) {
         try {
-            // URL에 포함될 수 있는 특수문자 인코딩
-            val encodedImageName = imageName.split("/").joinToString("/") { it.encodeURLPath() }
-            client.get("$baseUrl/download_zip_entry/$zipPath?entry=$encodedImageName").body<ByteArray>()
+            client.get("$baseUrl/download_zip_entry") {
+                url {
+                    parameters.append("path", zipPath)
+                    parameters.append("entry", imageName)
+                }
+            }.body()
         } catch (e: Exception) {
             println("Error extracting image $imageName from $zipPath: ${e.message}")
             null

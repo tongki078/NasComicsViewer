@@ -3,19 +3,14 @@ import os
 import yaml
 import zipfile
 import io
+import urllib.parse
 
 app = Flask(__name__)
-
-# 의존성: pip install PyYAML
 
 ROOT_DIRECTORY = "/volume2/video/GDS3/GDRIVE/READING/만화"
 
 # --- Helper Functions ---
-def get_full_path(path):
-    return os.path.join(ROOT_DIRECTORY, path)
-
 def find_first_image_in_zip(zip_path):
-    """ZIP 파일에서 첫 번째 이미지 파일의 이름을 찾습니다."""
     try:
         with zipfile.ZipFile(zip_path, 'r') as zf:
             image_files = sorted([f for f in zf.namelist() if f.lower().endswith(('.jpg', '.jpeg', '.png', '.gif', '.webp')) and not f.startswith('__MACOSX')])
@@ -27,35 +22,55 @@ def find_first_image_in_zip(zip_path):
 
 # --- API Endpoints ---
 
-@app.route('/files/', defaults={'path': ''})
-@app.route('/files/<path:path>')
-def list_files_route(path):
-    abs_path = get_full_path(path)
+@app.route('/debug')
+def debug_info():
+    info = {}
+    info['root_directory'] = ROOT_DIRECTORY
+    info['path_exists'] = os.path.exists(ROOT_DIRECTORY)
+    if info['path_exists']:
+        info['is_directory'] = os.path.isdir(ROOT_DIRECTORY)
+        if info['is_directory']:
+            try:
+                content = os.listdir(ROOT_DIRECTORY)
+                info['list_contents_success'] = True
+                info['directory_contents_count'] = len(content)
+                info['directory_contents_sample'] = content[:5]
+            except OSError as e:
+                info['list_contents_success'] = False
+                info['list_error'] = str(e)
+    return jsonify(info)
+
+@app.route('/files')
+def list_files_route():
+    path = request.args.get('path', '')
+    abs_path = os.path.join(ROOT_DIRECTORY, path)
     if not os.path.isdir(abs_path):
-        return jsonify({"error": "Directory not found"}), 404
+        return jsonify({"error": f"Directory not found: {abs_path}"}), 404
     items = []
     for item_name in sorted(os.listdir(abs_path)):
-        item_path = os.path.join(abs_path, item_name)
+        item_abs_path = os.path.join(abs_path, item_name)
         relative_item_path = os.path.join(path, item_name).replace('\\', '/')
         items.append({
             'name': item_name,
-            'isDirectory': os.path.isdir(item_path),
+            'isDirectory': os.path.isdir(item_abs_path),
             'path': relative_item_path
         })
     return jsonify(items)
 
-@app.route('/download/<path:path>')
-def download_file_route(path):
+@app.route('/download')
+def download_file_route():
+    path = request.args.get('path', '')
     try:
         directory, filename = os.path.split(path)
-        return send_from_directory(get_full_path(directory), filename)
+        abs_directory = os.path.join(ROOT_DIRECTORY, directory)
+        return send_from_directory(abs_directory, filename)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-@app.route('/zip_entries/<path:zip_path>')
-def get_zip_entries_route(zip_path):
-    """ZIP 파일 내의 이미지 파일 목록을 반환합니다."""
-    full_zip_path = get_full_path(zip_path)
+@app.route('/zip_entries')
+def get_zip_entries_route():
+    path = request.args.get('path', '')
+    full_zip_path = os.path.join(ROOT_DIRECTORY, path)
     try:
         with zipfile.ZipFile(full_zip_path, 'r') as zf:
             image_files = sorted([f for f in zf.namelist() if f.lower().endswith(('.jpg', '.jpeg', '.png', '.gif', '.webp')) and not f.startswith('__MACOSX')])
@@ -63,13 +78,14 @@ def get_zip_entries_route(zip_path):
     except Exception as e:
         return jsonify({"error": f"Could not list entries for zip: {e}"}), 500
 
-@app.route('/download_zip_entry/<path:zip_path>')
-def download_zip_entry_route(zip_path):
-    entry_name = request.args.get('entry')
-    if not entry_name:
-        return "Entry name required", 400
+@app.route('/download_zip_entry')
+def download_zip_entry_route():
+    zip_path = request.args.get('path', '')
+    entry_name = request.args.get('entry', '')
+    if not entry_name or not zip_path:
+        return "zip path and entry name required", 400
 
-    full_zip_path = get_full_path(zip_path)
+    full_zip_path = os.path.join(ROOT_DIRECTORY, zip_path)
     try:
         with zipfile.ZipFile(full_zip_path, 'r') as zf:
             with zf.open(entry_name) as entry_file:
@@ -77,11 +93,12 @@ def download_zip_entry_route(zip_path):
     except Exception as e:
         return jsonify({"error": f"Could not read entry '{entry_name}' from zip: {e}"}), 500
 
-@app.route('/metadata/<path:path>')
-def get_metadata_route(path):
-    abs_path = get_full_path(path)
+@app.route('/metadata')
+def get_metadata_route():
+    path = request.args.get('path', '')
+    abs_path = os.path.join(ROOT_DIRECTORY, path)
     if not os.path.isdir(abs_path):
-        return jsonify({"error": "Directory not found"}), 404
+        return jsonify({"error": f"Directory not found: {abs_path}"}), 404
     try:
         files_in_dir = os.listdir(abs_path)
         metadata = {"title": None, "author": None, "summary": None, "posterUrl": None}
@@ -112,33 +129,39 @@ def get_metadata_route(path):
                 first_image_entry = find_first_image_in_zip(first_zip_path)
                 if first_image_entry:
                     relative_zip_path = os.path.join(path, zip_files[0]).replace('\\', '/')
-                    metadata['posterUrl'] = f"api_zip_thumb://{relative_zip_path}?entry={first_image_entry}"
+                    encoded_entry = urllib.parse.quote(first_image_entry)
+                    metadata['posterUrl'] = f"api_zip_thumb://{relative_zip_path}?entry={encoded_entry}"
         return jsonify(metadata)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-@app.route('/scan/', defaults={'path': ''})
-@app.route('/scan/<path:path>')
-def scan_comics_route(path):
+@app.route('/scan')
+def scan_comics_route():
+    path = request.args.get('path', '')
     try:
         max_depth = int(request.args.get('maxDepth', 5))
         comic_folders = []
         start_abs_path = os.path.join(ROOT_DIRECTORY, path)
+
         if not os.path.isdir(start_abs_path):
-            return jsonify({"error": "Start directory not found"}), 404
+            return jsonify({"error": f"Directory not found after decoding: {start_abs_path}"}), 404
+
         base_depth = start_abs_path.rstrip(os.sep).count(os.sep)
+
         for root, dirs, files in os.walk(start_abs_path, topdown=True):
             current_depth = root.count(os.sep) - base_depth
             if current_depth >= max_depth:
                 dirs[:] = []
                 continue
+
             if any(f.lower().endswith(('.zip', '.cbz')) for f in files):
-                relative_path = os.path.relpath(root, ROOT_DIRECTORY)
+                original_relative_path = os.path.relpath(root, ROOT_DIRECTORY)
                 comic_folders.append({
                     'name': os.path.basename(root),
                     'isDirectory': True,
-                    'path': relative_path.replace('\\', '/')
+                    'path': original_relative_path.replace('\\', '/')
                 })
+
         return jsonify(comic_folders)
     except Exception as e:
         return jsonify({"error": str(e)}), 500

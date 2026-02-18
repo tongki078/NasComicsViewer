@@ -6,8 +6,17 @@ import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import io.ktor.client.HttpClient
+import io.ktor.client.call.body
+import io.ktor.client.request.get
+import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
+import io.ktor.serialization.kotlinx.json.json
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.jsonPrimitive
 
 data class ComicBrowserUiState(
     val categories: List<NasFile> = emptyList(),
@@ -24,7 +33,6 @@ data class ComicBrowserUiState(
     val selectedMetadata: ComicMetadata? = null,
     val seriesEpisodes: List<NasFile> = emptyList(),
     val selectedZipPath: String? = null,
-    // 검색 관련 상태
     val isSearchMode: Boolean = false,
     val searchQuery: String = "",
     val searchResults: List<NasFile> = emptyList(),
@@ -53,18 +61,47 @@ class ComicViewModel(
 
     fun initialize(rootUrl: String, username: String, password: String) {
         setCredentialsUseCase.execute(username, password)
-        loadCategories(rootUrl)
+        checkServerAndLoadCategories()
+    }
+
+    private fun checkServerAndLoadCategories() {
+        viewModelScope.launch {
+            _uiState.update { it.copy(isLoading = true, isIntroShowing = true) }
+            try {
+                val client = HttpClient { install(ContentNegotiation) { json(Json { ignoreUnknownKeys = true }) } }
+                val response = client.get("http://192.168.0.2:5555/debug").body<JsonObject>()
+                client.close()
+
+                val pathExists = response["path_exists"]?.jsonPrimitive?.booleanOrNull ?: false
+                if (!pathExists) {
+                    throw Exception("서버 오류: 설정된 ROOT 디렉토리를 찾을 수 없습니다. 경로를 확인하세요.")
+                }
+                val canList = response["list_contents_success"]?.jsonPrimitive?.booleanOrNull ?: false
+                if (!canList) {
+                    val error = response["list_error"]?.jsonPrimitive?.toString() ?: "알 수 없는 오류"
+                    throw Exception("서버 오류: ROOT 디렉토리 접근 권한이 없습니다. (원인: $error)")
+                }
+
+                loadCategories("")
+
+            } catch (e: Exception) {
+                _uiState.update { it.copy(errorMessage = "초기화 실패: ${e.message}", isLoading = false) }
+            }
+        }
     }
 
     private fun loadCategories(rootUrl: String) {
         viewModelScope.launch {
-            _uiState.update { it.copy(isLoading = true) }
             try {
                 val categories = getCategoriesUseCase.execute(rootUrl)
                 _uiState.update { it.copy(categories = categories) }
-                if (categories.isNotEmpty()) scanCategory(categories[0].path, 0)
+                if (categories.isNotEmpty()) {
+                    scanCategory(categories[0].path, 0)
+                } else {
+                    _uiState.update { it.copy(errorMessage = "오류: 카테고리를 찾을 수 없습니다. 서버의 ROOT 폴더가 비어있거나 잘못 설정되었을 수 있습니다.") }
+                }
             } catch (e: Exception) {
-                _uiState.update { it.copy(errorMessage = "연결 실패: ${e.message}") }
+                _uiState.update { it.copy(errorMessage = "카테고리 로드 실패: ${e.message}") }
             } finally {
                 delay(500)
                 _uiState.update { it.copy(isLoading = false, isIntroShowing = false) }
@@ -166,7 +203,6 @@ class ComicViewModel(
         }
     }
 
-    // 검색 관련 함수 추가
     fun toggleSearchMode(enabled: Boolean) {
         _uiState.update { it.copy(isSearchMode = enabled, searchQuery = "", searchResults = emptyList()) }
         if (enabled) loadRecentSearches()

@@ -35,7 +35,7 @@ class IosPosterRepository private constructor() : PosterRepository {
             json(Json { isLenient = true; ignoreUnknownKeys = true })
         }
     }
-    private val baseUrl = "http://192.168.1.100:5555"
+    private val baseUrl = "http://192.168.0.2:5555"
     private val NOT_FOUND = "NOT_FOUND"
 
     companion object {
@@ -58,7 +58,7 @@ class IosPosterRepository private constructor() : PosterRepository {
 
     override suspend fun getMetadata(path: String): ComicMetadata = withContext(Dispatchers.Default) {
         val pathHash = md5(path)
-        
+
         try {
             val cached = database?.posterCacheQueries?.getPoster(pathHash)?.executeAsOneOrNull()
             if (cached?.poster_url != null && cached.poster_url != NOT_FOUND && cached.poster_url.contains("|||")) {
@@ -75,15 +75,15 @@ class IosPosterRepository private constructor() : PosterRepository {
         } catch (e: Exception) { /* ignore */ }
 
         try {
-            val metadata = client.get("$baseUrl/metadata/$path").body<ComicMetadata>()
-            
+            val metadata = client.get("$baseUrl/metadata") { url { parameters.append("path", path) } }.body<ComicMetadata>()
+
             val combinedData = "${metadata.posterUrl ?: ""}|||${metadata.title ?: ""}|||${metadata.author ?: ""}|||${metadata.summary ?: ""}"
             database?.posterCacheQueries?.upsertPoster(
                 title_hash = pathHash,
                 poster_url = combinedData,
                 cached_at = Clock.System.now().toEpochMilliseconds()
             )
-            
+
             metadata
         } catch (e: Exception) {
             println("Error fetching metadata for $path: ${e.message}")
@@ -109,10 +109,15 @@ class IosPosterRepository private constructor() : PosterRepository {
                 val bytes: ByteArray = when {
                     url.startsWith("http") -> client.get(url).body()
                     url.startsWith("api_zip_thumb://") -> {
-                        val apiUrl = url.replace("api_zip_thumb://", "$baseUrl/download_zip_entry/")
-                        client.get(apiUrl).body()
+                        val (zipPath, entry) = url.substringAfter("api_zip_thumb://").split("?entry=")
+                        client.get("$baseUrl/download_zip_entry") {
+                            url {
+                                parameters.append("path", zipPath)
+                                parameters.append("entry", entry)
+                            }
+                        }.body()
                     }
-                    else -> client.get("$baseUrl/download/$url").body()
+                    else -> client.get("$baseUrl/download") { url { parameters.append("path", url) } }.body()
                 }
                 if (bytes.isNotEmpty()) {
                     bytes.usePinned { pinned ->

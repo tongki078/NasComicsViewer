@@ -1,11 +1,11 @@
 package org.nas.comicsviewer.data
 
-import io.ktor.client.*
-import io.ktor.client.call.*
-import io.ktor.client.engine.darwin.*
-import io.ktor.client.plugins.contentnegotiation.*
-import io.ktor.client.request.*
-import io.ktor.serialization.kotlinx.json.*
+import io.ktor.client.HttpClient
+import io.ktor.client.call.body
+import io.ktor.client.engine.darwin.Darwin
+import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
+import io.ktor.client.request.get
+import io.ktor.serialization.kotlinx.json.json
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
@@ -16,15 +16,11 @@ import kotlinx.serialization.json.Json
 actual fun provideNasRepository(): NasRepository = IosNasRepository.getInstance()
 
 class IosNasRepository private constructor() : NasRepository {
-    private val baseUrl = "http://192.168.1.100:5555"
+    private val baseUrl = "http://192.168.0.2:5555"
 
     private val client = HttpClient(Darwin) {
         install(ContentNegotiation) {
-            json(Json {
-                prettyPrint = true
-                isLenient = true
-                ignoreUnknownKeys = true
-            })
+            json(Json { isLenient = true; ignoreUnknownKeys = true })
         }
     }
 
@@ -36,20 +32,18 @@ class IosNasRepository private constructor() : NasRepository {
     override fun setCredentials(u: String, p: String) {}
     override fun getCredentials() = Pair("", "")
 
-    override suspend fun listFiles(url: String): List<NasFile> = withContext(Dispatchers.IO) {
+    override suspend fun listFiles(url: String): List<NasFile> = withContext(Dispatchers.Default) {
         try {
-            val fullUrl = "$baseUrl/files/$url"
-            client.get(fullUrl).body<List<NasFile>>().sortedWith(compareBy({ !it.isDirectory }, { it.name }))
+            client.get("$baseUrl/files") { url { parameters.append("path", url) } }.body<List<NasFile>>().sortedWith(compareBy({ !it.isDirectory }, { it.name }))
         } catch (e: Exception) {
             println("DEBUG_NAS: Error listing $url: ${e.message}")
             emptyList()
         }
     }
 
-    override suspend fun getFileContent(url: String): ByteArray = withContext(Dispatchers.IO) {
+    override suspend fun getFileContent(url: String): ByteArray = withContext(Dispatchers.Default) {
         try {
-            val fullUrl = "$baseUrl/download/$url"
-            client.get(fullUrl).body()
+            client.get("$baseUrl/download") { url { parameters.append("path", url) } }.body()
         } catch (e: Exception) {
             println("DEBUG_NAS: Error getting content from $url: ${e.message}")
             ByteArray(0)
@@ -61,11 +55,15 @@ class IosNasRepository private constructor() : NasRepository {
 
     override fun scanComicFolders(url: String, maxDepth: Int): Flow<NasFile> = flow {
         try {
-            val fullUrl = "$baseUrl/scan/$url?maxDepth=$maxDepth"
-            val comicFolders = client.get(fullUrl).body<List<NasFile>>()
-            comicFolders.forEach { emit(it) }
+            val response = client.get("$baseUrl/scan") {
+                url {
+                    parameters.append("path", url)
+                    parameters.append("maxDepth", maxDepth.toString())
+                }
+            }.body<List<NasFile>>()
+            response.forEach { emit(it) }
         } catch (e: Exception) {
             println("DEBUG_NAS: Error scanning comics in $url: ${e.message}")
         }
-    }.flowOn(Dispatchers.IO)
+    }.flowOn(Dispatchers.Default)
 }
