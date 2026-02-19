@@ -183,7 +183,7 @@ fun ComicCard(file: NasFile, repo: PosterRepository, onClick: () -> Unit) {
             if (file.isDirectory) Text("FOLDER", modifier = Modifier.align(Alignment.BottomStart).padding(4.dp), color = KakaoYellow, fontSize = 7.sp, fontWeight = FontWeight.Black)
         }
         Spacer(Modifier.height(6.dp))
-        Text(file.metadata?.title ?: file.name, style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold, fontSize = 11.sp), maxLines = 2, overflow = TextOverflow.Ellipsis, color = TextPureWhite)
+        Text(file.name, style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold, fontSize = 11.sp), maxLines = 2, overflow = TextOverflow.Ellipsis, color = TextPureWhite)
     }
 }
 
@@ -195,7 +195,7 @@ fun SearchScreen(
     onClose: () -> Unit,
     onFileClick: (NasFile) -> Unit,
     onClearHistory: () -> Unit,
-    viewModel: ComicViewModel // Pass the whole viewModel
+    viewModel: ComicViewModel
 ) {
     val focusRequester = remember { FocusRequester() }
     LaunchedEffect(Unit) { focusRequester.requestFocus() }

@@ -26,10 +26,11 @@ app = Flask(__name__)
 # --- 설정 ---
 BASE_PATH = "/volume2/video/GDS3/GDRIVE/READING/만화"
 METADATA_DB_PATH = 'metadata_cache.db'
-MAX_WORKERS = 16 # 작업자 스레드 수 늘림
+MAX_WORKERS = 16
 
 # 3단계 구조를 가진 카테고리 폴더 이름 (소문자로 비교)
-THREE_LEVEL_STRUCTURE_FOLDERS = ["완결a", "완결b", "완결", "작가"]
+# 실제 폴더 이름인 '번역', '연재'로 수정합니다.
+THREE_LEVEL_STRUCTURE_FOLDERS = ["완결a", "완결b", "완결", "작가", "번역", "연재"]
 
 # --- 유틸리티 ---
 def time_it(func):
@@ -213,10 +214,16 @@ def scan_comics():
     try:
         all_entries = []
         requested_folder_name = os.path.basename(abs_path)
-        is_3_level_structure = requested_folder_name.lower() in THREE_LEVEL_STRUCTURE_FOLDERS
+        normalized_name = normalize_nfc(requested_folder_name.lower())
+
+        logger.info(f"[DEBUG] Checking folder: '{normalized_name}'")
+        logger.info(f"[DEBUG] Is in THREE_LEVEL_STRUCTURE_FOLDERS? {normalized_name in THREE_LEVEL_STRUCTURE_FOLDERS}")
+
+        is_3_level_structure = normalized_name in THREE_LEVEL_STRUCTURE_FOLDERS
 
         scan_paths = [abs_path]
         if is_3_level_structure:
+            logger.info(f"[SCAN] 3-level structure detected for '{requested_folder_name}'. Scanning subdirectories.")
             scan_paths = [d.path for d in os.scandir(abs_path) if d.is_dir()]
 
         for current_path in scan_paths:
@@ -235,7 +242,7 @@ def scan_comics():
         tasks_to_process = [(entry.path, entry.is_dir()) for entry in paged_entries]
 
     except Exception as e:
-        logger.error(f"Error during directory scan for {abs_path}: {e}")
+        logger.error(f"Error during directory scan for {abs_path}: {e}", exc_info=True)
         return jsonify({"error": "Failed to scan directory"}), 500
 
     results = []
@@ -252,7 +259,6 @@ def scan_comics():
             except Exception as exc:
                 logger.error(f"Task for {future_map[future]} generated an exception: {exc}")
 
-    # 클라이언트가 순서대로 표시할 수 있도록 원래 순서대로 정렬
     paged_entry_map = {normalize_nfc(os.path.relpath(entry.path, root).replace(os.sep, '/')) : normalize_nfc(entry.name) for entry in paged_entries}
     results.sort(key=lambda r: paged_entry_map.get(r['path'], ''))
 
@@ -266,7 +272,7 @@ def scan_comics():
     }
     return jsonify(response_data)
 
-# --- 기타 라우트 (수정 없음) ---
+# --- 기타 라우트 ---
 @app.route('/files')
 def list_files():
     p = request.args.get('path', '')

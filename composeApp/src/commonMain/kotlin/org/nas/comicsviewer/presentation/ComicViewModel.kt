@@ -8,11 +8,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
-import org.nas.comicsviewer.data.ComicDatabase
-import org.nas.comicsviewer.data.ComicMetadata
-import org.nas.comicsviewer.data.NasFile
-import org.nas.comicsviewer.data.NasRepository
-import org.nas.comicsviewer.data.PosterRepository
+import org.nas.comicsviewer.data.*
 import org.nas.comicsviewer.domain.usecase.GetCategoriesUseCase
 
 data class ComicBrowserUiState(
@@ -50,6 +46,13 @@ class ComicViewModel(
     private var currentPage = 1
     private var canLoadMore = true
     private val pageSize = 50
+
+    private val nameMap = mapOf(
+        "ㅂㅇ" to "번역",
+        "ㅇㅈ" to "연재",
+        "ㅇㄱ" to "완결",
+        "ㅈㄱ" to "작가",
+    )
 
     init {
         loadRecentSearches()
@@ -93,11 +96,10 @@ class ComicViewModel(
         scanJob = viewModelScope.launch {
             try {
                 val result = nasRepository.scanComicFolders(path, currentPage, pageSize)
-                val currentFiles = result.items
-                val totalItems = result.total_items
-                canLoadMore = currentFiles.size < totalItems
+                val processedFiles = processScanResult(result.items)
+                canLoadMore = processedFiles.size < result.total_items
 
-                _uiState.update { it.copy(currentFiles = currentFiles, totalItems = totalItems, isLoading = false) }
+                _uiState.update { it.copy(currentFiles = processedFiles, totalItems = result.total_items, isLoading = false) }
 
             } catch (e: Exception) {
                 _uiState.update { it.copy(errorMessage = "목록 로드 실패: ${e.message}", isLoading = false) }
@@ -113,7 +115,8 @@ class ComicViewModel(
             try {
                 currentPage++
                 val result = nasRepository.scanComicFolders(uiState.value.currentPath, currentPage, pageSize)
-                val newFiles = _uiState.value.currentFiles + result.items
+                val processedFiles = processScanResult(result.items)
+                val newFiles = _uiState.value.currentFiles + processedFiles
                 canLoadMore = newFiles.size < result.total_items
 
                 _uiState.update {
@@ -125,6 +128,15 @@ class ComicViewModel(
             } catch (e: Exception) {
                 _uiState.update { it.copy(errorMessage = "추가 로드 실패: ${e.message}", isLoadingMore = false) }
             }
+        }
+    }
+
+    private fun processScanResult(files: List<NasFile>): List<NasFile> {
+        return files.map { file ->
+            val originalName = file.path.substringAfterLast('/')
+            val finalName = nameMap[originalName.removeSuffix(".zip").removeSuffix(".cbz")] ?: cleanTitle(originalName)
+            val newMeta = file.metadata?.copy(title = finalName)
+            file.copy(name = finalName, metadata = newMeta)
         }
     }
 
