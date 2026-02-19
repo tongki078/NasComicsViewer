@@ -33,30 +33,35 @@ class AndroidPosterRepository private constructor() : PosterRepository {
 
     override suspend fun cacheMetadata(path: String, metadata: ComicMetadata) {
         val hash = md5(nfc(path))
-        // DB에 저장할 데이터 포맷 (포스터URL|||제목|||작가|||줄거리)
+        // DB 저장 형식: posterUrl|||title|||author|||summary
         val data = "${metadata.posterUrl ?: ""}|||${metadata.title ?: ""}|||${metadata.author ?: ""}|||${metadata.summary ?: ""}"
         database?.posterCacheQueries?.upsertPoster(hash, data, System.currentTimeMillis())
     }
 
     override suspend fun getMetadata(path: String): ComicMetadata = withContext(Dispatchers.IO) {
+        if (path.isBlank()) return@withContext ComicMetadata()
         val hash = md5(nfc(path))
         
-        // 1. DB 캐시 확인 (속도 최우선)
+        // 1. DB 캐시 우선 조회
         val cached = database?.posterCacheQueries?.getPoster(hash)?.executeAsOneOrNull()
         if (cached?.poster_url != null) {
             val p = cached.poster_url.split("|||")
-            return@withContext ComicMetadata(
-                posterUrl = p.getOrNull(0),
-                title = p.getOrNull(1),
-                author = p.getOrNull(2),
-                summary = p.getOrNull(3)
-            )
+            // 생성자 순서: title, author, summary, posterUrl
+            // 저장 순서: 0:posterUrl, 1:title, 2:author, 3:summary
+            val title = p.getOrNull(1)
+            val author = p.getOrNull(2)
+            val summary = p.getOrNull(3)
+            val posterUrl = p.getOrNull(0)
+            
+            // 캐시 데이터가 정상이면 반환
+            if (!title.isNullOrBlank()) {
+                return@withContext ComicMetadata(title, author, summary, posterUrl)
+            }
         }
 
         // 2. 캐시 없으면 서버 요청
         try {
             val m = client.get("$baseUrl/metadata") { url { parameters.append("path", path) } }.body<ComicMetadata>()
-            // 서버에서 받은 즉시 캐싱
             cacheMetadata(path, m)
             m
         } catch (e: Exception) { 
@@ -65,9 +70,15 @@ class AndroidPosterRepository private constructor() : PosterRepository {
     }
 
     override suspend fun downloadImageFromUrl(url: String): ByteArray? = withContext(Dispatchers.IO) {
+        if (url.isBlank()) return@withContext null
         try {
-            // 서버의 download 엔드포인트를 통해 이미지 확보
-            client.get("$baseUrl/download") { url { parameters.append("path", url) } }.body()
+            if (url.startsWith("http")) {
+                // 외부 URL은 직접 다운로드
+                client.get(url).body()
+            } else {
+                // 내부 경로는 서버 download 엔드포인트 사용
+                client.get("$baseUrl/download") { url { parameters.append("path", url) } }.body()
+            }
         } catch (e: Exception) { null }
     }
 

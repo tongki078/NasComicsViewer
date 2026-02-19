@@ -53,6 +53,7 @@ class ComicViewModel(
     val uiState: StateFlow<ComicBrowserUiState> = _uiState.asStateFlow()
 
     private var scanJob: Job? = null
+    private var prefetchJob: Job? = null
     private var currentScanId = 0
     private val allScannedFiles = mutableListOf<NasFile>()
     private val PAGE_SIZE = 48
@@ -102,6 +103,7 @@ class ComicViewModel(
 
     fun scanCategory(path: String, index: Int? = null, isBack: Boolean = false) {
         scanJob?.cancel()
+        prefetchJob?.cancel()
         val scanId = ++currentScanId
         allScannedFiles.clear()
 
@@ -124,15 +126,39 @@ class ComicViewModel(
             try {
                 scanComicFoldersUseCase.execute(path).collect { file ->
                     if (scanId != currentScanId) return@collect
-                    file.metadata?.let { posterRepository.cacheMetadata(file.path, it) }
-                    allScannedFiles.add(file)
+                    
+                    // 제목 누락 방지 (서버 응답 보완)
+                    val fixedFile = if (file.name.isBlank()) {
+                        file.copy(name = file.path.substringAfterLast("/"))
+                    } else file
+                    
+                    allScannedFiles.add(fixedFile)
                     val sorted = allScannedFiles.sortedBy { it.name }
                     _uiState.update { it.copy(currentFiles = sorted, totalFoundCount = sorted.size) }
                 }
+                
+                // 리스트 로딩 완료 후 백그라운드 프리페치 시작
+                startMetadataPrefetch(scanId)
+                
             } catch (e: Exception) {
                 if (scanId == currentScanId) _uiState.update { it.copy(errorMessage = "목록 로드 실패") }
             } finally {
                 if (scanId == currentScanId) _uiState.update { it.copy(isScanning = false) }
+            }
+        }
+    }
+
+    private fun startMetadataPrefetch(scanId: Int) {
+        prefetchJob = viewModelScope.launch {
+            // 리스트의 모든 항목에 대해 메타데이터(포스터)를 백그라운드에서 가져와 캐시 채움
+            allScannedFiles.forEach { file ->
+                if (scanId != currentScanId) return@launch
+                
+                // PosterRepository.getMetadata 내부 로직이 DB 확인 후 없으면 서버 요청하도록 되어 있음
+                posterRepository.getMetadata(file.path)
+                
+                // 서버 부하 분산을 위한 아주 짧은 지연
+                delay(100)
             }
         }
     }
