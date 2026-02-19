@@ -1,21 +1,21 @@
 package org.nas.comicsviewer.data
 
 import kotlinx.coroutines.flow.Flow
-import kotlinx.serialization.Serializable // 추가
+import kotlinx.serialization.Serializable
 
-@Serializable // 추가
+@Serializable
 data class NasFile(
     val name: String,
     val isDirectory: Boolean,
-    val path: String
+    val path: String,
+    val metadata: ComicMetadata? = null
 )
 
 interface NasRepository {
-    suspend fun listFiles(url: String): List<NasFile>
-    suspend fun getFileContent(url: String): ByteArray
-    suspend fun downloadFile(url: String, destinationPath: String, onProgress: (Float) -> Unit)
-    fun getTempFilePath(fileName: String): String
-    fun scanComicFolders(url: String, maxDepth: Int = 3): Flow<NasFile>
+    suspend fun listFiles(path: String): List<NasFile>
+    suspend fun getFileContent(path: String): ByteArray
+    fun scanComicFolders(path: String): Flow<NasFile>
+    // 불필요한 함수 제거
 }
 
 expect fun provideNasRepository(): NasRepository

@@ -17,9 +17,7 @@ actual fun providePosterRepository(): PosterRepository = AndroidPosterRepository
 class AndroidPosterRepository private constructor() : PosterRepository {
     private var database: ComicDatabase? = null
     private val client = HttpClient(CIO) {
-        install(ContentNegotiation) {
-            json(Json { isLenient = true; ignoreUnknownKeys = true })
-        }
+        install(ContentNegotiation) { json(Json { ignoreUnknownKeys = true; isLenient = true }) }
     }
     private val baseUrl = "http://192.168.0.2:5555"
 
@@ -30,76 +28,49 @@ class AndroidPosterRepository private constructor() : PosterRepository {
 
     override fun setDatabase(database: ComicDatabase) { this.database = database }
 
-    private val cacheDir: File by lazy {
-        val dir = File(System.getProperty("java.io.tmpdir"), "poster_cache")
-        if (!dir.exists()) dir.mkdirs()
-        dir
-    }
+    private fun nfc(s: String): String = Normalizer.normalize(s, Normalizer.Form.NFC)
+    private fun md5(s: String): String = java.security.MessageDigest.getInstance("MD5").digest(s.toByteArray()).joinToString("") { "%02x".format(it) }
 
-    private fun normalize(s: String): String = Normalizer.normalize(s, Normalizer.Form.NFC)
+    override suspend fun cacheMetadata(path: String, metadata: ComicMetadata) {
+        val hash = md5(nfc(path))
+        // 구분자를 :::META:::로 변경하여 구 버전 캐시를 무효화함
+        val data = "${metadata.title ?: ""}:::META:::${metadata.author ?: ""}:::META:::${metadata.summary ?: ""}:::META:::${metadata.posterUrl ?: ""}"
+        database?.posterCacheQueries?.upsertPoster(hash, data, System.currentTimeMillis())
+    }
 
     override suspend fun getMetadata(path: String): ComicMetadata = withContext(Dispatchers.IO) {
-        val nPath = normalize(path)
-        val pathHash = md5(nPath)
-
-        // 1. DB 캐시 확인
+        val hash = md5(nfc(path))
+        val cached = database?.posterCacheQueries?.getPoster(hash)?.executeAsOneOrNull()
+        
+        // 새로운 구분자가 포함된 경우에만 캐시 데이터 사용
+        if (cached?.poster_url != null && cached.poster_url.contains(":::META:::")) {
+            val p = cached.poster_url.split(":::META:::")
+            return@withContext ComicMetadata(
+                title = p.getOrNull(0),
+                author = p.getOrNull(1),
+                summary = p.getOrNull(2),
+                posterUrl = p.getOrNull(3)
+            )
+        }
+        
+        // 캐시가 없거나 구 버전인 경우 서버에서 새로 가져옴
         try {
-            val cached = database?.posterCacheQueries?.getPoster(pathHash)?.executeAsOneOrNull()
-            if (cached?.poster_url != null && cached.poster_url.contains("|||")) {
-                val parts = cached.poster_url.split("|||")
-                if (parts.size >= 4) {
-                    return@withContext ComicMetadata(
-                        posterUrl = parts[0].ifBlank { null },
-                        title = parts[1].ifBlank { null },
-                        author = parts[2].ifBlank { null },
-                        summary = parts[3].ifBlank { null }
-                    )
-                }
-            }
-        } catch (e: Exception) { /* ignore */ }
-
-        // 2. 서버에서 새로 가져오기
-        try {
-            val metadata = client.get("$baseUrl/metadata") { url { parameters.append("path", nPath) } }.body<ComicMetadata>()
-            val combined = "${metadata.posterUrl ?: ""}|||${metadata.title ?: ""}|||${metadata.author ?: ""}|||${metadata.summary ?: ""}"
-            database?.posterCacheQueries?.upsertPoster(pathHash, combined, System.currentTimeMillis())
-            metadata
-        } catch (e: Exception) {
-            println("Error metadata for $nPath: ${e.message}")
-            ComicMetadata(title = nPath.substringAfterLast("/"))
+            val m = client.get("$baseUrl/metadata") { url { parameters.append("path", path) } }.body<ComicMetadata>()
+            cacheMetadata(path, m)
+            m
+        } catch (e: Exception) { 
+            ComicMetadata(title = path.substringAfterLast("/")) 
         }
     }
 
-    override suspend fun downloadImageFromUrl(url: String): ByteArray? {
-        if (url.isBlank()) return null
-        val nUrl = normalize(url)
-        val urlHash = md5(nUrl)
-        val cacheFile = File(cacheDir, "img_$urlHash")
-        if (cacheFile.exists()) return cacheFile.readBytes()
-
-        return withContext(Dispatchers.IO) {
-            try {
-                val bytes: ByteArray = when {
-                    nUrl.startsWith("http") -> client.get(nUrl).body()
-                    nUrl.startsWith("zip_thumb://") -> {
-                        val (zipPath, entry) = nUrl.substringAfter("zip_thumb://").split("|||")
-                        client.get("$baseUrl/download_zip_entry") {
-                            url {
-                                parameters.append("path", zipPath)
-                                parameters.append("entry", entry)
-                            }
-                        }.body()
-                    }
-                    else -> client.get("$baseUrl/download") { url { parameters.append("path", nUrl) } }.body()
-                }
-                if (bytes.isNotEmpty()) cacheFile.writeBytes(bytes)
-                bytes
-            } catch (e: Exception) { null }
-        }
+    override suspend fun downloadImageFromUrl(url: String): ByteArray? = withContext(Dispatchers.IO) {
+        if (url.isBlank()) return@withContext null
+        try {
+            client.get("$baseUrl/download") { url { parameters.append("path", url) } }.body()
+        } catch (e: Exception) { null }
     }
 
-    override suspend fun insertRecentSearch(q: String) { /* 로직 유지 */ }
+    override suspend fun insertRecentSearch(query: String) {}
     override suspend fun getRecentSearches(): List<String> = emptyList()
     override suspend fun clearRecentSearches() {}
-    private fun md5(str: String): String = java.security.MessageDigest.getInstance("MD5").digest(str.toByteArray()).joinToString("") { "%02x".format(it) }
 }

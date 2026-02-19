@@ -1,15 +1,14 @@
 package org.nas.comicsviewer.data
 
-import io.ktor.client.HttpClient
-import io.ktor.client.call.body
-import io.ktor.client.engine.cio.CIO
-import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
-import io.ktor.client.request.get
-import io.ktor.serialization.kotlinx.json.json
+import io.ktor.client.*
+import io.ktor.client.call.*
+import io.ktor.client.engine.cio.*
+import io.ktor.client.plugins.*
+import io.ktor.client.plugins.contentnegotiation.*
+import io.ktor.client.request.*
+import io.ktor.serialization.kotlinx.json.*
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.flow
-import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 
@@ -17,50 +16,36 @@ actual fun provideNasRepository(): NasRepository = AndroidNasRepository.getInsta
 
 class AndroidNasRepository private constructor() : NasRepository {
     private val baseUrl = "http://192.168.0.2:5555"
-
     private val client = HttpClient(CIO) {
-        install(ContentNegotiation) {
-            json(Json { isLenient = true; ignoreUnknownKeys = true })
-        }
+        install(ContentNegotiation) { json(Json { ignoreUnknownKeys = true; isLenient = true }) }
+        install(HttpTimeout) { requestTimeoutMillis = 90000 }
     }
 
     companion object {
         @Volatile private var instance: AndroidNasRepository? = null
-        fun getInstance() = instance ?: synchronized(this) { instance ?: AndroidNasRepository().also { instance = it } }
-    }
-
-    override suspend fun listFiles(url: String): List<NasFile> = withContext(Dispatchers.IO) {
-        try {
-            client.get("$baseUrl/files") { url { parameters.append("path", url) } }.body<List<NasFile>>().sortedWith(compareBy({ !it.isDirectory }, { it.name }))
-        } catch (e: Exception) {
-            println("DEBUG_NAS: Error listing $url: ${e.message}")
-            emptyList()
+        fun getInstance() = instance ?: synchronized(this) { 
+            instance ?: AndroidNasRepository().also { instance = it } 
         }
     }
 
-    override suspend fun getFileContent(url: String): ByteArray = withContext(Dispatchers.IO) {
+    override suspend fun listFiles(path: String): List<NasFile> = withContext(Dispatchers.IO) {
         try {
-            client.get("$baseUrl/download") { url { parameters.append("path", url) } }.body()
-        } catch (e: Exception) {
-            println("DEBUG_NAS: Error getting content from $url: ${e.message}")
-            ByteArray(0)
-        }
+            client.get("$baseUrl/files") { url { parameters.append("path", path) } }.body()
+        } catch (e: Exception) { emptyList() }
     }
 
-    override suspend fun downloadFile(url: String, path: String, onProgress: (Float) -> Unit) {}
-    override fun getTempFilePath(name: String) = ""
-
-    override fun scanComicFolders(url: String, maxDepth: Int): Flow<NasFile> = flow {
+    override suspend fun getFileContent(path: String): ByteArray = withContext(Dispatchers.IO) {
         try {
-            val response = client.get("$baseUrl/scan") {
-                url {
-                    parameters.append("path", url)
-                    parameters.append("maxDepth", maxDepth.toString())
-                }
-            }.body<List<NasFile>>()
+            client.get("$baseUrl/download") { url { parameters.append("path", path) } }.body()
+        } catch (e: Exception) { ByteArray(0) }
+    }
+
+    override fun scanComicFolders(path: String): Flow<NasFile> = flow {
+        try {
+            val response = client.get("$baseUrl/scan") { url { parameters.append("path", path) } }.body<List<NasFile>>()
             response.forEach { emit(it) }
         } catch (e: Exception) {
-            println("DEBUG_NAS: Error scanning comics in $url: ${e.message}")
+            println("DEBUG_NAS: Scan error: ${e.message}")
         }
     }.flowOn(Dispatchers.IO)
 }
