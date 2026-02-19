@@ -38,20 +38,27 @@ ADMIN_TEMPLATE = """
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>메타데이터 업데이트 결과</title>
+    <title>메타데이터 관리자</title>
     <style>
-        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; padding: 20px; background-color: #f8f9fa; }
-        .container { max-width: 800px; margin: 0 auto; background: white; padding: 30px; border-radius: 10px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
-        h1 { color: #333; margin-bottom: 20px; border-bottom: 2px solid #eee; padding-bottom: 10px; }
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; padding: 20px; background-color: #f8f9fa; color: #333; }
+        .container { max-width: 800px; margin: 0 auto; }
+        .card { background: white; padding: 30px; border-radius: 10px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); margin-bottom: 20px; }
+        h1 { margin-top: 0; margin-bottom: 20px; border-bottom: 2px solid #eee; padding-bottom: 10px; font-size: 1.5em; }
+
+        .form-group { display: flex; gap: 10px; }
+        input[type="text"] { flex: 1; padding: 12px; border: 1px solid #ddd; border-radius: 6px; font-size: 16px; }
+        button { padding: 12px 24px; background-color: #007bff; color: white; border: none; border-radius: 6px; cursor: pointer; font-size: 16px; font-weight: bold; transition: background 0.2s; }
+        button:hover { background-color: #0056b3; }
+
         .summary { background-color: #e9ecef; padding: 15px; border-radius: 5px; margin-bottom: 20px; }
         .item { padding: 10px; border-bottom: 1px solid #eee; display: flex; align-items: center; }
         .item:last-child { border-bottom: none; }
-        .badge { padding: 4px 8px; border-radius: 4px; font-size: 0.85em; font-weight: bold; margin-right: 10px; min-width: 80px; text-align: center; }
+        .badge { padding: 4px 8px; border-radius: 4px; font-size: 0.75em; font-weight: bold; margin-right: 10px; min-width: 70px; text-align: center; }
         .badge.scan { background-color: #17a2b8; color: white; }
         .badge.kavita { background-color: #28a745; color: white; }
         .badge.file { background-color: #6c757d; color: white; }
         .badge.none { background-color: #dc3545; color: white; }
-        .title { font-weight: 500; color: #333; }
+        .title { font-weight: 500; font-size: 1em; }
         .error { color: #dc3545; font-size: 0.9em; margin-top: 5px; }
         .meta-info { font-size: 0.85em; color: #666; margin-left: auto; }
         .no-poster { color: #dc3545; font-weight: bold; margin-left: 10px; font-size: 0.8em; }
@@ -59,54 +66,71 @@ ADMIN_TEMPLATE = """
 </head>
 <body>
     <div class="container">
-        <h1>🛠️ 메타데이터 업데이트 결과</h1>
-
-        <div class="summary">
-            <strong>경로:</strong> {{ path }}<br>
-            <strong>총 처리 항목:</strong> {{ total_count }}개<br>
-            <strong>성공:</strong> {{ success_count }}개
-            {% if error_count > 0 %}
-            <br><strong style="color: #dc3545;">실패:</strong> {{ error_count }}개
-            {% endif %}
+        <div class="card">
+            <h1>🛠️ 메타데이터 업데이트</h1>
+            <p style="margin-bottom: 20px; color: #666;">
+                업데이트할 폴더의 경로를 입력하세요. (예: <code>완결</code>, <code>작가/ㄱ</code>)<br>
+                빈 칸으로 두면 최상위 폴더를 기준으로 업데이트합니다.
+            </p>
+            <form action="/update_metadata" method="get" class="form-group">
+                <input type="text" name="path" value="{{ path }}" placeholder="폴더 경로 입력...">
+                <button type="submit">업데이트 시작</button>
+            </form>
         </div>
 
-        <div class="list">
-            {% for item in items %}
-            <div class="item">
-                {% if item.source == 'KAVITA_YAML' %}
-                    <span class="badge kavita">KAVITA</span>
-                {% elif item.source == 'SCAN' %}
-                    <span class="badge scan">SCAN</span>
-                {% elif item.source == 'FILE' %}
-                    <span class="badge file">FILE</span>
-                {% else %}
-                    <span class="badge none">UNKNOWN</span>
+        {% if performed %}
+        <div class="card">
+            <h1>결과 리포트</h1>
+            <div class="summary">
+                <strong>대상 경로:</strong> /{{ path }}<br>
+                <strong>총 항목:</strong> {{ total_count }}개<br>
+                <strong>성공:</strong> <span style="color: #28a745">{{ success_count }}</span>개
+                {% if error_count > 0 %}
+                <br><strong style="color: #dc3545;">실패:</strong> {{ error_count }}개
+                {% endif %}
+            </div>
+
+            <div class="list">
+                {% if total_count == 0 %}
+                    <div style="text-align: center; padding: 20px; color: #999;">
+                        해당 경로에서 업데이트할 항목을 찾지 못했습니다.
+                    </div>
                 {% endif %}
 
-                <div>
-                    <span class="title">{{ item.title }}</span>
-                    {% if not item.poster %}
-                        <span class="no-poster">⚠️ NO POSTER</span>
+                {% for item in items %}
+                <div class="item">
+                    {% if item.source == 'KAVITA_YAML' %}
+                        <span class="badge kavita">KAVITA</span>
+                    {% elif item.source == 'SCAN' %}
+                        <span class="badge scan">SCAN</span>
+                    {% elif item.source == 'FILE' %}
+                        <span class="badge file">FILE</span>
+                    {% else %}
+                        <span class="badge none">UNKNOWN</span>
                     {% endif %}
+
+                    <div>
+                        <span class="title">{{ item.title }}</span>
+                        {% if not item.poster %}
+                            <span class="no-poster">⚠️ NO POSTER</span>
+                        {% endif %}
+                    </div>
+
+                    <div class="meta-info">
+                        {{ item.source }}
+                    </div>
                 </div>
+                {% endfor %}
 
-                <div class="meta-info">
-                    {{ item.source }}
+                {% for error in errors %}
+                <div class="item">
+                    <span class="badge none">ERROR</span>
+                    <div class="error">{{ error }}</div>
                 </div>
+                {% endfor %}
             </div>
-            {% endfor %}
-
-            {% for error in errors %}
-            <div class="item">
-                <span class="badge none">ERROR</span>
-                <div class="error">{{ error }}</div>
-            </div>
-            {% endfor %}
         </div>
-
-        <div style="margin-top: 30px; text-align: center;">
-            <a href="javascript:history.back()" style="color: #007bff; text-decoration: none;">🔙 뒤로 가기</a>
-        </div>
+        {% endif %}
     </div>
 </body>
 </html>
@@ -257,7 +281,9 @@ def force_update_metadata_task(task_path, is_dir, root_path, db_path):
         rel_path = os.path.relpath(task_path, root_path).replace(os.sep, '/')
         base_name = os.path.basename(task_path.rstrip('/\\'))
         clean_title = clean_name(normalize_nfc(base_name))
-        meta = {"title": clean_title, "poster_url": None}
+
+        # [수정] kavita_info 키를 추가하여 yaml 정보를 통째로 담습니다.
+        meta = {"title": clean_title, "poster_url": None, "kavita_info": {}}
 
         # 로깅을 위한 소스 구분 변수
         source = "NONE"
@@ -278,17 +304,29 @@ def force_update_metadata_task(task_path, is_dir, root_path, db_path):
                     with open(kavita_path, 'r', encoding='utf-8') as f:
                         kdata = yaml.safe_load(f)
                         if kdata:
+                            # [수정] kavita.yaml의 모든 정보를 meta['kavita_info']에 저장
+                            meta['kavita_info'] = kdata
+
+                            # 포스터 추출 로직 (기존과 동일하지만, kdata에서 추출)
+                            poster_candidates = []
                             for k in ['cover', 'poster', 'cover_image', 'coverImage']:
                                 if k in kdata and kdata[k]:
-                                    target = kdata[k]
-                                    if os.path.exists(os.path.join(task_path, target)):
-                                        meta['poster_url'] = os.path.join(rel_path, target).replace('\\', '/')
-                                        source = "KAVITA_YAML"
-                                        break
-            except Exception:
-                pass
+                                    poster_candidates.append(kdata[k])
 
-            # 2. 직접 스캔
+                            if 'search' in kdata and isinstance(kdata['search'], list) and len(kdata['search']) > 0:
+                                search_item = kdata['search'][0]
+                                if 'poster_url' in search_item and search_item['poster_url']:
+                                    pass
+
+                            for target in poster_candidates:
+                                if os.path.exists(os.path.join(task_path, target)):
+                                    meta['poster_url'] = os.path.join(rel_path, target).replace('\\', '/')
+                                    source = "KAVITA_YAML"
+                                    break
+            except Exception as e:
+                logger.warning(f"Failed to parse kavita.yaml for {task_path}: {e}")
+
+            # 2. 직접 스캔 (kavita.yaml에서 포스터를 못 찾았을 경우)
             if not meta.get('poster_url'):
                 try:
                     local_files = [e.name for e in os.scandir(task_path)]
@@ -409,6 +447,19 @@ def scan_comics():
 @app.route('/update_metadata')
 @time_it
 def update_metadata():
+    # 파라미터가 아예 없는 경우 폼만 보여주기
+    if 'path' not in request.args:
+         return render_template_string(
+            ADMIN_TEMPLATE,
+            path="",
+            performed=False,
+            total_count=0,
+            success_count=0,
+            error_count=0,
+            items=[],
+            errors=[]
+        )
+
     path = request.args.get('path', '')
     logger.info(f"🔄 [UPDATE_METADATA] Start request for path: '{path}'")
 
@@ -417,13 +468,18 @@ def update_metadata():
 
     if not os.path.isdir(abs_path):
         logger.error(f"❌ [UPDATE_METADATA] Invalid path: {abs_path}")
-        return jsonify({"error": "Invalid path"}), 404
+        return render_template_string(
+            ADMIN_TEMPLATE,
+            path=path,
+            performed=True,
+            total_count=0,
+            success_count=0,
+            error_count=1,
+            items=[],
+            errors=[f"Invalid path: {abs_path}"]
+        )
 
-    # 현재 폴더의 직계 자식들에 대해 업데이트 수행
-    # 3단계 구조 여부와 상관없이 현재 보여지는 뷰의 아이템들을 갱신한다고 가정
-    # (또는 사용자가 보고 있는 리스트의 항목들을 갱신)
-
-    # 1. 3단계 구조 확인 (scan 로직과 동일하게)
+    # 1. 3단계 구조 확인
     requested_folder_name = os.path.basename(abs_path)
     normalized_name = normalize_nfc(requested_folder_name.lower())
     is_3_level_structure = normalized_name in THREE_LEVEL_STRUCTURE_FOLDERS
@@ -468,6 +524,7 @@ def update_metadata():
     return render_template_string(
         ADMIN_TEMPLATE,
         path=path,
+        performed=True,
         total_count=len(tasks),
         success_count=len(updated_items),
         error_count=len(failed_items),
