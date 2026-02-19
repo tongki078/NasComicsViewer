@@ -19,7 +19,7 @@ app = Flask(__name__)
 BASE_PATH = "/volume2/video/GDS3/GDRIVE/READING"
 TARGET_ROOT_NAME = "만화"
 SCAN_CACHE = {}
-CACHE_EXPIRY = 600 # 10분 캐시
+CACHE_EXPIRY = 600
 
 def normalize_nfc(s):
     if not isinstance(s, str): return s
@@ -31,33 +31,42 @@ def find_folder_in_path(parent, target_name):
         target_norm = normalize_nfc(target_name).lower()
         with os.scandir(parent) as it:
             for entry in it:
-                if entry.is_dir() and normalize_nfc(entry.name).lower() == target_norm:
+                if normalize_nfc(entry.name).lower() == target_norm:
                     return entry.path
     except: pass
     return None
 
-# 서버 시작 시 루트 디렉토리 확정
-ROOT_DIRECTORY = find_folder_in_path(BASE_PATH, TARGET_ROOT_NAME) or os.path.join(BASE_PATH, TARGET_ROOT_NAME)
-ROOT_NORM = os.path.normpath(os.path.abspath(ROOT_DIRECTORY))
+# 초기 루트 설정
+_ROOT_DIR = find_folder_in_path(BASE_PATH, TARGET_ROOT_NAME) or os.path.join(BASE_PATH, TARGET_ROOT_NAME)
+ROOT_NORM = os.path.normpath(os.path.abspath(_ROOT_DIR))
+
+def get_root():
+    """마운트 해제 대응을 위해 루트 경로 재확인 로직 포함"""
+    global ROOT_NORM
+    if not os.path.isdir(ROOT_NORM):
+        new_root = find_folder_in_path(BASE_PATH, TARGET_ROOT_NAME) or os.path.join(BASE_PATH, TARGET_ROOT_NAME)
+        ROOT_NORM = os.path.normpath(os.path.abspath(new_root))
+    return ROOT_NORM
+
 logger.info(f"!!! 서버 루트 설정 완료: {ROOT_NORM} !!!")
 
 def get_safe_rel_path(abs_path):
-    """절대 경로에서 ROOT_NORM을 제외한 상대 경로 추출 (시스템 차이 극복)"""
+    root = get_root()
     abs_path = os.path.normpath(os.path.abspath(abs_path))
-    if abs_path.startswith(ROOT_NORM):
-        rel = abs_path[len(ROOT_NORM):].lstrip(os.sep).replace(os.sep, '/')
-        return rel
+    if abs_path.startswith(root):
+        return abs_path[len(root):].lstrip(os.sep).replace(os.sep, '/')
     try:
-        return os.path.relpath(abs_path, ROOT_NORM).replace(os.sep, '/')
+        return os.path.relpath(abs_path, root).replace(os.sep, '/')
     except:
         return abs_path
 
 def get_actual_abs_path(rel_path):
+    root = get_root()
     if not rel_path or rel_path.strip() in [".", "", "/"]:
-        return ROOT_NORM
+        return root
     decoded_path = urllib.parse.unquote(rel_path).replace('\\', '/')
     parts = decoded_path.strip('/').split('/')
-    curr = ROOT_NORM
+    curr = root
     for part in parts:
         if not part: continue
         next_path = find_folder_in_path(curr, part)
@@ -65,195 +74,153 @@ def get_actual_abs_path(rel_path):
     return os.path.normpath(os.path.abspath(curr))
 
 def get_metadata_internal(abs_path, rel_path):
-    """제공된 kavita.yaml 구조(meta, search)를 완벽하게 파싱"""
+    """kavita.yaml의 meta 및 search 섹션을 완벽하게 파싱"""
     folder_name = normalize_nfc(os.path.basename(abs_path))
     meta = {"title": folder_name, "author": "", "summary": "", "poster_url": None}
     try:
         if os.path.exists(abs_path):
             with os.scandir(abs_path) as it:
                 entries = sorted(list(it), key=lambda x: x.name)
-
                 kavita_entry = next((e for e in entries if normalize_nfc(e.name).lower() == "kavita.yaml"), None)
                 if kavita_entry:
                     try:
                         with open(kavita_entry.path, 'r', encoding='utf-8', errors='ignore') as f:
                             data = yaml.safe_load(f)
                             if data:
-                                m_section = data.get('meta', {})
-                                meta['title'] = m_section.get('Name') or m_section.get('localizedName') or meta['title']
-                                meta['author'] = m_section.get('Person Writers') or m_section.get('Writer') or ""
-                                meta['summary'] = m_section.get('Summary') or ""
-
+                                m = data.get('meta', {})
+                                meta['title'] = m.get('Name') or m.get('localizedName') or meta['title']
+                                meta['author'] = m.get('Person Writers') or m.get('Writer') or ""
+                                meta['summary'] = m.get('Summary') or ""
                                 s_list = data.get('search', [])
                                 if isinstance(s_list, list) and len(s_list) > 0:
                                     s = s_list[0]
                                     p_url = s.get('poster_url') or s.get('cover')
                                     if p_url:
-                                        if p_url.startswith('http'):
-                                            meta['poster_url'] = p_url
-                                        else:
-                                            meta['poster_url'] = normalize_nfc(os.path.join(rel_path, p_url)).replace('\\', '/')
-
+                                        if p_url.startswith('http'): meta['poster_url'] = p_url
+                                        else: meta['poster_url'] = normalize_nfc(os.path.join(rel_path, p_url)).replace('\\', '/')
                                     if meta['title'] == folder_name: meta['title'] = s.get('title') or meta['title']
                                     if not meta['author']: meta['author'] = s.get('author') or ""
                                     if not meta['summary']: meta['summary'] = s.get('description') or ""
                     except: pass
 
+                # 이미지 및 압축파일 첫 페이지 처리 (필드명 poster_url 사용)
                 if not meta['poster_url']:
                     for entry in entries:
                         if entry.is_file():
-                            name_low = normalize_nfc(entry.name).lower()
-                            if name_low.endswith(('.jpg', '.png', '.jpeg')) and \
-                               any(x in name_low for x in ["poster", "cover", "folder", "thumb"]):
+                            nl = normalize_nfc(entry.name).lower()
+                            if nl.endswith(('.jpg', '.png', '.jpeg')) and any(x in nl for x in ["poster", "cover", "folder", "thumb"]):
                                 meta['poster_url'] = normalize_nfc(os.path.join(rel_path, entry.name)).replace('\\', '/')
                                 break
-
                 if not meta['poster_url']:
-                    comic_file = next((e for e in entries if e.is_file() and e.name.lower().endswith(('.zip', '.cbz'))), None)
-                    if comic_file:
-                        thumb_path = normalize_nfc(os.path.join(rel_path, comic_file.name)).replace('\\', '/')
-                        meta['poster_url'] = f"zip_thumb://{thumb_path}"
+                    comic = next((e for e in entries if e.is_file() and e.name.lower().endswith(('.zip', '.cbz'))), None)
+                    if comic:
+                        tp = normalize_nfc(os.path.join(rel_path, comic.name)).replace('\\', '/')
+                        meta['poster_url'] = f"zip_thumb://{tp}"
     except: pass
     return meta
 
-def fast_scan_worker(folder_path, root_norm):
-    results = []
+def scan_worker(fp):
+    res = []
     try:
-        found_sub_dir = False
-        with os.scandir(folder_path) as it:
-            for entry in it:
-                if entry.is_dir():
-                    found_sub_dir = True
-                    rel = get_safe_rel_path(entry.path)
-                    results.append({
-                        'name': normalize_nfc(entry.name),
-                        'isDirectory': True,
-                        'path': normalize_nfc(rel),
-                        'metadata': None
-                    })
-        if not found_sub_dir:
-            rel = get_safe_rel_path(folder_path)
-            results.append({
-                'name': normalize_nfc(os.path.basename(folder_path)),
-                'isDirectory': True,
-                'path': normalize_nfc(rel),
-                'metadata': None
-            })
+        sub = False
+        with os.scandir(fp) as it:
+            for e in it:
+                if os.path.isdir(e.path):
+                    sub = True
+                    rel = get_safe_rel_path(e.path)
+                    res.append({'name': normalize_nfc(e.name), 'isDirectory': True, 'path': normalize_nfc(rel), 'metadata': None})
+        if not sub:
+            rel = get_safe_rel_path(fp)
+            res.append({'name': normalize_nfc(os.path.basename(fp)), 'isDirectory': True, 'path': normalize_nfc(rel), 'metadata': None})
     except: pass
-    return results
+    return res
 
 @app.route('/scan')
 def scan_comics():
     path = request.args.get('path', '')
     if path in SCAN_CACHE:
         ts, data = SCAN_CACHE[path]
-        if time.time() - ts < CACHE_EXPIRY:
-            return jsonify(data)
+        if time.time() - ts < CACHE_EXPIRY: return jsonify(data)
 
-    abs_start_path = get_actual_abs_path(path)
-    logger.info(f"[SCAN] 요청: {path} -> {abs_start_path}")
-
-    if not os.path.exists(abs_start_path):
-        return jsonify([])
-
-    all_results = []
-    groups = []
-    try:
-        with os.scandir(abs_start_path) as it:
-            for entry in it:
-                if entry.is_dir():
-                    name = normalize_nfc(entry.name)
-                    # 2글자 이하(ㄱ, ㄴ, # 등)는 그룹 폴더로 분류하여 병렬 스캔
-                    if len(name) <= 2:
-                        groups.append(entry.path)
-                    else:
-                        rel = get_safe_rel_path(entry.path)
-                        all_results.append({
-                            'name': name,
-                            'isDirectory': True,
-                            'path': normalize_nfc(rel),
-                            'metadata': None
-                        })
-                # 카테고리 바로 밑에 압축파일이 있는 경우 대응 (단층 구조)
-                elif entry.is_file() and entry.name.lower().endswith(('.zip', '.cbz')):
-                    rel = get_safe_rel_path(abs_start_path)
-                    all_results.append({
-                        'name': normalize_nfc(os.path.basename(abs_start_path)),
-                        'isDirectory': True,
-                        'path': normalize_nfc(rel),
-                        'metadata': None
-                    })
-
-        if groups:
-            with ThreadPoolExecutor(max_workers=15) as executor:
-                futures = [executor.submit(fast_scan_worker, f, ROOT_NORM) for f in groups]
-                for future in as_completed(futures):
-                    all_results.extend(future.result())
-
-        seen_paths = set()
-        unique_results = []
-        for r in all_results:
-            if r['path'] not in seen_paths:
-                seen_paths.add(r['path'])
-                unique_results.append(r)
-
-        final_data = sorted(unique_results, key=lambda x: x['name'])
-        SCAN_CACHE[path] = (time.time(), final_data)
-        logger.info(f"[SCAN DONE] {len(final_data)}개 발견")
-        return jsonify(final_data)
-    except Exception as e:
-        logger.error(f"Scan error: {e}")
-        return jsonify([])
-
-@app.route('/metadata')
-def get_metadata():
-    path = request.args.get('path', '')
     abs_path = get_actual_abs_path(path)
-    if not abs_path: return jsonify({}), 404
-    return jsonify(get_metadata_internal(abs_path, path))
+    logger.info(f"[SCAN] '{path}' -> {abs_path}")
+    if not os.path.exists(abs_path): return jsonify([])
 
-@app.route('/files')
-def list_files():
-    path = request.args.get('path', '')
-    abs_path = get_actual_abs_path(path)
-    if not abs_path or not os.path.isdir(abs_path): return jsonify([]), 404
-    items = []
+    all_res, grps = [], []
     try:
         with os.scandir(abs_path) as it:
             for entry in it:
-                items.append({
-                    'name': normalize_nfc(entry.name),
-                    'isDirectory': entry.is_dir(),
-                    'path': normalize_nfc(os.path.join(path, entry.name).replace('\\', '/'))
-                })
+                if os.path.isdir(entry.path):
+                    name = normalize_nfc(entry.name)
+                    # 특정 카테고리나 짧은 이름은 하위 스캔
+                    if len(name) <= 2 or path.lower() in ["완결a", "완결b", "완결"]:
+                        grps.append(entry.path)
+                    else:
+                        rel = get_safe_rel_path(entry.path)
+                        all_res.append({'name': name, 'isDirectory': True, 'path': normalize_nfc(rel), 'metadata': None})
+                elif entry.is_file() and entry.name.lower().endswith(('.zip', '.cbz')):
+                    rel = get_safe_rel_path(abs_path)
+                    all_res.append({'name': normalize_nfc(os.path.basename(abs_path)), 'isDirectory': True, 'path': normalize_nfc(rel), 'metadata': None})
+
+        if grps:
+            with ThreadPoolExecutor(max_workers=15) as ex:
+                futs = [ex.submit(scan_worker, f) for f in grps]
+                for f in as_completed(futs): all_res.extend(f.result())
+
+        seen = set()
+        uniq = []
+        for r in all_res:
+            if r['path'] not in seen:
+                seen.add(r['path']); uniq.append(r)
+
+        fin = sorted(uniq, key=lambda x: x['name'])
+        if fin: SCAN_CACHE[path] = (time.time(), fin)
+        logger.info(f"[SCAN DONE] {len(fin)}개 발견")
+        return jsonify(fin)
+    except Exception as e:
+        logger.error(f"Scan error: {e}"); return jsonify([])
+
+@app.route('/metadata')
+def get_metadata():
+    p = request.args.get('path', ''); ap = get_actual_abs_path(p)
+    return jsonify(get_metadata_internal(ap, p))
+
+@app.route('/files')
+def list_files():
+    p = request.args.get('path', ''); ap = get_actual_abs_path(p)
+    if not os.path.isdir(ap):
+        logger.error(f"Not a dir: {ap}")
+        return jsonify([]), 404
+    items = []
+    try:
+        with os.scandir(ap) as it:
+            for e in it:
+                items.append({'name': normalize_nfc(e.name), 'isDirectory': os.path.isdir(e.path), 'path': normalize_nfc(os.path.join(p, e.name).replace('\\', '/'))})
         return jsonify(sorted(items, key=lambda x: x['name']))
     except: return jsonify([]), 500
 
 @app.route('/download')
 def download_file():
-    path = request.args.get('path', '')
-    if path.startswith('http'): return "External URL", 400
-
-    if path.startswith("zip_thumb://"):
-        rel_zip_path = path[len("zip_thumb://"):]
-        abs_zip_path = get_actual_abs_path(rel_zip_path)
-        if abs_zip_path and os.path.isfile(abs_zip_path):
+    p = request.args.get('path', '')
+    if p.startswith("zip_thumb://"):
+        rzp = p[len("zip_thumb://"):]
+        azp = get_actual_abs_path(rzp)
+        if azp and os.path.isfile(azp):
             try:
-                with zipfile.ZipFile(abs_zip_path, 'r') as z:
-                    img_list = sorted([n for n in z.namelist() if n.lower().endswith(('.jpg', '.jpeg', '.png', '.webp', '.gif'))])
-                    if img_list:
-                        with z.open(img_list[0]) as f:
-                            return send_file(io.BytesIO(f.read()), mimetype='image/jpeg')
+                with zipfile.ZipFile(azp, 'r') as z:
+                    il = sorted([n for n in z.namelist() if n.lower().endswith(('.jpg', '.jpeg', '.png', '.webp', '.gif'))])
+                    if il:
+                        with z.open(il[0]) as f: return send_file(io.BytesIO(f.read()), mimetype='image/jpeg')
             except: pass
         return "Not found", 404
-
-    abs_path = get_actual_abs_path(path)
-    if not abs_path or not os.path.isfile(abs_path): return "Not found", 404
-    return send_from_directory(os.path.dirname(abs_path), os.path.basename(abs_path))
+    ap = get_actual_abs_path(p)
+    if not os.path.isfile(ap): return "Not found", 404
+    return send_from_directory(os.path.dirname(ap), os.path.basename(ap))
 
 @app.route('/debug')
 def debug_info():
-    return jsonify({'root': ROOT_NORM, 'exists': os.path.exists(ROOT_NORM)})
+    root = get_root()
+    return jsonify({'root': root, 'exists': os.path.exists(root)})
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5555, debug=False, threaded=True, use_reloader=False)
