@@ -1,5 +1,6 @@
 package org.nas.comicsviewer.data
 
+import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 
 @Serializable
@@ -7,18 +8,14 @@ data class ComicMetadata(
     val title: String? = null,
     val author: String? = null,
     val summary: String? = null,
-    val posterUrl: String? = null
+    @SerialName("poster_url") val posterUrl: String? = null
 )
 
 interface PosterRepository {
     suspend fun getMetadata(path: String): ComicMetadata
     suspend fun downloadImageFromUrl(url: String): ByteArray?
     fun setDatabase(database: ComicDatabase)
-    
-    // 서버에서 미리 가져온 메타데이터 캐싱
     suspend fun cacheMetadata(path: String, metadata: ComicMetadata)
-    
-    // 검색 기록 관련
     suspend fun insertRecentSearch(query: String)
     suspend fun getRecentSearches(): List<String>
     suspend fun clearRecentSearches()

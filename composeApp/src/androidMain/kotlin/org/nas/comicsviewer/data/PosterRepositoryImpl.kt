@@ -8,9 +8,20 @@ import io.ktor.client.request.get
 import io.ktor.serialization.kotlinx.json.json
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.SerialName
+import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import java.io.File
 import java.text.Normalizer
+
+// 서버 응답과 매칭되는 데이터 클래스 (필드명 poster_url 사용)
+@Serializable
+data class ServerMetadata(
+    val title: String? = null,
+    val author: String? = null,
+    val summary: String? = null,
+    @SerialName("poster_url") val posterUrl: String? = null
+)
 
 actual fun providePosterRepository(): PosterRepository = AndroidPosterRepository.getInstance()
 
@@ -33,7 +44,7 @@ class AndroidPosterRepository private constructor() : PosterRepository {
 
     override suspend fun cacheMetadata(path: String, metadata: ComicMetadata) {
         val hash = md5(nfc(path))
-        // 구분자를 :::META:::로 변경하여 구 버전 캐시를 무효화함
+        // 새로운 구분자 사용
         val data = "${metadata.title ?: ""}:::META:::${metadata.author ?: ""}:::META:::${metadata.summary ?: ""}:::META:::${metadata.posterUrl ?: ""}"
         database?.posterCacheQueries?.upsertPoster(hash, data, System.currentTimeMillis())
     }
@@ -42,22 +53,33 @@ class AndroidPosterRepository private constructor() : PosterRepository {
         val hash = md5(nfc(path))
         val cached = database?.posterCacheQueries?.getPoster(hash)?.executeAsOneOrNull()
         
-        // 새로운 구분자가 포함된 경우에만 캐시 데이터 사용
-        if (cached?.poster_url != null && cached.poster_url.contains(":::META:::")) {
-            val p = cached.poster_url.split(":::META:::")
-            return@withContext ComicMetadata(
-                title = p.getOrNull(0),
-                author = p.getOrNull(1),
-                summary = p.getOrNull(2),
-                posterUrl = p.getOrNull(3)
-            )
+        if (cached?.poster_url != null) {
+            val raw = cached.poster_url
+            val p = if (raw.contains(":::META:::")) {
+                raw.split(":::META:::")
+            } else {
+                // 기존 ||| 방식 지원 (하위 호환성)
+                raw.split("|||")
+            }
+            
+            // 기존 캐시의 경우 순서가 (poster, title, author, summary)였을 수 있음
+            // 신규 캐시의 경우 순서가 (title, author, summary, poster)
+            if (raw.contains(":::META:::")) {
+                return@withContext ComicMetadata(p.getOrNull(0), p.getOrNull(1), p.getOrNull(2), p.getOrNull(3))
+            } else if (p.size >= 4) {
+                // 기존 방식 추측 복구 (포스터가 http나 zip_thumb으로 시작하는 경우)
+                val first = p.getOrNull(0) ?: ""
+                if (first.startsWith("http") || first.startsWith("zip_thumb")) {
+                     return@withContext ComicMetadata(p.getOrNull(1), p.getOrNull(2), p.getOrNull(3), p.getOrNull(0))
+                }
+            }
         }
-        
-        // 캐시가 없거나 구 버전인 경우 서버에서 새로 가져옴
+
         try {
-            val m = client.get("$baseUrl/metadata") { url { parameters.append("path", path) } }.body<ComicMetadata>()
-            cacheMetadata(path, m)
-            m
+            val m = client.get("$baseUrl/metadata") { url { parameters.append("path", path) } }.body<ServerMetadata>()
+            val metadata = ComicMetadata(m.title, m.author, m.summary, m.posterUrl)
+            cacheMetadata(path, metadata)
+            metadata
         } catch (e: Exception) { 
             ComicMetadata(title = path.substringAfterLast("/")) 
         }
@@ -66,7 +88,11 @@ class AndroidPosterRepository private constructor() : PosterRepository {
     override suspend fun downloadImageFromUrl(url: String): ByteArray? = withContext(Dispatchers.IO) {
         if (url.isBlank()) return@withContext null
         try {
-            client.get("$baseUrl/download") { url { parameters.append("path", url) } }.body()
+            if (url.startsWith("http")) {
+                client.get(url).body()
+            } else {
+                client.get("$baseUrl/download") { url { parameters.append("path", url) } }.body()
+            }
         } catch (e: Exception) { null }
     }
 
