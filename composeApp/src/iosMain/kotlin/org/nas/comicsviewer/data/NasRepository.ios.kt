@@ -7,9 +7,6 @@ import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.client.request.get
 import io.ktor.serialization.kotlinx.json.json
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.flow
-import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 
@@ -29,41 +26,36 @@ class IosNasRepository private constructor() : NasRepository {
         fun getInstance() = instance ?: synchronized(this) { instance ?: IosNasRepository().also { instance = it } }
     }
 
-    override fun setCredentials(u: String, p: String) {}
-    override fun getCredentials() = Pair("", "")
-
-    override suspend fun listFiles(url: String): List<NasFile> = withContext(Dispatchers.Default) {
+    override suspend fun listFiles(path: String): List<NasFile> = withContext(Dispatchers.Default) {
         try {
-            client.get("$baseUrl/files") { url { parameters.append("path", url) } }.body<List<NasFile>>().sortedWith(compareBy({ !it.isDirectory }, { it.name }))
+            client.get("$baseUrl/files") { url { parameters.append("path", path) } }.body<List<NasFile>>().sortedWith(compareBy({ !it.isDirectory }, { it.name }))
         } catch (e: Exception) {
-            println("DEBUG_NAS: Error listing $url: ${e.message}")
+            println("DEBUG_NAS: Error listing $path: ${e.message}")
             emptyList()
         }
     }
 
-    override suspend fun getFileContent(url: String): ByteArray = withContext(Dispatchers.Default) {
+    override suspend fun getFileContent(path: String): ByteArray = withContext(Dispatchers.Default) {
         try {
-            client.get("$baseUrl/download") { url { parameters.append("path", url) } }.body()
+            client.get("$baseUrl/download") { url { parameters.append("path", path) } }.body()
         } catch (e: Exception) {
-            println("DEBUG_NAS: Error getting content from $url: ${e.message}")
+            println("DEBUG_NAS: Error getting content from $path: ${e.message}")
             ByteArray(0)
         }
     }
 
-    override suspend fun downloadFile(url: String, path: String, onProgress: (Float) -> Unit) {}
-    override fun getTempFilePath(name: String) = ""
-
-    override fun scanComicFolders(url: String, maxDepth: Int): Flow<NasFile> = flow {
+    override suspend fun scanComicFolders(path: String, page: Int, pageSize: Int): ScanResult = withContext(Dispatchers.Default) {
         try {
-            val response = client.get("$baseUrl/scan") {
+            client.get("$baseUrl/scan") {
                 url {
-                    parameters.append("path", url)
-                    parameters.append("maxDepth", maxDepth.toString())
+                    parameters.append("path", path)
+                    parameters.append("page", page.toString())
+                    parameters.append("page_size", pageSize.toString())
                 }
-            }.body<List<NasFile>>()
-            response.forEach { emit(it) }
+            }.body()
         } catch (e: Exception) {
-            println("DEBUG_NAS: Error scanning comics in $url: ${e.message}")
+            println("DEBUG_NAS: Error scanning comics in $path: ${e.message}")
+            ScanResult(0, 0, 0, emptyList())
         }
-    }.flowOn(Dispatchers.Default)
+    }
 }

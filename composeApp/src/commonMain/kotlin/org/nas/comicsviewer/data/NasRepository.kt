@@ -11,10 +11,18 @@ data class NasFile(
     val metadata: ComicMetadata? = null
 )
 
+@Serializable
+data class ScanResult(
+    val total_items: Int,
+    val page: Int,
+    val page_size: Int,
+    val items: List<NasFile>
+)
+
 interface NasRepository {
     suspend fun listFiles(path: String): List<NasFile>
     suspend fun getFileContent(path: String): ByteArray
-    fun scanComicFolders(path: String): Flow<NasFile>
+    suspend fun scanComicFolders(path: String, page: Int, pageSize: Int): ScanResult
 }
 
 expect fun provideNasRepository(): NasRepository

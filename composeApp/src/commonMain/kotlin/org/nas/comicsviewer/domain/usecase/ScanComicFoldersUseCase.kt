@@ -1,11 +1,10 @@
 package org.nas.comicsviewer.domain.usecase
 
 import org.nas.comicsviewer.data.NasRepository
-import org.nas.comicsviewer.data.NasFile
-import kotlinx.coroutines.flow.Flow
+import org.nas.comicsviewer.data.ScanResult
 
 class ScanComicFoldersUseCase(private val nasRepository: NasRepository) {
-    fun execute(path: String): Flow<NasFile> {
-        return nasRepository.scanComicFolders(path)
+    suspend fun execute(path: String, page: Int, pageSize: Int): ScanResult {
+        return nasRepository.scanComicFolders(path, page, pageSize)
     }
 }

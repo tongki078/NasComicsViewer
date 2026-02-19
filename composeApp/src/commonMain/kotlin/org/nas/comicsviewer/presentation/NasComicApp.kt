@@ -80,10 +80,20 @@ fun NasComicApp(viewModel: ComicViewModel) {
                 Column(Modifier.fillMaxSize()) {
                     TopBar(onHomeClick = { viewModel.onHome() }, onSearchClick = { viewModel.toggleSearchMode(true) })
                     if (uiState.categories.isNotEmpty()) {
-                        CategoryTabs(uiState) { path, index -> viewModel.scanCategory(path, index) }
+                        CategoryTabs(uiState) { path, index -> viewModel.scanBooks(path, index) }
                     }
                     Box(Modifier.weight(1f)) {
-                        FolderGridView(uiState.currentFiles, uiState.isScanning, { viewModel.onFileClick(it) }, { viewModel.loadNextPage() })
+                        FolderGridView(
+                            files = uiState.currentFiles,
+                            isLoadingMore = uiState.isLoadingMore,
+                            onFileClick = { viewModel.onFileClick(it) },
+                            onLoadMore = { viewModel.loadMoreBooks() }
+                        )
+                        if (uiState.isLoading) {
+                            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                CircularProgressIndicator(color = KakaoYellow, strokeWidth = 2.dp)
+                            }
+                        }
                     }
                 }
             }
@@ -94,6 +104,61 @@ fun NasComicApp(viewModel: ComicViewModel) {
         }
     }
 }
+
+
+@Composable
+fun FolderGridView(
+    files: List<NasFile>,
+    isLoadingMore: Boolean,
+    onFileClick: (NasFile) -> Unit,
+    onLoadMore: () -> Unit
+) {
+    val gridState = rememberLazyGridState()
+
+    val shouldLoadMore by remember {
+        derivedStateOf {
+            val lastVisibleItem = gridState.layoutInfo.visibleItemsInfo.lastOrNull()
+            lastVisibleItem != null && lastVisibleItem.index >= files.size - 10
+        }
+    }
+
+    LaunchedEffect(shouldLoadMore) {
+        if (shouldLoadMore) {
+            onLoadMore()
+        }
+    }
+
+    LazyVerticalGrid(
+        state = gridState,
+        columns = GridCells.Fixed(3),
+        contentPadding = PaddingValues(16.dp),
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp)
+    ) {
+        items(files, key = { it.path }) { file ->
+            ComicCard(file, remember { providePosterRepository() }) { onFileClick(file) }
+        }
+
+        if (isLoadingMore) {
+            item(span = { GridItemSpan(maxLineSpan) }) {
+                Box(
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 24.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    CircularProgressIndicator(
+                        color = KakaoYellow,
+                        strokeWidth = 2.dp,
+                        modifier = Modifier.size(24.dp)
+                    )
+                }
+            }
+        }
+    }
+}
+
+// --- The rest of the file remains the same... ---
 
 @Composable
 fun SearchScreen(
@@ -182,13 +247,13 @@ fun SearchScreen(
                     fontWeight = FontWeight.Bold, 
                     modifier = Modifier.padding(horizontal = 24.dp, vertical = 12.dp)
                 )
+                // Note: Search results are not paginated in this implementation
                 FolderGridView(state.searchResults, false, onFileClick, {})
             }
         }
     }
 }
 
-// ... (WebtoonViewer, SeriesDetailScreen 등은 그대로 유지) ...
 @Composable
 fun WebtoonViewer(
     path: String, 
@@ -351,20 +416,6 @@ fun CategoryTabs(uiState: ComicBrowserUiState, onTabClick: (String, Int) -> Unit
     }) {
         uiState.categories.forEachIndexed { i, cat ->
             Tab(selected = uiState.selectedCategoryIndex == i, onClick = { onTabClick(cat.path, i) }, text = { Text(cat.name, fontSize = 14.sp) }, selectedContentColor = TextPureWhite, unselectedContentColor = TextMuted)
-        }
-    }
-}
-
-@Composable
-fun FolderGridView(files: List<NasFile>, isScanning: Boolean, onClick: (NasFile) -> Unit, onPage: () -> Unit) {
-    val gridState = rememberLazyGridState()
-    val lastIndex by remember { derivedStateOf { gridState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0 } }
-    LaunchedEffect(lastIndex) { if (lastIndex >= files.size - 5) onPage() }
-
-    LazyVerticalGrid(state = gridState, columns = GridCells.Fixed(3), contentPadding = PaddingValues(16.dp), horizontalArrangement = Arrangement.spacedBy(10.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-        items(files, key = { it.path }) { file -> ComicCard(file, remember { providePosterRepository() }) { onClick(file) } }
-        if (isScanning) {
-            item(span = { GridItemSpan(maxLineSpan) }) { Box(Modifier.fillMaxWidth().padding(24.dp), Alignment.Center) { CircularProgressIndicator(color = KakaoYellow, strokeWidth = 2.dp, modifier = Modifier.size(24.dp)) } }
         }
     }
 }

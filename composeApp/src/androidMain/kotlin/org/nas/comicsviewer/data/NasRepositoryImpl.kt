@@ -8,10 +8,8 @@ import io.ktor.client.plugins.contentnegotiation.*
 import io.ktor.client.request.*
 import io.ktor.serialization.kotlinx.json.*
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
-import org.nas.comicsviewer.data.ComicMetadata
 
 actual fun provideNasRepository(): NasRepository = AndroidNasRepository.getInstance()
 
@@ -41,19 +39,18 @@ class AndroidNasRepository private constructor() : NasRepository {
         } catch (e: Exception) { ByteArray(0) }
     }
 
-    override fun scanComicFolders(path: String): Flow<NasFile> = flow {
+    override suspend fun scanComicFolders(path: String, page: Int, pageSize: Int): ScanResult = withContext(Dispatchers.IO) {
         try {
-            val response = client.get("$baseUrl/scan") { url { parameters.append("path", path) } }.body<List<NasFile>>()
-            response.forEach { file ->
-                val metadata = try {
-                    client.get("$baseUrl/metadata") { url { parameters.append("path", file.path) } }.body<ComicMetadata>()
-                } catch (e: Exception) {
-                    null
+            client.get("$baseUrl/scan") {
+                url {
+                    parameters.append("path", path)
+                    parameters.append("page", page.toString())
+                    parameters.append("page_size", pageSize.toString())
                 }
-                emit(file.copy(metadata = metadata))
-            }
+            }.body()
         } catch (e: Exception) {
             println("DEBUG_NAS: Scan error: ${e.message}")
+            ScanResult(0, 0, 0, emptyList()) // 에러 발생 시 빈 결과 반환
         }
-    }.flowOn(Dispatchers.IO)
+    }
 }
