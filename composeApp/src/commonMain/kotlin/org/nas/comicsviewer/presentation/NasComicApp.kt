@@ -72,7 +72,8 @@ fun NasComicApp(viewModel: ComicViewModel) {
                     onSearch = { viewModel.onSearchSubmit(it) },
                     onClose = { viewModel.toggleSearchMode(false) },
                     onFileClick = { viewModel.onFileClick(it) },
-                    onClearHistory = { viewModel.clearRecentSearches() }
+                    onClearHistory = { viewModel.clearRecentSearches() },
+                    viewModel = viewModel
                 )
             } else if (uiState.isSeriesView) {
                 SeriesDetailScreen(uiState, { viewModel.onFileClick(it) }, { viewModel.onBack() }, viewModel.posterRepository)
@@ -87,7 +88,8 @@ fun NasComicApp(viewModel: ComicViewModel) {
                             files = uiState.currentFiles,
                             isLoadingMore = uiState.isLoadingMore,
                             onFileClick = { viewModel.onFileClick(it) },
-                            onLoadMore = { viewModel.loadMoreBooks() }
+                            onLoadMore = { viewModel.loadMoreBooks() },
+                            posterRepository = viewModel.posterRepository
                         )
                         if (uiState.isLoading) {
                             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -111,7 +113,8 @@ fun FolderGridView(
     files: List<NasFile>,
     isLoadingMore: Boolean,
     onFileClick: (NasFile) -> Unit,
-    onLoadMore: () -> Unit
+    onLoadMore: () -> Unit,
+    posterRepository: PosterRepository
 ) {
     val gridState = rememberLazyGridState()
 
@@ -136,7 +139,7 @@ fun FolderGridView(
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
         items(files, key = { it.path }) { file ->
-            ComicCard(file, remember { providePosterRepository() }) { onFileClick(file) }
+            ComicCard(file, posterRepository) { onFileClick(file) }
         }
 
         if (isLoadingMore) {
@@ -158,7 +161,31 @@ fun FolderGridView(
     }
 }
 
-// --- The rest of the file remains the same... ---
+@Composable
+fun ComicCard(file: NasFile, repo: PosterRepository, onClick: () -> Unit) {
+    var thumb by remember { mutableStateOf<ImageBitmap?>(null) }
+
+    LaunchedEffect(file.metadata?.posterUrl) {
+        file.metadata?.posterUrl?.let {
+            thumb = repo.getImage(it)
+        }
+    }
+
+    Column(Modifier.fillMaxWidth().clickable(interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = onClick)) {
+        Box(Modifier.aspectRatio(0.72f).fillMaxWidth().clip(RoundedCornerShape(2.dp)).background(SurfaceGrey)) {
+            if (thumb != null) {
+                Image(thumb!!, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+            } else {
+                Box(Modifier.fillMaxSize(), Alignment.Center) { 
+                     Text("MANGA", color = TextMuted, fontSize = 9.sp, fontWeight = FontWeight.Bold, modifier = Modifier.alpha(0.4f)) 
+                }
+            }
+            if (file.isDirectory) Text("FOLDER", modifier = Modifier.align(Alignment.BottomStart).padding(4.dp), color = KakaoYellow, fontSize = 7.sp, fontWeight = FontWeight.Black)
+        }
+        Spacer(Modifier.height(6.dp))
+        Text(file.metadata?.title ?: file.name, style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold, fontSize = 11.sp), maxLines = 2, overflow = TextOverflow.Ellipsis, color = TextPureWhite)
+    }
+}
 
 @Composable
 fun SearchScreen(
@@ -167,13 +194,13 @@ fun SearchScreen(
     onSearch: (String) -> Unit,
     onClose: () -> Unit,
     onFileClick: (NasFile) -> Unit,
-    onClearHistory: () -> Unit
+    onClearHistory: () -> Unit,
+    viewModel: ComicViewModel // Pass the whole viewModel
 ) {
     val focusRequester = remember { FocusRequester() }
     LaunchedEffect(Unit) { focusRequester.requestFocus() }
 
     Column(Modifier.fillMaxSize().background(BgBlack).statusBarsPadding()) {
-        // 검색 바
         Row(
             Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically
@@ -208,7 +235,6 @@ fun SearchScreen(
         }
 
         if (state.searchQuery.isEmpty()) {
-            // 최근 검색어 표시
             if (state.recentSearches.isNotEmpty()) {
                 Row(
                     Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 12.dp),
@@ -235,7 +261,6 @@ fun SearchScreen(
                 }
             }
         } else {
-            // 검색 결과 표시
             if (state.searchResults.isEmpty()) {
                 Box(Modifier.fillMaxSize(), Alignment.Center) {
                     Text("검색 결과가 없습니다.", color = TextMuted)
@@ -247,8 +272,7 @@ fun SearchScreen(
                     fontWeight = FontWeight.Bold, 
                     modifier = Modifier.padding(horizontal = 24.dp, vertical = 12.dp)
                 )
-                // Note: Search results are not paginated in this implementation
-                FolderGridView(state.searchResults, false, onFileClick, {})
+                FolderGridView(state.searchResults, false, onFileClick, {}, viewModel.posterRepository)
             }
         }
     }
@@ -272,13 +296,7 @@ fun WebtoonViewer(
 
     LaunchedEffect(posterUrl) {
         posterUrl?.let { url ->
-            val bytes = repo.downloadImageFromUrl(url)
-            if (bytes != null) {
-                withContext(Dispatchers.Default) {
-                    val bitmap = bytes.toImageBitmap()
-                    withContext(Dispatchers.Main) { posterBitmap = bitmap }
-                }
-            }
+            posterBitmap = repo.getImage(url)
         }
     }
 
@@ -336,13 +354,7 @@ fun SeriesDetailScreen(state: ComicBrowserUiState, onVolumeClick: (NasFile) -> U
     
     LaunchedEffect(metadata?.posterUrl) {
         metadata?.posterUrl?.let { url ->
-            val bytes = repo.downloadImageFromUrl(url)
-            if (bytes != null) {
-                withContext(Dispatchers.Default) {
-                    val bitmap = bytes.toImageBitmap()
-                    withContext(Dispatchers.Main) { posterBitmap = bitmap }
-                }
-            }
+            posterBitmap = repo.getImage(url)
         }
     }
 
@@ -417,55 +429,6 @@ fun CategoryTabs(uiState: ComicBrowserUiState, onTabClick: (String, Int) -> Unit
         uiState.categories.forEachIndexed { i, cat ->
             Tab(selected = uiState.selectedCategoryIndex == i, onClick = { onTabClick(cat.path, i) }, text = { Text(cat.name, fontSize = 14.sp) }, selectedContentColor = TextPureWhite, unselectedContentColor = TextMuted)
         }
-    }
-}
-
-@Composable
-fun ComicCard(file: NasFile, repo: PosterRepository, onClick: () -> Unit) {
-    var thumb by remember { mutableStateOf<ImageBitmap?>(null) }
-    var isLoading by remember { mutableStateOf(false) } // 로딩 상태
-    var isError by remember { mutableStateOf(false) }   // 에러 상태
-
-    LaunchedEffect(file.metadata?.posterUrl) {
-        file.metadata?.posterUrl?.let { url ->
-            if (thumb == null && !isError) {
-                isLoading = true
-                val bytes = repo.downloadImageFromUrl(url)
-                if (bytes != null) {
-                    withContext(Dispatchers.Default) {
-                        val bitmap = bytes.toImageBitmap()
-                        withContext(Dispatchers.Main) { 
-                            thumb = bitmap 
-                            isLoading = false
-                        }
-                    }
-                } else {
-                    isError = true
-                    isLoading = false
-                }
-            }
-        }
-    }
-
-    Column(Modifier.fillMaxWidth().clickable(interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = onClick)) {
-        Box(Modifier.aspectRatio(0.72f).fillMaxWidth().clip(RoundedCornerShape(2.dp)).background(SurfaceGrey)) {
-            if (thumb != null) {
-                Image(thumb!!, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
-            } else {
-                Box(Modifier.fillMaxSize(), Alignment.Center) { 
-                    if (isLoading) {
-                        CircularProgressIndicator(modifier = Modifier.size(20.dp), color = KakaoYellow, strokeWidth = 2.dp)
-                    } else if (isError) {
-                        Text("IMG ERR", color = Color.Red, fontSize = 10.sp, fontWeight = FontWeight.Bold)
-                    } else {
-                        Text("MANGA", color = TextMuted, fontSize = 9.sp, fontWeight = FontWeight.Bold, modifier = Modifier.alpha(0.4f)) 
-                    }
-                }
-            }
-            if (file.isDirectory) Text("FOLDER", modifier = Modifier.align(Alignment.BottomStart).padding(4.dp), color = KakaoYellow, fontSize = 7.sp, fontWeight = FontWeight.Black)
-        }
-        Spacer(Modifier.height(6.dp))
-        Text(file.metadata?.title ?: file.name, style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold, fontSize = 11.sp), maxLines = 2, overflow = TextOverflow.Ellipsis, color = TextPureWhite)
     }
 }
 

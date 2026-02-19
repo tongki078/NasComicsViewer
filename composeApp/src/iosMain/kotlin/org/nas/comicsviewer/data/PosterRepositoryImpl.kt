@@ -5,9 +5,6 @@ import io.ktor.client.HttpClient
 import io.ktor.client.call.body
 import io.ktor.client.engine.darwin.Darwin
 import io.ktor.client.request.get
-import kotlinx.cinterop.ExperimentalForeignApi
-import kotlinx.cinterop.addressOf
-import kotlinx.cinterop.usePinned
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.nas.comicsviewer.toImageBitmap
@@ -18,6 +15,7 @@ import platform.Foundation.NSUserDomainMask
 import platform.Foundation.create
 import platform.Foundation.dataWithContentsOfFile
 import platform.Foundation.writeToFile
+import java.io.File
 import java.net.URLEncoder
 
 // iOS에서는 Context가 필요 없으므로 context 파라미터를 무시합니다.
@@ -25,13 +23,13 @@ actual fun providePosterRepository(context: Any?): PosterRepository {
     return IosPosterRepository.getInstance()
 }
 
-@OptIn(ExperimentalForeignApi::class)
 class IosPosterRepository private constructor() : PosterRepository {
 
     private val client = HttpClient(Darwin) {}
-    private val baseUrl = "http://192.168.0.2:5555"
 
+    // iOS에는 LruCache가 없으므로, 간단한 MutableMap으로 메모리 캐시 구현
     private val memoryCache = mutableMapOf<String, ImageBitmap>()
+
     private val diskCacheDir: String by lazy {
         val cacheDir = NSSearchPathForDirectoriesInDomains(NSCachesDirectory, NSUserDomainMask, true).first() as String
         val posterCacheDir = "$cacheDir/poster_cache"
@@ -57,7 +55,7 @@ class IosPosterRepository private constructor() : PosterRepository {
             try {
                 val bytes = NSFileManager.defaultManager.dataWithContentsOfFile(diskFile)?.toByteArray()
                 bytes?.toImageBitmap()?.let {
-                    if (memoryCache.size > 20 * 1024 * 1024) memoryCache.clear()
+                    if (memoryCache.size > 20 * 1024 * 1024) memoryCache.clear() // 간단한 캐시 관리
                     memoryCache[key] = it
                     return@withContext it
                 }
@@ -65,12 +63,7 @@ class IosPosterRepository private constructor() : PosterRepository {
         }
 
         try {
-            val downloadUrl = if (url.startsWith("http")) {
-                url
-            } else {
-                "$baseUrl/download?path=${URLEncoder.encode(url, "UTF-8")}"
-            }
-            val bytes: ByteArray = client.get(downloadUrl).body()
+            val bytes: ByteArray = client.get(url).body()
             if (bytes.isNotEmpty()) {
                 bytes.usePinned { pinned ->
                      NSFileManager.defaultManager.createFileContentsAtPath(diskFile, platform.Foundation.NSData.dataWithBytes(pinned.addressOf(0), bytes.size.toULong()), null)
