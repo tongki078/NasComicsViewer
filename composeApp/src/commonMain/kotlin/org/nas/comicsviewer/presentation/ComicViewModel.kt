@@ -72,9 +72,7 @@ class ComicViewModel(
         viewModelScope.launch {
             _uiState.update { it.copy(isLoading = true, isIntroShowing = true) }
             try {
-                val response = client.get("http://192.168.0.2:5555/debug").body<JsonObject>()
-                val pathExists = response["exists"]?.jsonPrimitive?.booleanOrNull ?: false
-                if (!pathExists) throw Exception("ROOT 경로를 찾을 수 없습니다.")
+                // /debug 체크 로직 제거
                 loadCategories("")
             } catch (e: Exception) {
                 _uiState.update { it.copy(errorMessage = "서버 연결 실패: ${e.message}", isLoading = false) }
@@ -127,14 +125,13 @@ class ComicViewModel(
                 scanComicFoldersUseCase.execute(path).collect { file ->
                     if (scanId != currentScanId) return@collect
                     
-                    // 제목 누락 방지 (서버 응답 보완)
                     val fixedFile = if (file.name.isBlank()) {
                         file.copy(name = file.path.substringAfterLast("/"))
                     } else file
                     
                     allScannedFiles.add(fixedFile)
                     val sorted = allScannedFiles.sortedBy { it.name }
-                    _uiState.update { it.copy(currentFiles = sorted, totalFoundCount = sorted.size) }
+                    _uiState.update { it.copy(currentFiles = sorted.take(PAGE_SIZE), totalFoundCount = sorted.size) }
                 }
                 
                 // 리스트 로딩 완료 후 백그라운드 프리페치 시작
@@ -150,15 +147,26 @@ class ComicViewModel(
 
     private fun startMetadataPrefetch(scanId: Int) {
         prefetchJob = viewModelScope.launch {
-            // 리스트의 모든 항목에 대해 메타데이터(포스터)를 백그라운드에서 가져와 캐시 채움
-            allScannedFiles.forEach { file ->
+            // 리스트의 모든 항목에 대해 메타데이터(포스터)를 백그라운드에서 가져와 UI를 실시간으로 업데이트
+            allScannedFiles.forEachIndexed { index, file ->
                 if (scanId != currentScanId) return@launch
                 
                 // PosterRepository.getMetadata 내부 로직이 DB 확인 후 없으면 서버 요청하도록 되어 있음
-                posterRepository.getMetadata(file.path)
+                val metadata = posterRepository.getMetadata(file.path)
                 
-                // 서버 부하 분산을 위한 아주 짧은 지연
-                delay(100)
+                // 메모리 내 리스트 업데이트
+                allScannedFiles[index] = file.copy(metadata = metadata)
+                
+                // UI 상태 업데이트 (현재 화면에 보이는 리스트 갱신)
+                _uiState.update { state ->
+                    val updatedList = state.currentFiles.map { 
+                        if (it.path == file.path) it.copy(metadata = metadata) else it 
+                    }
+                    state.copy(currentFiles = updatedList)
+                }
+                
+                // 서버 부하 분산을 위한 지연
+                delay(50)
             }
         }
     }
@@ -167,7 +175,8 @@ class ComicViewModel(
         if (uiState.value.isScanning) return
         val currentCount = _uiState.value.currentFiles.size
         if (currentCount < allScannedFiles.size) {
-            _uiState.update { it.copy(currentFiles = allScannedFiles.take(currentCount + PAGE_SIZE)) }
+            val nextPage = allScannedFiles.take(currentCount + PAGE_SIZE)
+            _uiState.update { it.copy(currentFiles = nextPage) }
         }
     }
 
