@@ -33,6 +33,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import org.nas.comicsviewer.BackHandler
 import org.nas.comicsviewer.data.*
 import org.nas.comicsviewer.toImageBitmap
@@ -207,7 +209,13 @@ fun WebtoonViewer(
 
     LaunchedEffect(posterUrl) {
         posterUrl?.let { url ->
-            repo.downloadImageFromUrl(url)?.let { posterBitmap = it.toImageBitmap() }
+            val bytes = repo.downloadImageFromUrl(url)
+            if (bytes != null) {
+                withContext(Dispatchers.Default) {
+                    val bitmap = bytes.toImageBitmap()
+                    withContext(Dispatchers.Main) { posterBitmap = bitmap }
+                }
+            }
         }
     }
 
@@ -265,7 +273,13 @@ fun SeriesDetailScreen(state: ComicBrowserUiState, onVolumeClick: (NasFile) -> U
     
     LaunchedEffect(metadata?.posterUrl) {
         metadata?.posterUrl?.let { url ->
-            repo.downloadImageFromUrl(url)?.let { posterBitmap = it.toImageBitmap() }
+            val bytes = repo.downloadImageFromUrl(url)
+            if (bytes != null) {
+                withContext(Dispatchers.Default) {
+                    val bitmap = bytes.toImageBitmap()
+                    withContext(Dispatchers.Main) { posterBitmap = bitmap }
+                }
+            }
         }
     }
 
@@ -360,21 +374,59 @@ fun FolderGridView(files: List<NasFile>, isScanning: Boolean, onClick: (NasFile)
 @Composable
 fun ComicCard(file: NasFile, repo: PosterRepository, onClick: () -> Unit) {
     var thumb by remember { mutableStateOf<ImageBitmap?>(null) }
-    var metadata by remember { mutableStateOf<ComicMetadata?>(null) }
+    var localMetadata by remember { mutableStateOf<ComicMetadata?>(null) }
+    var isLoading by remember { mutableStateOf(false) } // 로딩 상태
+    var isError by remember { mutableStateOf(false) }   // 에러 상태
+    
+    val effectiveMetadata = file.metadata ?: localMetadata
+
     LaunchedEffect(file.path) {
-        delay(200L + (file.path.hashCode() % 500).toLong().coerceAtLeast(0))
-        val meta = repo.getMetadata(file.path)
-        metadata = meta
-        meta.posterUrl?.let { url -> repo.downloadImageFromUrl(url)?.let { thumb = it.toImageBitmap() } }
+        if (file.metadata == null) {
+            delay(200) 
+            localMetadata = repo.getMetadata(file.path)
+        }
     }
+
+    LaunchedEffect(effectiveMetadata?.posterUrl) {
+        effectiveMetadata?.posterUrl?.let { url ->
+            if (thumb == null && !isError) {
+                isLoading = true
+                val bytes = repo.downloadImageFromUrl(url)
+                if (bytes != null) {
+                    withContext(Dispatchers.Default) {
+                        val bitmap = bytes.toImageBitmap()
+                        withContext(Dispatchers.Main) { 
+                            thumb = bitmap 
+                            isLoading = false
+                        }
+                    }
+                } else {
+                    isError = true
+                    isLoading = false
+                }
+            }
+        }
+    }
+
     Column(Modifier.fillMaxWidth().clickable(interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = onClick)) {
         Box(Modifier.aspectRatio(0.72f).fillMaxWidth().clip(RoundedCornerShape(2.dp)).background(SurfaceGrey)) {
-            if (thumb != null) Image(thumb!!, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
-            else Box(Modifier.fillMaxSize(), Alignment.Center) { Text("MANGA", color = TextMuted, fontSize = 9.sp, fontWeight = FontWeight.Bold, modifier = Modifier.alpha(0.4f)) }
+            if (thumb != null) {
+                Image(thumb!!, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+            } else {
+                Box(Modifier.fillMaxSize(), Alignment.Center) { 
+                    if (isLoading) {
+                        CircularProgressIndicator(modifier = Modifier.size(20.dp), color = KakaoYellow, strokeWidth = 2.dp)
+                    } else if (isError) {
+                        Text("IMG ERR", color = Color.Red, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                    } else {
+                        Text("MANGA", color = TextMuted, fontSize = 9.sp, fontWeight = FontWeight.Bold, modifier = Modifier.alpha(0.4f)) 
+                    }
+                }
+            }
             if (file.isDirectory) Text("FOLDER", modifier = Modifier.align(Alignment.BottomStart).padding(4.dp), color = KakaoYellow, fontSize = 7.sp, fontWeight = FontWeight.Black)
         }
         Spacer(Modifier.height(6.dp))
-        Text(metadata?.title ?: file.name, style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold, fontSize = 11.sp), maxLines = 2, overflow = TextOverflow.Ellipsis, color = TextPureWhite)
+        Text(effectiveMetadata?.title ?: file.name, style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold, fontSize = 11.sp), maxLines = 2, overflow = TextOverflow.Ellipsis, color = TextPureWhite)
     }
 }
 

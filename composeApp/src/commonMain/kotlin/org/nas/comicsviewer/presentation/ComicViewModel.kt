@@ -14,6 +14,9 @@ import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.serialization.kotlinx.json.json
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.Dispatchers
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.booleanOrNull
@@ -72,7 +75,6 @@ class ComicViewModel(
         viewModelScope.launch {
             _uiState.update { it.copy(isLoading = true, isIntroShowing = true) }
             try {
-                // /debug 체크 로직 제거
                 loadCategories("")
             } catch (e: Exception) {
                 _uiState.update { it.copy(errorMessage = "서버 연결 실패: ${e.message}", isLoading = false) }
@@ -134,8 +136,8 @@ class ComicViewModel(
                     _uiState.update { it.copy(currentFiles = sorted.take(PAGE_SIZE), totalFoundCount = sorted.size) }
                 }
                 
-                // 리스트 로딩 완료 후 백그라운드 프리페치 시작
-                startMetadataPrefetch(scanId)
+                // 리스트 로딩 완료 후 백그라운드 프리페치 시작 (최적화됨)
+                prefetchCurrentPage(scanId)
                 
             } catch (e: Exception) {
                 if (scanId == currentScanId) _uiState.update { it.copy(errorMessage = "목록 로드 실패") }
@@ -145,28 +147,49 @@ class ComicViewModel(
         }
     }
 
-    private fun startMetadataPrefetch(scanId: Int) {
-        prefetchJob = viewModelScope.launch {
-            // 리스트의 모든 항목에 대해 메타데이터(포스터)를 백그라운드에서 가져와 UI를 실시간으로 업데이트
-            allScannedFiles.forEachIndexed { index, file ->
+    private fun prefetchCurrentPage(scanId: Int) {
+        prefetchJob?.cancel()
+        prefetchJob = viewModelScope.launch(Dispatchers.Default) {
+            val currentFiles = _uiState.value.currentFiles
+            // 메타데이터가 없는 파일만 필터링
+            val filesToFetch = currentFiles.filter { it.metadata == null || it.metadata.posterUrl == null }
+            
+            // 배치 크기를 늘리고(16) 딜레이를 늘려(100ms) UI 업데이트 빈도 감소 -> 끊김 완화
+            filesToFetch.chunked(16).forEach { batch ->
                 if (scanId != currentScanId) return@launch
                 
-                // PosterRepository.getMetadata 내부 로직이 DB 확인 후 없으면 서버 요청하도록 되어 있음
-                val metadata = posterRepository.getMetadata(file.path)
-                
-                // 메모리 내 리스트 업데이트
-                allScannedFiles[index] = file.copy(metadata = metadata)
-                
-                // UI 상태 업데이트 (현재 화면에 보이는 리스트 갱신)
-                _uiState.update { state ->
-                    val updatedList = state.currentFiles.map { 
-                        if (it.path == file.path) it.copy(metadata = metadata) else it 
+                val results = batch.map { file ->
+                    async {
+                        val metadata = posterRepository.getMetadata(file.path)
+                        file to metadata
                     }
-                    state.copy(currentFiles = updatedList)
+                }.awaitAll()
+
+                if (scanId != currentScanId) return@launch
+
+                _uiState.update { state ->
+                    val updatedCurrentFiles = state.currentFiles.toMutableList()
+                    var changed = false
+                    
+                    results.forEach { (file, metadata) ->
+                        // allScannedFiles 업데이트
+                        val index = allScannedFiles.indexOfFirst { it.path == file.path }
+                        if (index != -1) {
+                            allScannedFiles[index] = allScannedFiles[index].copy(metadata = metadata)
+                        }
+
+                        // currentFiles 업데이트
+                        val currentIdx = updatedCurrentFiles.indexOfFirst { it.path == file.path }
+                        if (currentIdx != -1) {
+                            updatedCurrentFiles[currentIdx] = updatedCurrentFiles[currentIdx].copy(metadata = metadata)
+                            changed = true
+                        }
+                    }
+                    if (changed) state.copy(currentFiles = updatedCurrentFiles) else state
                 }
                 
-                // 서버 부하 분산을 위한 지연
-                delay(50)
+                // UI 업데이트 간격을 충분히 주어 렌더링 부하 감소
+                delay(100)
             }
         }
     }
@@ -177,6 +200,9 @@ class ComicViewModel(
         if (currentCount < allScannedFiles.size) {
             val nextPage = allScannedFiles.take(currentCount + PAGE_SIZE)
             _uiState.update { it.copy(currentFiles = nextPage) }
+            
+            // 페이지 로드 후 해당 페이지의 메타데이터 프리페치 트리거
+            prefetchCurrentPage(currentScanId)
         }
     }
 

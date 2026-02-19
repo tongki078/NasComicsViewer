@@ -11,6 +11,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import java.text.Normalizer
+import android.util.LruCache
+import java.net.URLEncoder
 
 actual fun providePosterRepository(): PosterRepository = AndroidPosterRepository.getInstance()
 
@@ -20,6 +22,11 @@ class AndroidPosterRepository private constructor() : PosterRepository {
         install(ContentNegotiation) { json(Json { ignoreUnknownKeys = true; isLenient = true }) }
     }
     private val baseUrl = "http://192.168.0.2:5555"
+
+    // 메모리 캐시: URL을 키로 사용, 20MB 제한
+    private val memoryCache = object : LruCache<String, ByteArray>(20 * 1024 * 1024) {
+        override fun sizeOf(key: String, value: ByteArray): Int = value.size
+    }
 
     companion object {
         @Volatile private var instance: AndroidPosterRepository? = null
@@ -33,7 +40,6 @@ class AndroidPosterRepository private constructor() : PosterRepository {
 
     override suspend fun cacheMetadata(path: String, metadata: ComicMetadata) {
         val hash = md5(nfc(path))
-        // DB 저장 순서 보장: posterUrl|||title|||author|||summary
         val data = "${metadata.posterUrl ?: ""}|||${metadata.title ?: ""}|||${metadata.author ?: ""}|||${metadata.summary ?: ""}"
         database?.posterCacheQueries?.upsertPoster(hash, data, System.currentTimeMillis())
     }
@@ -48,15 +54,21 @@ class AndroidPosterRepository private constructor() : PosterRepository {
             val p = cached.poster_url.split("|||")
             val posterUrl = p.getOrNull(0)
             val title = p.getOrNull(1)
-            if (!title.isNullOrBlank() && !title.lowercase().endsWith(".jpg")) {
+            
+            // 수정: posterUrl이 실제로 존재할 때만 캐시를 사용함.
+            // 빈 문자열("")인 경우 이전에 못 찾았다는 뜻이지만, 서버 로직이 개선되었을 수 있으므로 재시도하게 함.
+            if (!posterUrl.isNullOrBlank() && !title.isNullOrBlank() && !title.lowercase().endsWith(".jpg")) {
                 return@withContext ComicMetadata(title, p.getOrNull(2), p.getOrNull(3), posterUrl)
             }
         }
 
         // 2. 서버 요청
         try {
-            val m = client.get("$baseUrl/metadata") { url { parameters.append("path", path) } }.body<ComicMetadata>()
-            // 제목 보정 (파일명 유입 차단)
+            // URL 인코딩 명시적 적용 (특수문자 # 등 처리 위함)
+            val encodedPath = URLEncoder.encode(path, "UTF-8")
+            // parameters.append를 쓰면 중복 인코딩 될 수 있으므로 직접 쿼리 스트링 구성
+            val m = client.get("$baseUrl/metadata?path=$encodedPath").body<ComicMetadata>()
+            
             val finalTitle = if (m.title.isNullOrBlank() || m.title!!.lowercase().endsWith(".jpg")) {
                 path.substringAfterLast("/").substringBeforeLast(".")
             } else m.title
@@ -70,15 +82,26 @@ class AndroidPosterRepository private constructor() : PosterRepository {
 
     override suspend fun downloadImageFromUrl(url: String): ByteArray? = withContext(Dispatchers.IO) {
         if (url.isBlank()) return@withContext null
+        
+        // 1. 메모리 캐시 확인
+        memoryCache.get(url)?.let { return@withContext it }
+
+        // 2. 네트워크 요청
         try {
-            if (url.startsWith("http")) {
-                // RIDIBOOKS 등 외부 링크 직접 다운로드 (User-Agent 추가로 차단 방지)
+            val bytes = if (url.startsWith("http")) {
                 client.get(url) {
                     header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
-                }.body()
+                }.body<ByteArray>()
             } else {
-                client.get("$baseUrl/download") { url { parameters.append("path", url) } }.body()
+                // 다운로드 요청 시에도 인코딩 적용
+                val encodedPath = URLEncoder.encode(url, "UTF-8")
+                client.get("$baseUrl/download?path=$encodedPath").body<ByteArray>()
             }
+            
+            if (bytes != null && bytes.isNotEmpty()) {
+                memoryCache.put(url, bytes)
+            }
+            bytes
         } catch (e: Exception) { null }
     }
 
