@@ -3,6 +3,7 @@ package org.nas.comicsviewer.data
 import io.ktor.client.HttpClient
 import io.ktor.client.call.body
 import io.ktor.client.engine.cio.CIO
+import io.ktor.client.plugins.HttpTimeout
 import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.client.request.get
 import io.ktor.serialization.kotlinx.json.json
@@ -18,6 +19,11 @@ class AndroidZipManager : ZipManager {
     private val client = HttpClient(CIO) {
         install(ContentNegotiation) {
             json(Json { isLenient = true; ignoreUnknownKeys = true })
+        }
+        install(HttpTimeout) {
+            requestTimeoutMillis = 30000
+            connectTimeoutMillis = 10000
+            socketTimeoutMillis = 30000
         }
     }
     private val baseUrl = "http://192.168.0.2:5555"

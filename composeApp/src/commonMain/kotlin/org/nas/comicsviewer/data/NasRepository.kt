@@ -15,7 +15,6 @@ interface NasRepository {
     suspend fun listFiles(path: String): List<NasFile>
     suspend fun getFileContent(path: String): ByteArray
     fun scanComicFolders(path: String): Flow<NasFile>
-    // 불필요한 함수 제거
 }
 
 expect fun provideNasRepository(): NasRepository

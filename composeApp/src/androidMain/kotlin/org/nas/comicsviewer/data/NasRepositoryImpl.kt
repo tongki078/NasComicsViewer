@@ -11,6 +11,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
+import org.nas.comicsviewer.data.ComicMetadata
 
 actual fun provideNasRepository(): NasRepository = AndroidNasRepository.getInstance()
 
@@ -43,7 +44,14 @@ class AndroidNasRepository private constructor() : NasRepository {
     override fun scanComicFolders(path: String): Flow<NasFile> = flow {
         try {
             val response = client.get("$baseUrl/scan") { url { parameters.append("path", path) } }.body<List<NasFile>>()
-            response.forEach { emit(it) }
+            response.forEach { file ->
+                val metadata = try {
+                    client.get("$baseUrl/metadata") { url { parameters.append("path", file.path) } }.body<ComicMetadata>()
+                } catch (e: Exception) {
+                    null
+                }
+                emit(file.copy(metadata = metadata))
+            }
         } catch (e: Exception) {
             println("DEBUG_NAS: Scan error: ${e.message}")
         }

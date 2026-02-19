@@ -12,10 +12,8 @@ data class ComicMetadata(
 )
 
 interface PosterRepository {
-    suspend fun getMetadata(path: String): ComicMetadata
     suspend fun downloadImageFromUrl(url: String): ByteArray?
     fun setDatabase(database: ComicDatabase)
-    suspend fun cacheMetadata(path: String, metadata: ComicMetadata)
     suspend fun insertRecentSearch(query: String)
     suspend fun getRecentSearches(): List<String>
     suspend fun clearRecentSearches()

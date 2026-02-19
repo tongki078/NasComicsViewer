@@ -40,7 +40,6 @@ def get_fs_data(path):
             return data
 
     try:
-        # 파일인 경우 처리 불가
         if os.path.isfile(path):
             return None
 
@@ -131,14 +130,12 @@ def download_file():
             try:
                 with zipfile.ZipFile(azp, 'r') as z:
                     all_files = z.namelist()
-                    # 1. 이미지 파일 필터링
                     images = [n for n in all_files if is_image_file(n)]
                     images.sort()
 
                     if images:
                         target = images[0]
                         with z.open(target) as f:
-                            # 성공 로그 추가 (디버깅용)
                             print(f"✅ [DOWNLOAD] Sending thumb from {os.path.basename(azp)} ({target})", flush=True)
                             return send_file(io.BytesIO(f.read()), mimetype='image/jpeg')
                     else:
@@ -177,22 +174,23 @@ def scan_comics():
         scan_targets = []
         for item in data['items']:
             name = item['name']
-            is_dir = item['is_dir']
+            full_abs_path = os.path.join(abs_path, name)
+            rel_path = os.path.relpath(full_abs_path, root).replace(os.sep, '/')
             name_nfc = normalize_nfc(name)
 
-            if is_dir:
+            if item['is_dir']:
                 if len(name_nfc) <= 2 or name_nfc.lower() in ["완결a", "완결b", "완결"]:
-                    scan_targets.append(os.path.join(abs_path, name))
+                    scan_targets.append(full_abs_path)
                 else:
-                    rel = os.path.relpath(os.path.join(abs_path, name), root).replace(os.sep, '/')
-                    results.append({'name': clean_name(name_nfc), 'isDirectory': True, 'path': normalize_nfc(rel), 'metadata': None})
+                    meta = get_metadata_internal(full_abs_path, rel_path)
+                    results.append({'name': meta['title'], 'isDirectory': True, 'path': normalize_nfc(rel_path), 'metadata': meta})
             elif name.lower().endswith(('.zip', '.cbz')):
-                rel = os.path.relpath(os.path.join(abs_path, name), root).replace(os.sep, '/')
-                results.append({'name': clean_name(normalize_nfc(name)), 'isDirectory': True, 'path': normalize_nfc(rel), 'metadata': None})
+                meta = get_metadata_internal(full_abs_path, rel_path)
+                results.append({'name': meta['title'], 'isDirectory': True, 'path': normalize_nfc(rel_path), 'metadata': meta})
 
         if scan_targets:
             with ThreadPoolExecutor(max_workers=8) as executor:
-                futures = [executor.submit(scan_worker, t, root) for t in scan_targets]
+                futures = {executor.submit(scan_worker, t, root): t for t in scan_targets}
                 for f in as_completed(futures):
                     results.extend(f.result())
 
@@ -220,12 +218,15 @@ def scan_worker(fp, root):
     for item in data['items']:
         if item['is_dir']:
             has_sub_dir = True
-            rel = os.path.relpath(os.path.join(fp, item['name']), root).replace(os.sep, '/')
-            res.append({'name': clean_name(normalize_nfc(item['name'])), 'isDirectory': True, 'path': normalize_nfc(rel), 'metadata': None})
+            full_abs_path = os.path.join(fp, item['name'])
+            rel_path = os.path.relpath(full_abs_path, root).replace(os.sep, '/')
+            meta = get_metadata_internal(full_abs_path, rel_path)
+            res.append({'name': meta['title'], 'isDirectory': True, 'path': normalize_nfc(rel_path), 'metadata': meta})
 
     if not has_sub_dir:
-        rel = os.path.relpath(fp, root).replace(os.sep, '/')
-        res.append({'name': clean_name(normalize_nfc(os.path.basename(fp))), 'isDirectory': True, 'path': normalize_nfc(rel), 'metadata': None})
+        rel_path = os.path.relpath(fp, root).replace(os.sep, '/')
+        meta = get_metadata_internal(fp, rel_path)
+        res.append({'name': meta['title'], 'isDirectory': True, 'path': normalize_nfc(rel_path), 'metadata': meta})
     return res
 
 def clean_name(name):
@@ -234,6 +235,62 @@ def clean_name(name):
 def is_image_file(name):
     return name and name.lower().endswith(('.jpg', '.jpeg', '.png', '.webp', '.gif'))
 
+@app.route('/zip_entries')
+def zip_entries():
+    p = request.args.get('path', '')
+    if not p: return "Path missing", 400
+    ap = resolve_actual_path(p)
+    print(f"📦 [ZIP ENTRIES] Request for {p} -> {ap}", flush=True)
+
+    if not os.path.isfile(ap):
+        print(f"❌ [ZIP ENTRIES] File not found: {ap}", flush=True)
+        return jsonify({"error": "File not found"}), 404
+
+    try:
+        with zipfile.ZipFile(ap, 'r') as z:
+            images = sorted([n for n in z.namelist() if is_image_file(n)])
+            print(f"✅ [ZIP ENTRIES] Found {len(images)} images in {os.path.basename(ap)}", flush=True)
+            return jsonify(images)
+    except Exception as e:
+        print(f"❌ [ZIP ENTRIES] Error processing zip {ap}: {e}", flush=True)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/download_zip_entry')
+def download_zip_entry():
+    p = request.args.get('path', '')
+    entry_name = request.args.get('entry', '')
+
+    if not p or not entry_name: return "Path or entry missing", 400
+
+    ap = resolve_actual_path(p)
+    entry_name = normalize_nfc(urllib.parse.unquote(entry_name))
+
+    print(f"📦 [ZIP DOWNLOAD] Request for {entry_name} in {p}", flush=True)
+
+    if not os.path.isfile(ap):
+        print(f"❌ [ZIP DOWNLOAD] Zip file not found: {ap}", flush=True)
+        return "Zip file not found", 404
+
+    try:
+        with zipfile.ZipFile(ap, 'r') as z:
+            target_info = None
+            for info in z.infolist():
+                if normalize_nfc(info.filename) == entry_name:
+                    target_info = info
+                    break
+
+            if target_info:
+                with z.open(target_info) as f:
+                    print(f"✅ [ZIP DOWNLOAD] Sending {target_info.filename} from {os.path.basename(ap)}", flush=True)
+                    return send_file(io.BytesIO(f.read()), mimetype='application/octet-stream')
+            else:
+                print(f"❌ [ZIP DOWNLOAD] Entry '{entry_name}' not found in {os.path.basename(ap)}", flush=True)
+                return "Entry not found", 404
+    except Exception as e:
+        print(f"❌ [ZIP DOWNLOAD] Error reading zip {ap}: {e}", flush=True)
+        return f"Error reading zip: {e}", 500
+
 @app.route('/metadata')
 def get_metadata():
     p = request.args.get('path', '')
@@ -241,15 +298,15 @@ def get_metadata():
     meta = get_metadata_internal(ap, p)
 
     if meta['poster_url']:
-        print(f"🖼️ [METADATA] Found for '{p}': {meta['poster_url']}", flush=True)
+        print(f"🖼️  [METADATA] Found for '{p}': {meta['poster_url']}", flush=True)
     else:
         try:
              data = get_fs_data(ap)
              if data:
                  files = [x['name'] for x in data['items']]
-                 print(f"⚠️ [METADATA] NO POSTER for '{p}' (Resolved: {ap}). Files: {files[:5]}...", flush=True)
+                 print(f"⚠️  [METADATA] NO POSTER for '{p}' (Resolved: {ap}). Files: {files[:5]}...", flush=True)
              else:
-                 print(f"⚠️ [METADATA] NO POSTER for '{p}'. Dir empty or unreadable.", flush=True)
+                 print(f"⚠️  [METADATA] NO POSTER for '{p}'. Dir empty or unreadable.", flush=True)
         except: pass
     return jsonify(meta)
 
@@ -261,24 +318,20 @@ def find_first_valid_thumb(abs_path, rel_path, depth=0):
 
         items = data['items']
 
-        # 1. Zip check
         for item in items:
             if not item['is_dir'] and item['name'].lower().endswith(('.zip', '.cbz')):
                 return "zip_thumb://" + os.path.join(rel_path, item['name']).replace('\\', '/')
 
-        # 2. Image check
         for item in items:
             if not item['is_dir'] and is_image_file(item['name']):
                  name = item['name']
                  if any(x in name.lower() for x in ["poster", "cover", "folder", "thumb"]):
                      return os.path.join(rel_path, name).replace('\\', '/')
 
-        # 3. Any image fallback
         for item in items:
             if not item['is_dir'] and is_image_file(item['name']):
                 return os.path.join(rel_path, item['name']).replace('\\', '/')
 
-        # 4. Recurse
         sorted_items = sorted(items, key=lambda x: x['name'])
         for item in sorted_items:
             if item['is_dir']:
@@ -308,7 +361,6 @@ def get_metadata_internal(abs_path, rel_path):
     data = get_fs_data(abs_path)
     if not data: return meta
 
-    # 1. Kavita YAML
     kavita_actual = data['mapping'].get("kavita.yaml")
     if kavita_actual:
         try:
@@ -324,7 +376,6 @@ def get_metadata_internal(abs_path, rel_path):
                     })
         except: pass
 
-    # 2. Poster/Zip in Current Dir
     if not meta['poster_url']:
         for item in data['items']:
             name = item['name']
@@ -336,7 +387,6 @@ def get_metadata_internal(abs_path, rel_path):
                     meta['poster_url'] = "zip_thumb://" + os.path.join(rel_path, name).replace('\\', '/')
                     break
 
-    # 3. Deep Search
     if not meta['poster_url']:
         found = find_first_valid_thumb(abs_path, rel_path, depth=0)
         if found: meta['poster_url'] = found

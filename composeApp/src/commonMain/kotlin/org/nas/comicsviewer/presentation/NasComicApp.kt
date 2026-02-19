@@ -31,8 +31,6 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.nas.comicsviewer.BackHandler
@@ -374,21 +372,11 @@ fun FolderGridView(files: List<NasFile>, isScanning: Boolean, onClick: (NasFile)
 @Composable
 fun ComicCard(file: NasFile, repo: PosterRepository, onClick: () -> Unit) {
     var thumb by remember { mutableStateOf<ImageBitmap?>(null) }
-    var localMetadata by remember { mutableStateOf<ComicMetadata?>(null) }
     var isLoading by remember { mutableStateOf(false) } // 로딩 상태
     var isError by remember { mutableStateOf(false) }   // 에러 상태
-    
-    val effectiveMetadata = file.metadata ?: localMetadata
 
-    LaunchedEffect(file.path) {
-        if (file.metadata == null) {
-            delay(200) 
-            localMetadata = repo.getMetadata(file.path)
-        }
-    }
-
-    LaunchedEffect(effectiveMetadata?.posterUrl) {
-        effectiveMetadata?.posterUrl?.let { url ->
+    LaunchedEffect(file.metadata?.posterUrl) {
+        file.metadata?.posterUrl?.let { url ->
             if (thumb == null && !isError) {
                 isLoading = true
                 val bytes = repo.downloadImageFromUrl(url)
@@ -426,7 +414,7 @@ fun ComicCard(file: NasFile, repo: PosterRepository, onClick: () -> Unit) {
             if (file.isDirectory) Text("FOLDER", modifier = Modifier.align(Alignment.BottomStart).padding(4.dp), color = KakaoYellow, fontSize = 7.sp, fontWeight = FontWeight.Black)
         }
         Spacer(Modifier.height(6.dp))
-        Text(effectiveMetadata?.title ?: file.name, style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold, fontSize = 11.sp), maxLines = 2, overflow = TextOverflow.Ellipsis, color = TextPureWhite)
+        Text(file.metadata?.title ?: file.name, style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold, fontSize = 11.sp), maxLines = 2, overflow = TextOverflow.Ellipsis, color = TextPureWhite)
     }
 }
 
