@@ -149,18 +149,38 @@ def time_it(func):
 
 # --- DB 설정 ---
 def init_db():
-    with sqlite3.connect(METADATA_DB_PATH) as conn:
-        c = conn.cursor()
-        c.execute('PRAGMA journal_mode=WAL;')
-        c.execute('''
-            CREATE TABLE IF NOT EXISTS metadata_cache (
-                path_hash TEXT PRIMARY KEY,
-                mtime REAL NOT NULL,
-                metadata_json TEXT NOT NULL,
-                cached_at REAL NOT NULL
-            )
-        ''')
-        conn.commit()
+    try:
+        with sqlite3.connect(METADATA_DB_PATH) as conn:
+            c = conn.cursor()
+            c.execute('PRAGMA journal_mode=WAL;')
+            # 개별 항목 메타데이터 캐시
+            c.execute('''
+                CREATE TABLE IF NOT EXISTS metadata_cache (
+                    path_hash TEXT PRIMARY KEY,
+                    mtime REAL NOT NULL,
+                    metadata_json TEXT NOT NULL,
+                    cached_at REAL NOT NULL
+                )
+            ''')
+            # [신규] 디렉토리 목록 전체 캐시 (속도 향상 핵심)
+            c.execute('''
+                CREATE TABLE IF NOT EXISTS directory_cache (
+                    path_hash TEXT PRIMARY KEY,
+                    entries_json TEXT NOT NULL,
+                    cached_at REAL NOT NULL
+                )
+            ''')
+            conn.commit()
+
+            # 현재 캐시된 항목 수 확인
+            c.execute("SELECT COUNT(*) FROM directory_cache")
+            dir_count = c.fetchone()[0]
+            c.execute("SELECT COUNT(*) FROM metadata_cache")
+            meta_count = c.fetchone()[0]
+            logger.info(f"💾 [DB_INIT] Directory Cache: {dir_count} entries, Metadata Cache: {meta_count} entries")
+
+    except Exception as e:
+        logger.error(f"❌ [DB_INIT] Failed to initialize DB: {e}")
 
 def get_cached_metadata(path, conn):
     path_hash = str(hash(path))
@@ -184,6 +204,28 @@ def set_cached_metadata(path, metadata, conn):
                       (path_hash, mtime, metadata_json, time.time()))
     except Exception as e:
         logger.error(f"Cache write failed for {path}: {e}")
+
+# --- 디렉토리 목록 캐시 (신규) ---
+def get_cached_directory_entries(path, conn):
+    path_hash = str(hash(path))
+    try:
+        c = conn.cursor()
+        c.execute("SELECT entries_json FROM directory_cache WHERE path_hash = ?", (path_hash,))
+        row = c.fetchone()
+        if row:
+            return json.loads(row[0])
+    except Exception:
+        pass
+    return None
+
+def set_cached_directory_entries(path, entries, conn):
+    path_hash = str(hash(path))
+    try:
+        entries_json = json.dumps(entries)
+        conn.execute("INSERT OR REPLACE INTO directory_cache (path_hash, entries_json, cached_at) VALUES (?, ?, ?)",
+                      (path_hash, entries_json, time.time()))
+    except Exception as e:
+        logger.error(f"Directory cache write failed for {path}: {e}")
 
 # --- 파일 시스템 및 경로 처리 ---
 def normalize_nfc(s):
@@ -263,9 +305,6 @@ def get_metadata_internal(abs_path, rel_path, conn):
         elif is_image_file(abs_path):
             meta['poster_url'] = rel_path
 
-    # 디렉토리인 경우 여기서 무거운 작업을 하지 않고 None으로 저장
-    # 클라이언트가 /update_metadata 라우트를 호출하여 갱신하도록 함
-
     set_cached_metadata(abs_path, meta, conn)
     return meta
 
@@ -282,15 +321,11 @@ def force_update_metadata_task(task_path, is_dir, root_path, db_path):
         base_name = os.path.basename(task_path.rstrip('/\\'))
         clean_title = clean_name(normalize_nfc(base_name))
 
-        # [수정] kavita_info 키를 추가하여 yaml 정보를 통째로 담습니다.
         meta = {"title": clean_title, "poster_url": None, "kavita_info": {}}
-
-        # 로깅을 위한 소스 구분 변수
         source = "NONE"
 
         if os.path.isfile(task_path):
              source = "FILE"
-             # 파일은 get_metadata_internal과 로직 동일
              if task_path.lower().endswith(('.zip', '.cbz')):
                 meta['poster_url'] = "zip_thumb://" + rel_path
              elif is_image_file(task_path):
@@ -304,10 +339,8 @@ def force_update_metadata_task(task_path, is_dir, root_path, db_path):
                     with open(kavita_path, 'r', encoding='utf-8') as f:
                         kdata = yaml.safe_load(f)
                         if kdata:
-                            # [수정] kavita.yaml의 모든 정보를 meta['kavita_info']에 저장
                             meta['kavita_info'] = kdata
 
-                            # 포스터 추출 로직 (기존과 동일하지만, kdata에서 추출)
                             poster_candidates = []
                             for k in ['cover', 'poster', 'cover_image', 'coverImage']:
                                 if k in kdata and kdata[k]:
@@ -379,52 +412,36 @@ def process_scan_task(task_path, is_dir, root_path, db_path):
     finally:
         if conn: conn.close()
 
-@app.route('/scan')
-@time_it
-def scan_comics():
-    path = request.args.get('path', '')
-    page = request.args.get('page', 1, type=int)
-    page_size = request.args.get('page_size', 100, type=int)
+def scan_full_directory(abs_path, root, is_3_level_structure):
+    """
+    파일 시스템을 전체 스캔하여 모든 항목의 리스트(메타데이터 포함)를 생성
+    """
+    logger.info(f"📂 [FS_SCAN] Scanning file system for: {abs_path}")
 
-    root = get_robust_root()
-    abs_path = resolve_actual_path(path)
-    if not os.path.isdir(abs_path):
-        return jsonify({"error": "Invalid scan path"}), 404
-
-    try:
-        all_entries = []
-        requested_folder_name = os.path.basename(abs_path)
-        normalized_name = normalize_nfc(requested_folder_name.lower())
-        is_3_level_structure = normalized_name in THREE_LEVEL_STRUCTURE_FOLDERS
-
-        scan_paths = [abs_path]
-        if is_3_level_structure:
+    all_entries = []
+    scan_paths = [abs_path]
+    if is_3_level_structure:
+        try:
             scan_paths = [d.path for d in os.scandir(abs_path) if d.is_dir()]
+        except Exception:
+            pass
 
-        for current_path in scan_paths:
+    tasks = []
+    for current_path in scan_paths:
+        try:
             with os.scandir(current_path) as it:
                 for entry in it:
                     if entry.is_dir() or entry.name.lower().endswith(('.zip', '.cbz')):
-                        all_entries.append(entry)
+                        tasks.append((entry.path, entry.is_dir()))
+        except Exception:
+            pass
 
-        all_entries.sort(key=lambda e: normalize_nfc(e.name))
-        total_items = len(all_entries)
-
-        start_index = (page - 1) * page_size
-        end_index = start_index + page_size
-        paged_entries = all_entries[start_index:end_index]
-
-        tasks_to_process = [(entry.path, entry.is_dir()) for entry in paged_entries]
-
-    except Exception as e:
-        logger.error(f"Scan error: {e}", exc_info=True)
-        return jsonify({"error": "Scan failed"}), 500
-
+    # 전체 항목에 대해 병렬로 메타데이터 확보
     results = []
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         future_map = {
-            executor.submit(process_scan_task, task_path, is_dir, root, METADATA_DB_PATH):
-            (task_path, is_dir) for task_path, is_dir in tasks_to_process
+            executor.submit(process_scan_task, t_path, is_dir, root, METADATA_DB_PATH):
+            t_path for t_path, is_dir in tasks
         }
         for future in as_completed(future_map):
             try:
@@ -433,21 +450,76 @@ def scan_comics():
             except Exception:
                 pass
 
-    paged_entry_map = {normalize_nfc(os.path.relpath(entry.path, root).replace(os.sep, '/')) : normalize_nfc(entry.name) for entry in paged_entries}
+    # 정렬 (상대 경로 기준 이름순)
+    paged_entry_map = {r['path']: r['name'] for r in results}
     results.sort(key=lambda r: paged_entry_map.get(r['path'], ''))
+
+    return results
+
+@app.route('/scan')
+@time_it
+def scan_comics():
+    path = request.args.get('path', '')
+    page = request.args.get('page', 1, type=int)
+    page_size = request.args.get('page_size', 100, type=int)
+    force_refresh = request.args.get('force', 'false').lower() == 'true'
+
+    root = get_robust_root()
+    abs_path = resolve_actual_path(path)
+    if not os.path.isdir(abs_path):
+        return jsonify({"error": "Invalid scan path"}), 404
+
+    requested_folder_name = os.path.basename(abs_path)
+    normalized_name = normalize_nfc(requested_folder_name.lower())
+    is_3_level_structure = normalized_name in THREE_LEVEL_STRUCTURE_FOLDERS
+
+    # 1. DB 캐시 조회 (force_refresh가 아닐 때만)
+    cached_entries = None
+    if not force_refresh:
+        with sqlite3.connect(METADATA_DB_PATH) as conn:
+            conn.execute('PRAGMA journal_mode=WAL;')
+            cached_entries = get_cached_directory_entries(abs_path, conn)
+
+    if cached_entries is not None:
+        logger.info(f"🚀 [CACHE_HIT] Serving '{path}' from DB cache! ({len(cached_entries)} items)")
+        total_items = len(cached_entries)
+        start_index = (page - 1) * page_size
+        end_index = start_index + page_size
+        paged_items = cached_entries[start_index:end_index]
+
+        return jsonify({
+            'total_items': total_items,
+            'page': page,
+            'page_size': page_size,
+            'items': paged_items
+        })
+
+    # 2. 캐시 없으면 파일 시스템 스캔 수행
+    logger.info(f"🐢 [CACHE_MISS] Scanning filesystem for '{path}'...")
+    full_results = scan_full_directory(abs_path, root, is_3_level_structure)
+
+    # 3. 결과 DB 저장
+    with sqlite3.connect(METADATA_DB_PATH) as conn:
+        conn.execute('PRAGMA journal_mode=WAL;')
+        set_cached_directory_entries(abs_path, full_results, conn)
+
+    # 4. 페이징 및 반환
+    total_items = len(full_results)
+    start_index = (page - 1) * page_size
+    end_index = start_index + page_size
+    paged_items = full_results[start_index:end_index]
 
     return jsonify({
         'total_items': total_items,
         'page': page,
         'page_size': page_size,
-        'items': results
+        'items': paged_items
     })
 
 # --- 라우트: 메타데이터 업데이트 (수동) ---
 @app.route('/update_metadata')
 @time_it
 def update_metadata():
-    # 파라미터가 아예 없는 경우 폼만 보여주기
     if 'path' not in request.args:
          return render_template_string(
             ADMIN_TEMPLATE,
@@ -467,19 +539,8 @@ def update_metadata():
     abs_path = resolve_actual_path(path)
 
     if not os.path.isdir(abs_path):
-        logger.error(f"❌ [UPDATE_METADATA] Invalid path: {abs_path}")
-        return render_template_string(
-            ADMIN_TEMPLATE,
-            path=path,
-            performed=True,
-            total_count=0,
-            success_count=0,
-            error_count=1,
-            items=[],
-            errors=[f"Invalid path: {abs_path}"]
-        )
+        return render_template_string(ADMIN_TEMPLATE, path=path, performed=True, total_count=0, success_count=0, error_count=1, items=[], errors=[f"Invalid path: {abs_path}"])
 
-    # 1. 3단계 구조 확인
     requested_folder_name = os.path.basename(abs_path)
     normalized_name = normalize_nfc(requested_folder_name.lower())
     is_3_level_structure = normalized_name in THREE_LEVEL_STRUCTURE_FOLDERS
@@ -502,15 +563,36 @@ def update_metadata():
 
     updated_items = []
     failed_items = []
+    updated_results_for_cache = [] # 캐시 갱신용 데이터
 
-    # 스레드 풀로 병렬 처리
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         future_map = {
             executor.submit(force_update_metadata_task, t_path, is_dir, root, METADATA_DB_PATH):
-            t_path for t_path, is_dir in tasks
+            (t_path, is_dir) for t_path, is_dir in tasks
         }
         for future in as_completed(future_map):
+            t_path, is_dir = future_map[future]
             res = future.result()
+
+            # 캐시 갱신을 위해 데이터 구조 만들기
+            if res:
+                rel_path = os.path.relpath(t_path, root).replace(os.sep, '/')
+                # force_update_metadata_task의 반환값과 process_scan_task 반환값 형식이 다름을 주의
+                # 여기서 캐시용 구조로 변환
+                cache_item = {
+                    'name': res.get('title', 'Untitled'),
+                    'isDirectory': is_dir,
+                    'path': normalize_nfc(rel_path),
+                    'metadata': {
+                        'title': res.get('title'),
+                        'poster_url': res.get('poster'),
+                        'kavita_info': {} # force_update_metadata_task에서 kavita_info를 반환하지 않고 있었음. 필요시 수정
+                    }
+                }
+                # 주의: force_update_metadata_task는 현재 UI용 요약 정보만 리턴함.
+                # 제대로 캐시를 갱신하려면 메타데이터 전체가 필요함.
+                # 따라서 가장 확실한 방법은 업데이트 완료 후 'scan_full_directory'를 한 번 돌리는 것임.
+
             if res.get("success"):
                 updated_items.append(res)
             else:
@@ -518,9 +600,15 @@ def update_metadata():
 
     updated_items.sort(key=lambda x: x['title'])
 
+    # [중요] 업데이트가 끝났으므로 해당 경로의 directory_cache를 갱신해야 함
+    logger.info(f"♻️ [UPDATE_METADATA] Refreshing directory cache for '{path}'...")
+    new_full_results = scan_full_directory(abs_path, root, is_3_level_structure)
+    with sqlite3.connect(METADATA_DB_PATH) as conn:
+        conn.execute('PRAGMA journal_mode=WAL;')
+        set_cached_directory_entries(abs_path, new_full_results, conn)
+
     logger.info(f"✨ [UPDATE_METADATA] Finished. Updated {len(updated_items)} items.")
 
-    # HTML 렌더링
     return render_template_string(
         ADMIN_TEMPLATE,
         path=path,
