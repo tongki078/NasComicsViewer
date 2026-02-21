@@ -1,4 +1,4 @@
-from flask import Flask, jsonify, send_from_directory, request, send_file, render_template_string
+from flask import Flask, jsonify, send_from_directory, request, send_file, render_template_string, Response
 import os
 import urllib.parse
 import unicodedata
@@ -11,6 +11,7 @@ import sys
 import sqlite3
 import json
 import functools
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # [로그 설정]
@@ -25,13 +26,33 @@ app = Flask(__name__)
 
 # --- 설정 ---
 BASE_PATH = "/volume2/video/GDS3/GDRIVE/READING/만화"
-METADATA_DB_PATH = 'metadata_cache.db'
+
+# [중요 변경] DB 파일 경로를 상대경로에서 절대경로로 변경
+# 용량이 아주 많은(7.5TB 여유) /volume2/video 파티션에 명시적으로 저장
+METADATA_DB_PATH = '/volume2/video/NasComicsViewer_metadata_cache.db'
+
 MAX_WORKERS = 16
+
+# SQLite 임시 폴더를 공간이 충분한 곳으로 강제 지정 (디스크 풀 에러 방지)
+os.environ["SQLITE_TMPDIR"] = BASE_PATH
 
 # 3단계 구조를 가진 카테고리 폴더 이름 (소문자로 비교)
 THREE_LEVEL_STRUCTURE_FOLDERS = ["완결a", "완결b", "완결", "작가", "번역", "연재"]
 
-# --- HTML 템플릿 ---
+# 업데이트 상태를 저장할 전역 딕셔너리
+update_status = {
+    'is_running': False,
+    'total': 0,
+    'processed': 0,
+    'success': 0,
+    'error': 0,
+    'current_item': '',
+    'logs': [],
+    'path': ''
+}
+status_lock = threading.Lock()
+
+# --- HTML 템플릿 (개선된 UI) ---
 ADMIN_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="ko">
@@ -49,89 +70,141 @@ ADMIN_TEMPLATE = """
         input[type="text"] { flex: 1; padding: 12px; border: 1px solid #ddd; border-radius: 6px; font-size: 16px; }
         button { padding: 12px 24px; background-color: #007bff; color: white; border: none; border-radius: 6px; cursor: pointer; font-size: 16px; font-weight: bold; transition: background 0.2s; }
         button:hover { background-color: #0056b3; }
+        button:disabled { background-color: #6c757d; cursor: not-allowed; }
 
-        .summary { background-color: #e9ecef; padding: 15px; border-radius: 5px; margin-bottom: 20px; }
-        .item { padding: 10px; border-bottom: 1px solid #eee; display: flex; align-items: center; }
-        .item:last-child { border-bottom: none; }
-        .badge { padding: 4px 8px; border-radius: 4px; font-size: 0.75em; font-weight: bold; margin-right: 10px; min-width: 70px; text-align: center; }
-        .badge.scan { background-color: #17a2b8; color: white; }
-        .badge.kavita { background-color: #28a745; color: white; }
-        .badge.file { background-color: #6c757d; color: white; }
-        .badge.none { background-color: #dc3545; color: white; }
-        .title { font-weight: 500; font-size: 1em; }
-        .error { color: #dc3545; font-size: 0.9em; margin-top: 5px; }
-        .meta-info { font-size: 0.85em; color: #666; margin-left: auto; }
-        .no-poster { color: #dc3545; font-weight: bold; margin-left: 10px; font-size: 0.8em; }
+        .progress-container { margin-top: 20px; display: none; }
+        .progress-bar-bg { width: 100%; background-color: #e9ecef; border-radius: 5px; overflow: hidden; height: 20px; margin-bottom: 10px; }
+        .progress-bar { height: 100%; background-color: #28a745; width: 0%; transition: width 0.3s ease; }
+        .stats { display: flex; justify-content: space-between; font-size: 0.9em; color: #666; margin-bottom: 10px; }
+
+        .log-container { background: #1e1e1e; color: #d4d4d4; padding: 15px; border-radius: 5px; height: 300px; overflow-y: auto; font-family: monospace; font-size: 0.85em; display: none; margin-top: 15px; }
+        .log-item { margin-bottom: 4px; }
+        .log-success { color: #4CAF50; }
+        .log-warning { color: #FFC107; }
+        .log-error { color: #F44336; }
+        .log-info { color: #2196F3; }
     </style>
 </head>
 <body>
     <div class="container">
         <div class="card">
-            <h1>🛠️ 메타데이터 업데이트</h1>
+            <h1>🛠️ 메타데이터 실시간 업데이트</h1>
             <p style="margin-bottom: 20px; color: #666;">
                 업데이트할 폴더의 경로를 입력하세요. (예: <code>완결</code>, <code>작가/ㄱ</code>)<br>
                 빈 칸으로 두면 최상위 폴더를 기준으로 업데이트합니다.
             </p>
-            <form action="/update_metadata" method="get" class="form-group">
-                <input type="text" name="path" value="{{ path }}" placeholder="폴더 경로 입력...">
-                <button type="submit">업데이트 시작</button>
-            </form>
-        </div>
-
-        {% if performed %}
-        <div class="card">
-            <h1>결과 리포트</h1>
-            <div class="summary">
-                <strong>대상 경로:</strong> /{{ path }}<br>
-                <strong>총 항목:</strong> {{ total_count }}개<br>
-                <strong>성공:</strong> <span style="color: #28a745">{{ success_count }}</span>개
-                {% if error_count > 0 %}
-                <br><strong style="color: #dc3545;">실패:</strong> {{ error_count }}개
-                {% endif %}
+            <div class="form-group">
+                <input type="text" id="pathInput" placeholder="폴더 경로 입력...">
+                <button id="startBtn" onclick="startUpdate()">업데이트 시작</button>
             </div>
 
-            <div class="list">
-                {% if total_count == 0 %}
-                    <div style="text-align: center; padding: 20px; color: #999;">
-                        해당 경로에서 업데이트할 항목을 찾지 못했습니다.
-                    </div>
-                {% endif %}
-
-                {% for item in items %}
-                <div class="item">
-                    {% if item.source == 'KAVITA_YAML' %}
-                        <span class="badge kavita">KAVITA</span>
-                    {% elif item.source == 'SCAN' %}
-                        <span class="badge scan">SCAN</span>
-                    {% elif item.source == 'FILE' %}
-                        <span class="badge file">FILE</span>
-                    {% else %}
-                        <span class="badge none">UNKNOWN</span>
-                    {% endif %}
-
-                    <div>
-                        <span class="title">{{ item.title }}</span>
-                        {% if not item.poster %}
-                            <span class="no-poster">⚠️ NO POSTER</span>
-                        {% endif %}
-                    </div>
-
-                    <div class="meta-info">
-                        {{ item.source }}
-                    </div>
+            <div id="progressSection" class="progress-container">
+                <h3 id="statusText" style="margin-top: 0; margin-bottom: 15px; font-size: 1.1em;">준비 중...</h3>
+                <div class="progress-bar-bg">
+                    <div id="progressBar" class="progress-bar"></div>
                 </div>
-                {% endfor %}
-
-                {% for error in errors %}
-                <div class="item">
-                    <span class="badge none">ERROR</span>
-                    <div class="error">{{ error }}</div>
+                <div class="stats">
+                    <span id="progressCount">0 / 0</span>
+                    <span id="percentText">0%</span>
                 </div>
-                {% endfor %}
+                <div class="stats">
+                    <span style="color: #28a745;">성공: <span id="successCount">0</span></span>
+                    <span style="color: #dc3545;">실패: <span id="errorCount">0</span></span>
+                </div>
             </div>
+
+            <div id="logSection" class="log-container"></div>
         </div>
-        {% endif %}
     </div>
+
+    <script>
+        let eventSource = null;
+
+        function startUpdate() {
+            const path = document.getElementById('pathInput').value;
+            const btn = document.getElementById('startBtn');
+            const progressSection = document.getElementById('progressSection');
+            const logSection = document.getElementById('logSection');
+
+            btn.disabled = true;
+            progressSection.style.display = 'block';
+            logSection.style.display = 'block';
+            logSection.innerHTML = '';
+
+            // SSE 연결 시작 (스트리밍 요청)
+            if (eventSource) {
+                eventSource.close();
+            }
+
+            eventSource = new EventSource('/do_update_metadata?path=' + encodeURIComponent(path));
+
+            eventSource.onmessage = function(event) {
+                const data = JSON.parse(event.data);
+
+                if (data.status === 'error') {
+                    addLog(data.message, 'log-error');
+                    finishUpdate();
+                    return;
+                }
+
+                if (data.status === 'init') {
+                    document.getElementById('statusText').innerText = `스캔 준비 중... (총 ${data.total}개 항목 찾음)`;
+                    updateBars(0, data.total, 0, 0);
+                    addLog(`📥 [INIT] Found ${data.total} items to update in '${path}'`, 'log-info');
+                }
+                else if (data.status === 'progress') {
+                    document.getElementById('statusText').innerText = `처리 중: ${data.current_item}`;
+                    updateBars(data.processed, data.total, data.success, data.error);
+
+                    if (data.log) {
+                        let logClass = 'log-item';
+                        if (data.log.includes('✅')) logClass = 'log-success';
+                        else if (data.log.includes('⚠️')) logClass = 'log-warning';
+                        else if (data.log.includes('❌')) logClass = 'log-error';
+                        addLog(data.log, logClass);
+                    }
+                }
+                else if (data.status === 'done') {
+                    document.getElementById('statusText').innerText = '✨ 업데이트 완료!';
+                    updateBars(data.total, data.total, data.success, data.error);
+                    addLog(`✨ [DONE] Finished. Updated ${data.success} items.`, 'log-info');
+                    finishUpdate();
+                }
+            };
+
+            eventSource.onerror = function(event) {
+                console.error("EventSource failed:", event);
+                addLog("❌ 서버와의 연결이 끊어졌습니다.", "log-error");
+                finishUpdate();
+            };
+        }
+
+        function updateBars(processed, total, success, error) {
+            const percent = total === 0 ? 0 : Math.round((processed / total) * 100);
+            document.getElementById('progressBar').style.width = percent + '%';
+            document.getElementById('progressCount').innerText = `${processed} / ${total}`;
+            document.getElementById('percentText').innerText = `${percent}%`;
+            document.getElementById('successCount').innerText = success;
+            document.getElementById('errorCount').innerText = error;
+        }
+
+        function addLog(message, className) {
+            const logSection = document.getElementById('logSection');
+            const div = document.createElement('div');
+            div.className = className;
+            div.innerText = message;
+            logSection.appendChild(div);
+            logSection.scrollTop = logSection.scrollHeight;
+        }
+
+        function finishUpdate() {
+            document.getElementById('startBtn').disabled = false;
+            if (eventSource) {
+                eventSource.close();
+                eventSource = null;
+            }
+        }
+    </script>
 </body>
 </html>
 """
@@ -147,13 +220,28 @@ def time_it(func):
         return result
     return wrapper
 
+def get_db_connection():
+    """DB 연결 공통 함수. 임시 폴더 및 성능 옵션 적용"""
+    conn = sqlite3.connect(METADATA_DB_PATH, timeout=60)
+    c = conn.cursor()
+    # 공간 부족 에러 해결을 위한 임시 저장소 지정 (최신 SQLite는 pragma temp_store_directory 지원 중단될 수 있으나 환경변수와 병행)
+    try:
+        c.execute(f"PRAGMA temp_store_directory = '{BASE_PATH}';")
+    except Exception:
+        pass
+
+    c.execute('PRAGMA journal_mode=WAL;')
+    c.execute('PRAGMA synchronous=NORMAL;')
+    c.execute('PRAGMA wal_autocheckpoint=1000;')
+    return conn
+
 # --- DB 설정 ---
 def init_db():
     try:
-        with sqlite3.connect(METADATA_DB_PATH) as conn:
+        logger.info(f"🔧 Using Database at: {METADATA_DB_PATH}")
+        with get_db_connection() as conn:
             c = conn.cursor()
-            c.execute('PRAGMA journal_mode=WAL;')
-            # 개별 항목 메타데이터 캐시
+
             c.execute('''
                 CREATE TABLE IF NOT EXISTS metadata_cache (
                     path_hash TEXT PRIMARY KEY,
@@ -162,7 +250,6 @@ def init_db():
                     cached_at REAL NOT NULL
                 )
             ''')
-            # [신규] 디렉토리 목록 전체 캐시 (속도 향상 핵심)
             c.execute('''
                 CREATE TABLE IF NOT EXISTS directory_cache (
                     path_hash TEXT PRIMARY KEY,
@@ -172,7 +259,6 @@ def init_db():
             ''')
             conn.commit()
 
-            # 현재 캐시된 항목 수 확인
             c.execute("SELECT COUNT(*) FROM directory_cache")
             dir_count = c.fetchone()[0]
             c.execute("SELECT COUNT(*) FROM metadata_cache")
@@ -197,15 +283,24 @@ def get_cached_metadata(path, conn):
 
 def set_cached_metadata(path, metadata, conn):
     path_hash = str(hash(path))
-    try:
-        mtime = os.path.getmtime(path)
-        metadata_json = json.dumps(metadata)
-        conn.execute("INSERT OR REPLACE INTO metadata_cache (path_hash, mtime, metadata_json, cached_at) VALUES (?, ?, ?, ?)",
-                      (path_hash, mtime, metadata_json, time.time()))
-    except Exception as e:
-        logger.error(f"Cache write failed for {path}: {e}")
+    retries = 3
+    for attempt in range(retries):
+        try:
+            mtime = os.path.getmtime(path)
+            metadata_json = json.dumps(metadata)
+            conn.execute("INSERT OR REPLACE INTO metadata_cache (path_hash, mtime, metadata_json, cached_at) VALUES (?, ?, ?, ?)",
+                          (path_hash, mtime, metadata_json, time.time()))
+            return  # 성공하면 종료
+        except sqlite3.OperationalError as e:
+            if 'locked' in str(e).lower() and attempt < retries - 1:
+                time.sleep(0.5) # 잠시 대기 후 재시도
+            else:
+                logger.error(f"Cache write failed for {path} after {attempt+1} attempts: {e}")
+                break
+        except Exception as e:
+            logger.error(f"Cache write failed for {path}: {e}")
+            break
 
-# --- 디렉토리 목록 캐시 (신규) ---
 def get_cached_directory_entries(path, conn):
     path_hash = str(hash(path))
     try:
@@ -220,12 +315,22 @@ def get_cached_directory_entries(path, conn):
 
 def set_cached_directory_entries(path, entries, conn):
     path_hash = str(hash(path))
-    try:
-        entries_json = json.dumps(entries)
-        conn.execute("INSERT OR REPLACE INTO directory_cache (path_hash, entries_json, cached_at) VALUES (?, ?, ?)",
-                      (path_hash, entries_json, time.time()))
-    except Exception as e:
-        logger.error(f"Directory cache write failed for {path}: {e}")
+    retries = 3
+    for attempt in range(retries):
+        try:
+            entries_json = json.dumps(entries)
+            conn.execute("INSERT OR REPLACE INTO directory_cache (path_hash, entries_json, cached_at) VALUES (?, ?, ?)",
+                          (path_hash, entries_json, time.time()))
+            return
+        except sqlite3.OperationalError as e:
+            if 'locked' in str(e).lower() and attempt < retries - 1:
+                time.sleep(0.5)
+            else:
+                logger.error(f"Directory cache write failed for {path}: {e}")
+                break
+        except Exception as e:
+            logger.error(f"Directory cache write failed for {path}: {e}")
+            break
 
 # --- 파일 시스템 및 경로 처리 ---
 def normalize_nfc(s):
@@ -285,18 +390,12 @@ def find_first_valid_thumb(abs_path, rel_path, files):
     return None
 
 def get_metadata_internal(abs_path, rel_path, conn):
-    """
-    일반 스캔 시 호출. DB 캐시가 있으면 반환하고,
-    없으면 '파일'은 메타 생성, '디렉토리'는 poster=None으로 빠르게 반환.
-    """
     cached = get_cached_metadata(abs_path, conn)
     if cached:
         return cached
 
     base_name = os.path.basename(abs_path.rstrip('/\\'))
     clean_title = clean_name(normalize_nfc(base_name))
-
-    # 기본값 (디렉토리인 경우 포스터 없이 저장)
     meta = {"title": clean_title, "poster_url": None}
 
     if os.path.isfile(abs_path):
@@ -309,17 +408,27 @@ def get_metadata_internal(abs_path, rel_path, conn):
     return meta
 
 def force_update_metadata_task(task_path, is_dir, root_path, db_path):
-    """
-    특정 경로에 대해 강제로 메타데이터(kavita.yaml, 썸네일 등)를 생성하고 DB에 업데이트
-    """
     conn = None
+    log_msg = ""
+    result = {"success": False, "title": "", "source": "NONE", "poster": None, "log": ""}
+
     try:
-        conn = sqlite3.connect(db_path, timeout=20)
-        conn.execute('PRAGMA journal_mode=WAL;')
+        conn = get_db_connection()
 
         rel_path = os.path.relpath(task_path, root_path).replace(os.sep, '/')
         base_name = os.path.basename(task_path.rstrip('/\\'))
         clean_title = clean_name(normalize_nfc(base_name))
+        result["title"] = clean_title
+
+        # [이어하기 로직] 기존에 포스터 정보가 제대로 있으면 건너뛰기
+        cached = get_cached_metadata(task_path, conn)
+        if cached and cached.get('poster_url'):
+            result["success"] = True
+            result["source"] = "CACHE"
+            result["poster"] = cached.get('poster_url')
+            # 로그 생략 또는 간단히
+            # result["log"] = f"⏭️ [SKIP] '{clean_title}' already has poster"
+            return result
 
         meta = {"title": clean_title, "poster_url": None, "kavita_info": {}}
         source = "NONE"
@@ -331,8 +440,6 @@ def force_update_metadata_task(task_path, is_dir, root_path, db_path):
              elif is_image_file(task_path):
                 meta['poster_url'] = rel_path
         else:
-            # 디렉토리: 무거운 작업 수행
-            # 1. kavita.yaml
             try:
                 kavita_path = os.path.join(task_path, "kavita.yaml")
                 if os.path.isfile(kavita_path):
@@ -340,7 +447,6 @@ def force_update_metadata_task(task_path, is_dir, root_path, db_path):
                         kdata = yaml.safe_load(f)
                         if kdata:
                             meta['kavita_info'] = kdata
-
                             poster_candidates = []
                             for k in ['cover', 'poster', 'cover_image', 'coverImage']:
                                 if k in kdata and kdata[k]:
@@ -357,9 +463,8 @@ def force_update_metadata_task(task_path, is_dir, root_path, db_path):
                                     source = "KAVITA_YAML"
                                     break
             except Exception as e:
-                logger.warning(f"Failed to parse kavita.yaml for {task_path}: {e}")
+                pass
 
-            # 2. 직접 스캔 (kavita.yaml에서 포스터를 못 찾았을 경우)
             if not meta.get('poster_url'):
                 try:
                     local_files = [e.name for e in os.scandir(task_path)]
@@ -373,51 +478,50 @@ def force_update_metadata_task(task_path, is_dir, root_path, db_path):
         set_cached_metadata(task_path, meta, conn)
         conn.commit()
 
-        if meta.get('poster_url'):
-             logger.info(f"✅ [UPDATE] '{clean_title}' updated via {source}")
-        else:
-             logger.warning(f"⚠️ [UPDATE] '{clean_title}' processed but NO POSTER found")
+        result["success"] = True
+        result["source"] = source
+        result["poster"] = meta.get('poster_url')
 
-        return {
-            "success": True,
-            "title": clean_title,
-            "source": source,
-            "poster": meta.get('poster_url')
-        }
+        if meta.get('poster_url'):
+             result["log"] = f"✅ [UPDATE] '{clean_title}' updated via {source}"
+        else:
+             result["log"] = f"⚠️ [UPDATE] '{clean_title}' processed but NO POSTER found"
+
+        return result
     except Exception as e:
-        logger.error(f"❌ [UPDATE] Failed for {task_path}: {e}")
-        return {"success": False, "error": str(e)}
+        result["log"] = f"❌ [UPDATE] Failed for {task_path}: {e}"
+        return result
     finally:
         if conn: conn.close()
 
 # --- 라우트: 스캔 ---
 def process_scan_task(task_path, is_dir, root_path, db_path):
     conn = None
+    meta = None
+    rel_path = os.path.relpath(task_path, root_path).replace(os.sep, '/')
+
     try:
-        conn = sqlite3.connect(db_path, timeout=20)
-        conn.execute('PRAGMA journal_mode=WAL;')
-        rel_path = os.path.relpath(task_path, root_path).replace(os.sep, '/')
+        conn = get_db_connection()
         meta = get_metadata_internal(task_path, rel_path, conn)
         conn.commit()
-        return {
-            'name': meta.get('title', 'Untitled'),
-            'isDirectory': is_dir,
-            'path': normalize_nfc(rel_path),
-            'metadata': meta
-        }
     except Exception as e:
         if conn: conn.rollback()
-        logger.error(f"Error processing task {task_path}: {e}", exc_info=True)
-        return None
+        logger.error(f"Error processing task {task_path}: {e}")
+        # DB 에러가 발생하더라도 메타데이터를 최대한 반환하기 위한 기본 처리
+        base_name = os.path.basename(task_path.rstrip('/\\'))
+        meta = {"title": clean_name(normalize_nfc(base_name)), "poster_url": None}
     finally:
         if conn: conn.close()
 
-def scan_full_directory(abs_path, root, is_3_level_structure):
-    """
-    파일 시스템을 전체 스캔하여 모든 항목의 리스트(메타데이터 포함)를 생성
-    """
-    logger.info(f"📂 [FS_SCAN] Scanning file system for: {abs_path}")
+    return {
+        'name': meta.get('title', 'Untitled'),
+        'isDirectory': is_dir,
+        'path': normalize_nfc(rel_path),
+        'metadata': meta
+    }
 
+def scan_full_directory(abs_path, root, is_3_level_structure):
+    logger.info(f"📂 [FS_SCAN] Scanning file system for: {abs_path}")
     all_entries = []
     scan_paths = [abs_path]
     if is_3_level_structure:
@@ -436,7 +540,6 @@ def scan_full_directory(abs_path, root, is_3_level_structure):
         except Exception:
             pass
 
-    # 전체 항목에 대해 병렬로 메타데이터 확보
     results = []
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         future_map = {
@@ -450,7 +553,6 @@ def scan_full_directory(abs_path, root, is_3_level_structure):
             except Exception:
                 pass
 
-    # 정렬 (상대 경로 기준 이름순)
     paged_entry_map = {r['path']: r['name'] for r in results}
     results.sort(key=lambda r: paged_entry_map.get(r['path'], ''))
 
@@ -473,15 +575,15 @@ def scan_comics():
     normalized_name = normalize_nfc(requested_folder_name.lower())
     is_3_level_structure = normalized_name in THREE_LEVEL_STRUCTURE_FOLDERS
 
-    # 1. DB 캐시 조회 (force_refresh가 아닐 때만)
     cached_entries = None
     if not force_refresh:
-        with sqlite3.connect(METADATA_DB_PATH) as conn:
-            conn.execute('PRAGMA journal_mode=WAL;')
-            cached_entries = get_cached_directory_entries(abs_path, conn)
+        try:
+            with get_db_connection() as conn:
+                cached_entries = get_cached_directory_entries(abs_path, conn)
+        except Exception as e:
+            logger.error(f"Error reading DB Cache: {e}")
 
     if cached_entries is not None:
-        logger.info(f"🚀 [CACHE_HIT] Serving '{path}' from DB cache! ({len(cached_entries)} items)")
         total_items = len(cached_entries)
         start_index = (page - 1) * page_size
         end_index = start_index + page_size
@@ -494,16 +596,16 @@ def scan_comics():
             'items': paged_items
         })
 
-    # 2. 캐시 없으면 파일 시스템 스캔 수행
     logger.info(f"🐢 [CACHE_MISS] Scanning filesystem for '{path}'...")
     full_results = scan_full_directory(abs_path, root, is_3_level_structure)
 
-    # 3. 결과 DB 저장
-    with sqlite3.connect(METADATA_DB_PATH) as conn:
-        conn.execute('PRAGMA journal_mode=WAL;')
-        set_cached_directory_entries(abs_path, full_results, conn)
+    try:
+        with get_db_connection() as conn:
+            set_cached_directory_entries(abs_path, full_results, conn)
+            conn.commit()
+    except Exception as e:
+        logger.error(f"Error writing Directory Cache for {abs_path}: {e}")
 
-    # 4. 페이징 및 반환
     total_items = len(full_results)
     start_index = (page - 1) * page_size
     end_index = start_index + page_size
@@ -516,109 +618,89 @@ def scan_comics():
         'items': paged_items
     })
 
-# --- 라우트: 메타데이터 업데이트 (수동) ---
+# --- 라우트: 메타데이터 업데이트 UI 제공 ---
 @app.route('/update_metadata')
-@time_it
-def update_metadata():
-    if 'path' not in request.args:
-         return render_template_string(
-            ADMIN_TEMPLATE,
-            path="",
-            performed=False,
-            total_count=0,
-            success_count=0,
-            error_count=0,
-            items=[],
-            errors=[]
-        )
+def update_metadata_ui():
+    # 껍데기 HTML만 렌더링. 동작은 SSE(/do_update_metadata)를 통해 수행됨
+    return render_template_string(ADMIN_TEMPLATE)
 
+# --- 라우트: 실제 업데이트 프로세스 (SSE) ---
+@app.route('/do_update_metadata')
+def do_update_metadata():
     path = request.args.get('path', '')
-    logger.info(f"🔄 [UPDATE_METADATA] Start request for path: '{path}'")
-
     root = get_robust_root()
     abs_path = resolve_actual_path(path)
 
-    if not os.path.isdir(abs_path):
-        return render_template_string(ADMIN_TEMPLATE, path=path, performed=True, total_count=0, success_count=0, error_count=1, items=[], errors=[f"Invalid path: {abs_path}"])
+    def generate():
+        if not os.path.isdir(abs_path):
+            yield f"data: {json.dumps({'status': 'error', 'message': f'Invalid path: {abs_path}'})}\n\n"
+            return
 
-    requested_folder_name = os.path.basename(abs_path)
-    normalized_name = normalize_nfc(requested_folder_name.lower())
-    is_3_level_structure = normalized_name in THREE_LEVEL_STRUCTURE_FOLDERS
+        requested_folder_name = os.path.basename(abs_path)
+        normalized_name = normalize_nfc(requested_folder_name.lower())
+        is_3_level_structure = normalized_name in THREE_LEVEL_STRUCTURE_FOLDERS
 
-    scan_paths = [abs_path]
-    if is_3_level_structure:
-        scan_paths = [d.path for d in os.scandir(abs_path) if d.is_dir()]
+        scan_paths = [abs_path]
+        if is_3_level_structure:
+            scan_paths = [d.path for d in os.scandir(abs_path) if d.is_dir()]
 
-    tasks = []
-    for current_path in scan_paths:
-        try:
-            with os.scandir(current_path) as it:
-                for entry in it:
-                    if entry.is_dir() or entry.name.lower().endswith(('.zip', '.cbz')):
-                        tasks.append((entry.path, entry.is_dir()))
-        except Exception:
-            pass
+        tasks = []
+        for current_path in scan_paths:
+            try:
+                with os.scandir(current_path) as it:
+                    for entry in it:
+                        if entry.is_dir() or entry.name.lower().endswith(('.zip', '.cbz')):
+                            tasks.append((entry.path, entry.is_dir()))
+            except Exception:
+                pass
 
-    logger.info(f"📥 [UPDATE_METADATA] Found {len(tasks)} items to update.")
+        total_tasks = len(tasks)
+        yield f"data: {json.dumps({'status': 'init', 'total': total_tasks})}\n\n"
 
-    updated_items = []
-    failed_items = []
-    updated_results_for_cache = [] # 캐시 갱신용 데이터
+        success_count = 0
+        error_count = 0
+        processed_count = 0
 
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        future_map = {
-            executor.submit(force_update_metadata_task, t_path, is_dir, root, METADATA_DB_PATH):
-            (t_path, is_dir) for t_path, is_dir in tasks
-        }
-        for future in as_completed(future_map):
-            t_path, is_dir = future_map[future]
-            res = future.result()
+        # 스레드 풀 크기를 적절히 조절 (너무 많으면 DB 락이 자주 걸릴 수 있음)
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+            future_map = {
+                executor.submit(force_update_metadata_task, t_path, is_dir, root, METADATA_DB_PATH):
+                (t_path, is_dir) for t_path, is_dir in tasks
+            }
+            for future in as_completed(future_map):
+                res = future.result()
+                processed_count += 1
 
-            # 캐시 갱신을 위해 데이터 구조 만들기
-            if res:
-                rel_path = os.path.relpath(t_path, root).replace(os.sep, '/')
-                # force_update_metadata_task의 반환값과 process_scan_task 반환값 형식이 다름을 주의
-                # 여기서 캐시용 구조로 변환
-                cache_item = {
-                    'name': res.get('title', 'Untitled'),
-                    'isDirectory': is_dir,
-                    'path': normalize_nfc(rel_path),
-                    'metadata': {
-                        'title': res.get('title'),
-                        'poster_url': res.get('poster'),
-                        'kavita_info': {} # force_update_metadata_task에서 kavita_info를 반환하지 않고 있었음. 필요시 수정
-                    }
+                if res.get("success"):
+                    success_count += 1
+                else:
+                    error_count += 1
+
+                # 프론트엔드로 진행 상태와 로그 전송
+                payload = {
+                    'status': 'progress',
+                    'processed': processed_count,
+                    'total': total_tasks,
+                    'success': success_count,
+                    'error': error_count,
+                    'current_item': res.get('title', ''),
+                    'log': res.get('log', '')
                 }
-                # 주의: force_update_metadata_task는 현재 UI용 요약 정보만 리턴함.
-                # 제대로 캐시를 갱신하려면 메타데이터 전체가 필요함.
-                # 따라서 가장 확실한 방법은 업데이트 완료 후 'scan_full_directory'를 한 번 돌리는 것임.
+                yield f"data: {json.dumps(payload)}\n\n"
 
-            if res.get("success"):
-                updated_items.append(res)
-            else:
-                failed_items.append(str(res.get("error")))
+        # 모든 업데이트 완료 후 directory_cache 갱신
+        try:
+            yield f"data: {json.dumps({'status': 'progress', 'processed': processed_count, 'total': total_tasks, 'success': success_count, 'error': error_count, 'current_item': 'Refreshing Directory Cache...', 'log': '♻️ Refreshing directory cache...'})}\n\n"
+            new_full_results = scan_full_directory(abs_path, root, is_3_level_structure)
+            with get_db_connection() as conn:
+                set_cached_directory_entries(abs_path, new_full_results, conn)
+                conn.commit()
+        except Exception as e:
+            yield f"data: {json.dumps({'status': 'progress', 'processed': processed_count, 'total': total_tasks, 'success': success_count, 'error': error_count, 'log': f'❌ Cache Refresh Error: {e}'})}\n\n"
 
-    updated_items.sort(key=lambda x: x['title'])
+        yield f"data: {json.dumps({'status': 'done', 'total': total_tasks, 'success': success_count, 'error': error_count})}\n\n"
 
-    # [중요] 업데이트가 끝났으므로 해당 경로의 directory_cache를 갱신해야 함
-    logger.info(f"♻️ [UPDATE_METADATA] Refreshing directory cache for '{path}'...")
-    new_full_results = scan_full_directory(abs_path, root, is_3_level_structure)
-    with sqlite3.connect(METADATA_DB_PATH) as conn:
-        conn.execute('PRAGMA journal_mode=WAL;')
-        set_cached_directory_entries(abs_path, new_full_results, conn)
-
-    logger.info(f"✨ [UPDATE_METADATA] Finished. Updated {len(updated_items)} items.")
-
-    return render_template_string(
-        ADMIN_TEMPLATE,
-        path=path,
-        performed=True,
-        total_count=len(tasks),
-        success_count=len(updated_items),
-        error_count=len(failed_items),
-        items=updated_items,
-        errors=failed_items
-    )
+    return Response(generate(), mimetype='text/event-stream')
 
 
 # --- 기타 라우트 ---
