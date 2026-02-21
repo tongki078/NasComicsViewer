@@ -63,7 +63,7 @@ def is_comic_file(name):
     return name.lower().endswith(('.zip', '.cbz', '.rar', '.cbr', '.pdf'))
 
 def is_image_file(name):
-    return name.lower().endswith(('.jpg', '.jpeg', '.png', '.webp', '.gif'))
+    return name.lower().endswith(('.jpg', '.jpeg', '.png', '.webp'))
 
 def get_comic_info(abs_path, rel_path):
     title = normalize_nfc(os.path.basename(abs_path))
@@ -234,7 +234,7 @@ def get_metadata():
 @app.route('/zip_entries')
 def zip_entries():
     path = urllib.parse.unquote(request.args.get('path', ''))
-    abs_p = os.path.join(BASE_PATH, path)
+    abs_p = os.path.abspath(os.path.join(BASE_PATH, path)).replace(os.sep, '/')
     if not os.path.isfile(abs_p): return jsonify([])
     try:
         with zipfile.ZipFile(abs_p, 'r') as z:
@@ -246,11 +246,20 @@ def zip_entries():
 def download_zip_entry():
     path = urllib.parse.unquote(request.args.get('path', ''))
     entry = urllib.parse.unquote(request.args.get('entry', ''))
-    abs_p = os.path.join(BASE_PATH, path)
+    abs_p = os.path.abspath(os.path.join(BASE_PATH, path)).replace(os.sep, '/')
     if not os.path.isfile(abs_p): return "No Zip", 404
     try:
         with zipfile.ZipFile(abs_p, 'r') as z:
-            with z.open(entry) as f:
+            # Entry name might need normalization
+            target = entry
+            if target not in z.namelist():
+                # Try normalization match
+                norm_target = normalize_nfc(target)
+                for name in z.namelist():
+                    if normalize_nfc(name) == norm_target:
+                        target = name
+                        break
+            with z.open(target) as f:
                 return send_file(io.BytesIO(f.read()), mimetype='image/jpeg')
     except: return "Error", 500
 
@@ -272,7 +281,11 @@ def download():
                     with z.open(imgs[0]) as f: return send_file(io.BytesIO(f.read()), mimetype='image/jpeg')
         except: pass
         return "No Image", 404
-    return send_from_directory(os.path.dirname(os.path.join(BASE_PATH, p)), os.path.basename(os.path.join(BASE_PATH, p)))
+
+    full_path = os.path.abspath(os.path.join(BASE_PATH, p)).replace(os.sep, '/')
+    if not full_path.startswith(os.path.abspath(BASE_PATH).replace(os.sep, '/')):
+        return "Access Denied", 403
+    return send_from_directory(os.path.dirname(full_path), os.path.basename(full_path))
 
 if __name__ == '__main__':
     init_db()
