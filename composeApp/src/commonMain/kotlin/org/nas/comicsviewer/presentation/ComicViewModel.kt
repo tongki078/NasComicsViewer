@@ -23,9 +23,10 @@ data class ComicBrowserUiState(
     val totalItems: Int = 0,
     val isSeriesView: Boolean = false,
     val isIntroShowing: Boolean = true,
-    val selectedMetadata: ComicMetadata? = null,
+    val selectedMetadata: ComicMetadata? = null, // 시리즈 전체 정보 보존용
     val seriesEpisodes: List<NasFile> = emptyList(),
-    val selectedZipPath: String? = null,
+    val selectedZipPath: String? = null, // 현재 뷰어에서 보고 있는 파일
+    val viewerPosterUrl: String? = null, // 뷰어용 배경 이미지
     val isSearchMode: Boolean = false,
     val searchQuery: String = "",
     val searchResults: List<NasFile> = emptyList(),
@@ -89,7 +90,9 @@ class ComicViewModel(
                 currentFiles = emptyList(),
                 totalItems = 0,
                 isSeriesView = false,
-                selectedMetadata = null
+                selectedMetadata = null,
+                seriesEpisodes = emptyList(),
+                selectedZipPath = null
             )
         }
 
@@ -98,9 +101,7 @@ class ComicViewModel(
                 val result = nasRepository.scanComicFolders(path, currentPage, pageSize)
                 val processedFiles = processScanResult(result.items)
                 canLoadMore = processedFiles.size < result.total_items
-
                 _uiState.update { it.copy(currentFiles = processedFiles, totalItems = result.total_items, isLoading = false) }
-
             } catch (e: Exception) {
                 _uiState.update { it.copy(errorMessage = "목록 로드 실패: ${e.message}", isLoading = false) }
             }
@@ -109,8 +110,7 @@ class ComicViewModel(
 
     fun loadMoreBooks() {
         if (uiState.value.isLoading || !canLoadMore) return
-
-        scanJob = viewModelScope.launch {
+        viewModelScope.launch {
             _uiState.update { it.copy(isLoadingMore = true) }
             try {
                 currentPage++
@@ -118,13 +118,7 @@ class ComicViewModel(
                 val processedFiles = processScanResult(result.items)
                 val newFiles = _uiState.value.currentFiles + processedFiles
                 canLoadMore = newFiles.size < result.total_items
-
-                _uiState.update {
-                    it.copy(
-                        currentFiles = newFiles,
-                        isLoadingMore = false
-                    )
-                }
+                _uiState.update { it.copy(currentFiles = newFiles, isLoadingMore = false) }
             } catch (e: Exception) {
                 _uiState.update { it.copy(errorMessage = "추가 로드 실패: ${e.message}", isLoadingMore = false) }
             }
@@ -135,20 +129,43 @@ class ComicViewModel(
         return files.map { file ->
             val originalName = file.path.substringAfterLast('/')
             val finalName = nameMap[originalName.removeSuffix(".zip").removeSuffix(".cbz")] ?: cleanTitle(originalName)
-            val newMeta = file.metadata?.copy(title = finalName)
-            file.copy(name = finalName, metadata = newMeta)
+            file.copy(name = finalName)
         }
     }
 
     fun onFileClick(file: NasFile) {
         if (!file.isDirectory) {
-            _uiState.update { it.copy(selectedZipPath = file.path, selectedMetadata = file.metadata) }
+            // 단일 파일 클릭 시: 시리즈 메타데이터는 유지하고 선택된 경로만 업데이트
+            _uiState.update { it.copy(
+                selectedZipPath = file.path, 
+                viewerPosterUrl = file.metadata?.posterUrl ?: it.selectedMetadata?.posterUrl
+            ) }
             return
         }
-        scanBooks(file.path)
+        
+        // 폴더(시리즈) 클릭 시
+        viewModelScope.launch {
+            _uiState.update { it.copy(isLoading = true) }
+            try {
+                val metadata = nasRepository.getMetadata(file.path)
+                if (metadata != null && (metadata.chapters?.isNotEmpty() == true || metadata.summary != "줄거리 정보가 없습니다.")) {
+                    _uiState.update { it.copy(
+                        isSeriesView = true,
+                        selectedMetadata = metadata,
+                        seriesEpisodes = metadata.chapters ?: emptyList(),
+                        isLoading = false,
+                        currentPath = file.path,
+                        pathHistory = it.pathHistory + file.path
+                    ) }
+                } else {
+                    scanBooks(file.path)
+                }
+            } catch (e: Exception) {
+                scanBooks(file.path)
+            }
+        }
     }
-    
-    // Other functions remain the same...
+
     fun onHome() {
         if (uiState.value.categories.isNotEmpty()) scanBooks(uiState.value.categories[0].path, 0)
     }
@@ -160,7 +177,6 @@ class ComicViewModel(
 
     fun updateSearchQuery(query: String) {
         _uiState.update { it.copy(searchQuery = query) }
-        // Implement search logic if needed
     }
 
     fun onSearchSubmit(query: String) {
@@ -169,7 +185,7 @@ class ComicViewModel(
             try {
                 posterRepository.insertRecentSearch(query)
                 loadRecentSearches()
-            } catch (e: Exception) { /* Ignore */ }
+            } catch (e: Exception) { }
         }
     }
 
@@ -178,7 +194,7 @@ class ComicViewModel(
             try {
                 val history = posterRepository.getRecentSearches()
                 _uiState.update { it.copy(recentSearches = history) }
-            } catch (e: Exception) { /* Ignore */ }
+            } catch (e: Exception) { }
         }
     }
 
@@ -187,11 +203,13 @@ class ComicViewModel(
             try {
                 posterRepository.clearRecentSearches()
                 loadRecentSearches()
-            } catch (e: Exception) { /* Ignore */ }
+            } catch (e: Exception) { }
         }
     }
 
-    fun closeViewer() { _uiState.update { it.copy(selectedZipPath = null) } }
+    fun closeViewer() { 
+        _uiState.update { it.copy(selectedZipPath = null, viewerPosterUrl = null) } 
+    }
 
     fun onBack() {
         if (_uiState.value.isSearchMode) {
@@ -200,6 +218,17 @@ class ComicViewModel(
         }
         if (_uiState.value.selectedZipPath != null) {
             closeViewer()
+            return
+        }
+        if (_uiState.value.isSeriesView) {
+            // 시리즈 뷰에서 나갈 때 상태 초기화
+            val history = _uiState.value.pathHistory
+            if (history.size > 1) {
+                val newHistory = history.dropLast(1)
+                scanBooks(newHistory.last(), isBack = true)
+            } else {
+                onHome()
+            }
             return
         }
         val history = _uiState.value.pathHistory

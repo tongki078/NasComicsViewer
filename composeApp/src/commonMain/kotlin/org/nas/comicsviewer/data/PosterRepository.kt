@@ -7,9 +7,14 @@ import kotlinx.serialization.Serializable
 @Serializable
 data class ComicMetadata(
     val title: String? = null,
-    val author: String? = null,
     val summary: String? = null,
-    @SerialName("poster_url") val posterUrl: String? = null
+    val writers: List<String>? = emptyList(),
+    val genres: List<String>? = emptyList(),
+    val status: String? = null,
+    val publisher: String? = null,
+    @SerialName("poster_url") val posterUrl: String? = null,
+    @SerialName("rel_path") val relPath: String? = null,
+    val chapters: List<NasFile>? = emptyList()
 )
 
 interface PosterRepository {
@@ -23,7 +28,6 @@ interface PosterRepository {
 expect fun providePosterRepository(context: Any?): PosterRepository
 
 fun cleanTitle(folderName: String): String {
-    // ... (rest of the file is unchanged)
     var title = folderName
     val extensions = listOf(".zip", ".cbz", ".rar", ".pdf")
     var cleanName = title

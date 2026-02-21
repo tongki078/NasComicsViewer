@@ -50,7 +50,16 @@ class AndroidNasRepository private constructor() : NasRepository {
             }.body()
         } catch (e: Exception) {
             println("DEBUG_NAS: Scan error: ${e.message}")
-            ScanResult(0, 0, 0, emptyList()) // 에러 발생 시 빈 결과 반환
+            ScanResult(0, 0, 0, emptyList()) 
+        }
+    }
+
+    override suspend fun getMetadata(path: String): ComicMetadata? = withContext(Dispatchers.IO) {
+        try {
+            client.get("$baseUrl/metadata") { url { parameters.append("path", path) } }.body()
+        } catch (e: Exception) {
+            println("DEBUG_NAS: Metadata error: ${e.message}")
+            null
         }
     }
 }

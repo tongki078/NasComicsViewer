@@ -6,7 +6,7 @@ import kotlinx.serialization.Serializable
 @Serializable
 data class NasFile(
     val name: String,
-    val isDirectory: Boolean,
+    val isDirectory: Boolean = false,
     val path: String,
     val metadata: ComicMetadata? = null
 )
@@ -23,6 +23,7 @@ interface NasRepository {
     suspend fun listFiles(path: String): List<NasFile>
     suspend fun getFileContent(path: String): ByteArray
     suspend fun scanComicFolders(path: String, page: Int, pageSize: Int): ScanResult
+    suspend fun getMetadata(path: String): ComicMetadata?
 }
 
 expect fun provideNasRepository(): NasRepository

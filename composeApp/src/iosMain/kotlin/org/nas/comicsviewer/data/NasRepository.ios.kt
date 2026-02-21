@@ -58,4 +58,13 @@ class IosNasRepository private constructor() : NasRepository {
             ScanResult(0, 0, 0, emptyList())
         }
     }
+
+    override suspend fun getMetadata(path: String): ComicMetadata? = withContext(Dispatchers.Default) {
+        try {
+            client.get("$baseUrl/metadata") { url { parameters.append("path", path) } }.body()
+        } catch (e: Exception) {
+            println("DEBUG_NAS: Metadata error: ${e.message}")
+            null
+        }
+    }
 }

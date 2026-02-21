@@ -48,7 +48,7 @@ fun NasComicApp(viewModel: ComicViewModel) {
     val uiState by viewModel.uiState.collectAsState()
     val zipManager = remember { provideZipManager() }
 
-    BackHandler(enabled = uiState.selectedZipPath != null || uiState.pathHistory.size > 1 || uiState.isSearchMode) {
+    BackHandler(enabled = uiState.selectedZipPath != null || uiState.pathHistory.size > 1 || uiState.isSearchMode || uiState.isSeriesView) {
         viewModel.onBack()
     }
 
@@ -91,15 +91,16 @@ fun NasComicApp(viewModel: ComicViewModel) {
                             onLoadMore = { viewModel.loadMoreBooks() },
                             posterRepository = viewModel.posterRepository
                         )
-                        if (uiState.isLoading) {
-                            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                                CircularProgressIndicator(color = KakaoYellow, strokeWidth = 2.dp)
-                            }
-                        }
                     }
                 }
             }
             
+            if (uiState.isLoading) {
+                Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.3f)), contentAlignment = Alignment.Center) {
+                    CircularProgressIndicator(color = KakaoYellow, strokeWidth = 2.dp)
+                }
+            }
+
             uiState.errorMessage?.let { msg ->
                 Snackbar(Modifier.align(Alignment.BottomCenter).padding(16.dp), containerColor = Color(0xFF222222), action = { TextButton({ viewModel.clearError() }) { Text("OK") } }) { Text(msg) }
             }
@@ -172,7 +173,7 @@ fun ComicCard(file: NasFile, repo: PosterRepository, onClick: () -> Unit) {
     }
 
     Column(Modifier.fillMaxWidth().clickable(interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = onClick)) {
-        Box(Modifier.aspectRatio(0.72f).fillMaxWidth().clip(RoundedCornerShape(2.dp)).background(SurfaceGrey)) {
+        Box(Modifier.aspectRatio(0.72f).fillMaxWidth().clip(RoundedCornerShape(4.dp)).background(SurfaceGrey)) {
             if (thumb != null) {
                 Image(thumb!!, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
             } else {
@@ -180,10 +181,156 @@ fun ComicCard(file: NasFile, repo: PosterRepository, onClick: () -> Unit) {
                      Text("MANGA", color = TextMuted, fontSize = 9.sp, fontWeight = FontWeight.Bold, modifier = Modifier.alpha(0.4f)) 
                 }
             }
-            if (file.isDirectory) Text("FOLDER", modifier = Modifier.align(Alignment.BottomStart).padding(4.dp), color = KakaoYellow, fontSize = 7.sp, fontWeight = FontWeight.Black)
+            if (file.isDirectory) {
+                Box(Modifier.align(Alignment.BottomStart).padding(4.dp).background(Color.Black.copy(0.6f), RoundedCornerShape(2.dp)).padding(horizontal = 4.dp, vertical = 1.dp)) {
+                    Text("SERIES", color = KakaoYellow, fontSize = 7.sp, fontWeight = FontWeight.Black)
+                }
+            }
         }
         Spacer(Modifier.height(6.dp))
         Text(file.name, style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold, fontSize = 11.sp), maxLines = 2, overflow = TextOverflow.Ellipsis, color = TextPureWhite)
+    }
+}
+
+@Composable
+fun SeriesDetailScreen(state: ComicBrowserUiState, onVolumeClick: (NasFile) -> Unit, onBack: () -> Unit, repo: PosterRepository) {
+    var posterBitmap by remember { mutableStateOf<ImageBitmap?>(null) }
+    val metadata = state.selectedMetadata
+    
+    LaunchedEffect(metadata?.posterUrl) {
+        metadata?.posterUrl?.let { url ->
+            posterBitmap = repo.getImage(url)
+        }
+    }
+
+    Column(Modifier.fillMaxSize().background(BgBlack).verticalScroll(rememberScrollState())) {
+        Box(Modifier.fillMaxWidth().height(420.dp)) {
+            if (posterBitmap != null) {
+                Image(posterBitmap!!, null, Modifier.fillMaxSize().blur(30.dp).alpha(0.3f), contentScale = ContentScale.Crop)
+                Image(posterBitmap!!, null, Modifier.align(Alignment.BottomCenter).width(200.dp).height(280.dp).padding(bottom = 20.dp).clip(RoundedCornerShape(8.dp)).border(0.5.dp, Color.White.copy(0.2f), RoundedCornerShape(8.dp)), contentScale = ContentScale.Crop)
+            }
+            Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color.Transparent, BgBlack.copy(alpha = 0.5f), BgBlack))))
+            
+            IconButton(onClick = onBack, modifier = Modifier.statusBarsPadding().padding(8.dp).background(Color.Black.copy(0.3f), CircleShape)) {
+                Text("〈", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 20.sp)
+            }
+        }
+
+        Column(Modifier.padding(horizontal = 24.dp)) {
+            Text(text = metadata?.title ?: "제목 없음", style = MaterialTheme.typography.headlineMedium.copy(fontWeight = FontWeight.Black), color = TextPureWhite)
+            Spacer(Modifier.height(12.dp))
+            
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                val writers = if (metadata?.writers?.isNotEmpty() == true) metadata.writers.joinToString(", ") else "작가 미상"
+                Text(text = writers, color = KakaoYellow, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                Spacer(Modifier.width(12.dp))
+                Surface(color = Color(0xFF222222), shape = RoundedCornerShape(4.dp)) {
+                    Text(text = metadata?.status ?: "Unknown", modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp), color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                }
+            }
+            
+            Spacer(Modifier.height(16.dp))
+            
+            if (metadata?.genres?.isNotEmpty() == true) {
+                FlowRow(mainAxisSpacing = 8.dp, crossAxisSpacing = 8.dp) {
+                    metadata.genres.forEach { genre ->
+                        Surface(color = SurfaceGrey, shape = CircleShape, border = BorderStroke(0.5.dp, Color.White.copy(0.1f))) {
+                            Text(genre, modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp), color = TextMuted, fontSize = 11.sp)
+                        }
+                    }
+                }
+                Spacer(Modifier.height(24.dp))
+            }
+
+            Text(text = metadata?.summary ?: "등록된 줄거리가 없습니다.", color = TextMuted, fontSize = 14.sp, lineHeight = 22.sp)
+            
+            Spacer(Modifier.height(40.dp))
+            Text("에피소드 (${state.seriesEpisodes.size})", color = TextPureWhite, fontWeight = FontWeight.Black, fontSize = 18.sp)
+            Spacer(Modifier.height(16.dp))
+        }
+
+        Column(Modifier.padding(horizontal = 20.dp).padding(bottom = 60.dp)) {
+            state.seriesEpisodes.forEach { file ->
+                VolumeListItem(file, repo) { onVolumeClick(file) }
+                Spacer(Modifier.height(12.dp))
+            }
+        }
+    }
+}
+
+@Composable
+fun VolumeListItem(file: NasFile, repo: PosterRepository, onClick: () -> Unit) {
+    var thumb by remember { mutableStateOf<ImageBitmap?>(null) }
+    val posterUrl = file.metadata?.posterUrl ?: file.path
+
+    LaunchedEffect(posterUrl) {
+        thumb = repo.getImage(posterUrl)
+    }
+
+    Surface(
+        modifier = Modifier.fillMaxWidth().clickable(onClick = onClick), 
+        color = Color(0xFF0D0D0D), 
+        shape = RoundedCornerShape(8.dp), 
+        border = BorderStroke(0.5.dp, Color(0xFF1A1A1A))
+    ) {
+        Row(Modifier.padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
+            Box(Modifier.size(50.dp, 70.dp).clip(RoundedCornerShape(4.dp)).background(SurfaceGrey)) {
+                if (thumb != null) {
+                    Image(thumb!!, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+                } else {
+                    Box(Modifier.fillMaxSize(), Alignment.Center) { Text("BOOK", fontSize = 8.sp, color = TextMuted) }
+                }
+            }
+            Spacer(Modifier.width(16.dp))
+            Column(Modifier.weight(1f)) {
+                Text(file.name, fontWeight = FontWeight.Bold, color = TextPureWhite, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Spacer(Modifier.height(4.dp))
+                Text("바로 읽기", color = KakaoYellow, fontSize = 11.sp, fontWeight = FontWeight.Medium)
+            }
+            Icon(Icons.Default.Search, null, tint = Color.White.copy(0.2f), modifier = Modifier.size(16.dp))
+        }
+    }
+}
+
+@Composable
+fun FlowRow(
+    mainAxisSpacing: androidx.compose.ui.unit.Dp = 0.dp,
+    crossAxisSpacing: androidx.compose.ui.unit.Dp = 0.dp,
+    content: @Composable () -> Unit
+) {
+    androidx.compose.ui.layout.Layout(content) { measurables, constraints ->
+        if (measurables.isEmpty()) {
+            return@Layout layout(0, 0) {}
+        }
+        val placeholders = measurables.map { it.measure(constraints.copy(minWidth = 0, minHeight = 0)) }
+        val rows = mutableListOf<List<androidx.compose.ui.layout.Placeable>>()
+        var currentRow = mutableListOf<androidx.compose.ui.layout.Placeable>()
+        var currentRowWidth = 0
+        
+        placeholders.forEach { placeable ->
+            if (currentRowWidth + placeable.width > constraints.maxWidth && currentRow.isNotEmpty()) {
+                rows.add(currentRow)
+                currentRow = mutableListOf()
+                currentRowWidth = 0
+            }
+            currentRow.add(placeable)
+            currentRowWidth += placeable.width + mainAxisSpacing.roundToPx()
+        }
+        if (currentRow.isNotEmpty()) rows.add(currentRow)
+        
+        val height = if (rows.isEmpty()) 0 else rows.sumOf { row -> row.maxOf { it.height } } + (rows.size - 1).coerceAtLeast(0) * crossAxisSpacing.roundToPx()
+        layout(constraints.maxWidth, height) {
+            var y = 0
+            rows.forEach { row ->
+                var x = 0
+                val rowHeight = row.maxOf { it.height }
+                row.forEach { placeable ->
+                    placeable.placeRelative(x, y)
+                    x += placeable.width + mainAxisSpacing.roundToPx()
+                }
+                y += rowHeight + crossAxisSpacing.roundToPx()
+            }
+        }
     }
 }
 
@@ -343,67 +490,6 @@ fun WebtoonViewer(
                     Text(statusText, Modifier.align(Alignment.Center), color = TextPureWhite, fontWeight = FontWeight.Bold)
                 }
             }
-        }
-    }
-}
-
-@Composable
-fun SeriesDetailScreen(state: ComicBrowserUiState, onVolumeClick: (NasFile) -> Unit, onBack: () -> Unit, repo: PosterRepository) {
-    var posterBitmap by remember { mutableStateOf<ImageBitmap?>(null) }
-    val metadata = state.selectedMetadata
-    
-    LaunchedEffect(metadata?.posterUrl) {
-        metadata?.posterUrl?.let { url ->
-            posterBitmap = repo.getImage(url)
-        }
-    }
-
-    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
-        Box(Modifier.fillMaxWidth().height(420.dp)) {
-            if (posterBitmap != null) {
-                Image(posterBitmap!!, null, Modifier.fillMaxSize().blur(30.dp).alpha(0.3f), contentScale = ContentScale.Crop)
-                Image(posterBitmap!!, null, Modifier.align(Alignment.BottomCenter).width(240.dp).height(340.dp).clip(RoundedCornerShape(8.dp)).border(0.5.dp, Color.White.copy(0.2f), RoundedCornerShape(8.dp)), contentScale = ContentScale.Crop)
-            }
-            Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color.Transparent, BgBlack))))
-            IconButton(onClick = onBack, modifier = Modifier.statusBarsPadding().padding(8.dp).background(Color.Black.copy(0.3f), CircleShape)) {
-                Text("〈", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 20.sp)
-            }
-        }
-
-        Column(Modifier.padding(horizontal = 24.dp)) {
-            Text(text = metadata?.title ?: "", style = MaterialTheme.typography.headlineMedium.copy(fontWeight = FontWeight.Black), color = TextPureWhite)
-            Spacer(Modifier.height(8.dp))
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(text = metadata?.author ?: "작가 미상", color = KakaoYellow, fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                Spacer(Modifier.width(12.dp))
-                Surface(color = Color(0xFF222222), shape = RoundedCornerShape(2.dp)) {
-                    Text(text = "연재중", modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp), color = TextMuted, fontSize = 10.sp, fontWeight = FontWeight.Bold)
-                }
-            }
-            Spacer(Modifier.height(16.dp))
-            Text(text = metadata?.summary ?: "등록된 줄거리가 없습니다.", color = TextMuted, fontSize = 14.sp, lineHeight = 20.sp, maxLines = 4, overflow = TextOverflow.Ellipsis)
-            
-            Spacer(Modifier.height(40.dp))
-            Text("에피소드 (${state.seriesEpisodes.size})", color = TextPureWhite, fontWeight = FontWeight.Black, fontSize = 18.sp)
-            Spacer(Modifier.height(16.dp))
-        }
-
-        Column(Modifier.padding(horizontal = 20.dp).padding(bottom = 60.dp)) {
-            state.seriesEpisodes.forEach { file ->
-                VolumeItem(file) { onVolumeClick(file) }
-                Spacer(Modifier.height(10.dp))
-            }
-        }
-    }
-}
-
-@Composable
-fun VolumeItem(file: NasFile, onClick: () -> Unit) {
-    Surface(modifier = Modifier.fillMaxWidth().clickable(onClick = onClick), color = Color(0xFF0A0A0A), shape = RoundedCornerShape(4.dp), border = BorderStroke(0.5.dp, Color(0xFF1A1A1A))) {
-        Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text("📖", fontSize = 16.sp); Spacer(Modifier.width(14.dp))
-            Text(file.name, fontWeight = FontWeight.Medium, color = TextPureWhite, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Spacer(Modifier.weight(1f)); Text("〉", color = TextMuted, fontSize = 12.sp)
         }
     }
 }
