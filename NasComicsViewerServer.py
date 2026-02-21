@@ -62,6 +62,9 @@ def init_db():
 def is_comic_file(name):
     return name.lower().endswith(('.zip', '.cbz', '.rar', '.cbr', '.pdf'))
 
+def is_image_file(name):
+    return name.lower().endswith(('.jpg', '.jpeg', '.png', '.webp', '.gif'))
+
 def get_comic_info(abs_path, rel_path):
     title = normalize_nfc(os.path.basename(abs_path))
     poster = None
@@ -93,7 +96,7 @@ def get_comic_info(abs_path, rel_path):
                 with os.scandir(abs_path) as it:
                     ents = sorted(list(it), key=lambda x: x.name)
                     for e in ents:
-                        if e.name.lower().endswith(('.jpg', '.jpeg', '.png', '.webp')):
+                        if is_image_file(e.name):
                             poster = (rel_path + "/" + e.name).replace("//", "/")
                             break
                     if not poster:
@@ -228,6 +231,29 @@ def get_metadata():
 
     return jsonify(meta)
 
+@app.route('/zip_entries')
+def zip_entries():
+    path = urllib.parse.unquote(request.args.get('path', ''))
+    abs_p = os.path.join(BASE_PATH, path)
+    if not os.path.isfile(abs_p): return jsonify([])
+    try:
+        with zipfile.ZipFile(abs_p, 'r') as z:
+            imgs = sorted([n for n in z.namelist() if is_image_file(n)])
+            return jsonify(imgs)
+    except: return jsonify([])
+
+@app.route('/download_zip_entry')
+def download_zip_entry():
+    path = urllib.parse.unquote(request.args.get('path', ''))
+    entry = urllib.parse.unquote(request.args.get('entry', ''))
+    abs_p = os.path.join(BASE_PATH, path)
+    if not os.path.isfile(abs_p): return "No Zip", 404
+    try:
+        with zipfile.ZipFile(abs_p, 'r') as z:
+            with z.open(entry) as f:
+                return send_file(io.BytesIO(f.read()), mimetype='image/jpeg')
+    except: return "Error", 500
+
 @app.route('/download')
 def download():
     p = urllib.parse.unquote(request.args.get('path', ''))
@@ -241,7 +267,7 @@ def download():
             except: pass
         try:
             with zipfile.ZipFile(azp, 'r') as z:
-                imgs = sorted([n for n in z.namelist() if n.lower().endswith(('.jpg', '.jpeg', '.png'))])
+                imgs = sorted([n for n in z.namelist() if is_image_file(n)])
                 if imgs:
                     with z.open(imgs[0]) as f: return send_file(io.BytesIO(f.read()), mimetype='image/jpeg')
         except: pass

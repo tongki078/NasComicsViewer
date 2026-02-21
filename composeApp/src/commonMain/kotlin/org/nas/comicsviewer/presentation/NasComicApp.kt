@@ -9,6 +9,7 @@ import androidx.compose.foundation.lazy.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Search
@@ -32,6 +33,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.nas.comicsviewer.BackHandler
 import org.nas.comicsviewer.data.*
@@ -60,7 +62,7 @@ fun NasComicApp(viewModel: ComicViewModel) {
                  WebtoonViewer(
                      path = uiState.selectedZipPath!!, 
                      manager = zipManager, 
-                     posterUrl = uiState.selectedMetadata?.posterUrl,
+                     posterUrl = uiState.viewerPosterUrl,
                      repo = viewModel.posterRepository,
                      onClose = { viewModel.closeViewer() }, 
                      onError = { viewModel.showError(it) }
@@ -127,9 +129,7 @@ fun FolderGridView(
     }
 
     LaunchedEffect(shouldLoadMore) {
-        if (shouldLoadMore) {
-            onLoadMore()
-        }
+        if (shouldLoadMore) onLoadMore()
     }
 
     LazyVerticalGrid(
@@ -212,7 +212,7 @@ fun SeriesDetailScreen(state: ComicBrowserUiState, onVolumeClick: (NasFile) -> U
             Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color.Transparent, BgBlack.copy(alpha = 0.5f), BgBlack))))
             
             IconButton(onClick = onBack, modifier = Modifier.statusBarsPadding().padding(8.dp).background(Color.Black.copy(0.3f), CircleShape)) {
-                Text("〈", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 20.sp)
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, null, tint = Color.White)
             }
         }
 
@@ -221,7 +221,7 @@ fun SeriesDetailScreen(state: ComicBrowserUiState, onVolumeClick: (NasFile) -> U
             Spacer(Modifier.height(12.dp))
             
             Row(verticalAlignment = Alignment.CenterVertically) {
-                val writers = if (metadata?.writers?.isNotEmpty() == true) metadata.writers.joinToString(", ") else "작가 미상"
+                val writers = if (!metadata?.writers.isNullOrEmpty()) metadata?.writers?.joinToString(", ") ?: "" else "작가 미상"
                 Text(text = writers, color = KakaoYellow, fontWeight = FontWeight.Bold, fontSize = 14.sp)
                 Spacer(Modifier.width(12.dp))
                 Surface(color = Color(0xFF222222), shape = RoundedCornerShape(4.dp)) {
@@ -231,9 +231,9 @@ fun SeriesDetailScreen(state: ComicBrowserUiState, onVolumeClick: (NasFile) -> U
             
             Spacer(Modifier.height(16.dp))
             
-            if (metadata?.genres?.isNotEmpty() == true) {
+            if (!metadata?.genres.isNullOrEmpty()) {
                 FlowRow(mainAxisSpacing = 8.dp, crossAxisSpacing = 8.dp) {
-                    metadata.genres.forEach { genre ->
+                    metadata?.genres?.forEach { genre ->
                         Surface(color = SurfaceGrey, shape = CircleShape, border = BorderStroke(0.5.dp, Color.White.copy(0.1f))) {
                             Text(genre, modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp), color = TextMuted, fontSize = 11.sp)
                         }
@@ -287,7 +287,7 @@ fun VolumeListItem(file: NasFile, repo: PosterRepository, onClick: () -> Unit) {
                 Spacer(Modifier.height(4.dp))
                 Text("바로 읽기", color = KakaoYellow, fontSize = 11.sp, fontWeight = FontWeight.Medium)
             }
-            Icon(Icons.Default.Search, null, tint = Color.White.copy(0.2f), modifier = Modifier.size(16.dp))
+            Icon(Icons.AutoMirrored.Filled.ArrowBack, null, tint = Color.White.copy(0.2f), modifier = Modifier.size(16.dp))
         }
     }
 }
@@ -299,9 +299,7 @@ fun FlowRow(
     content: @Composable () -> Unit
 ) {
     androidx.compose.ui.layout.Layout(content) { measurables, constraints ->
-        if (measurables.isEmpty()) {
-            return@Layout layout(0, 0) {}
-        }
+        if (measurables.isEmpty()) return@Layout layout(0, 0) {}
         val placeholders = measurables.map { it.measure(constraints.copy(minWidth = 0, minHeight = 0)) }
         val rows = mutableListOf<List<androidx.compose.ui.layout.Placeable>>()
         var currentRow = mutableListOf<androidx.compose.ui.layout.Placeable>()
@@ -318,7 +316,7 @@ fun FlowRow(
         }
         if (currentRow.isNotEmpty()) rows.add(currentRow)
         
-        val height = if (rows.isEmpty()) 0 else rows.sumOf { row -> row.maxOf { it.height } } + (rows.size - 1).coerceAtLeast(0) * crossAxisSpacing.roundToPx()
+        val height = rows.sumOf { r -> r.maxOf { it.height } } + (rows.size - 1).coerceAtLeast(0) * crossAxisSpacing.roundToPx()
         layout(constraints.maxWidth, height) {
             var y = 0
             rows.forEach { row ->
@@ -330,6 +328,118 @@ fun FlowRow(
                 }
                 y += rowHeight + crossAxisSpacing.roundToPx()
             }
+        }
+    }
+}
+
+@Composable
+fun WebtoonViewer(
+    path: String, 
+    manager: ZipManager, 
+    posterUrl: String?, 
+    repo: PosterRepository,
+    onClose: () -> Unit, 
+    onError: (String) -> Unit
+) {
+    val listState = rememberLazyListState()
+    val imageNames = remember { mutableStateListOf<String>() }
+    var isListLoaded by remember { mutableStateOf(false) }
+    var showControls by remember { mutableStateOf(true) }
+    var posterBitmap by remember { mutableStateOf<ImageBitmap?>(null) }
+    
+    // Revolutionary Strategy: Session Cache
+    val sessionCache = remember { mutableMapOf<String, ImageBitmap>() }
+    val scope = rememberCoroutineScope()
+
+    LaunchedEffect(posterUrl) {
+        posterUrl?.let { posterBitmap = repo.getImage(it) }
+    }
+
+    // 획기적 전략 1: 목록만 먼저 가져오고 렌더링 시작
+    LaunchedEffect(path) {
+        val names = manager.listImagesInZip(path)
+        if (names.isNotEmpty()) {
+            imageNames.clear()
+            imageNames.addAll(names)
+            isListLoaded = true
+            
+            // 획기적 전략 2: 초반 5페이지 병렬 선점 로딩 (Prefetch)
+            names.take(5).forEach { name ->
+                scope.launch(Dispatchers.Default) {
+                    val bytes = manager.extractImage(path, name)
+                    bytes?.toImageBitmap()?.let { sessionCache[name] = it }
+                }
+            }
+        } else {
+            onError("이미지 목록을 가져올 수 없습니다.")
+        }
+    }
+
+    Box(Modifier.fillMaxSize().background(Color.Black).clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) { showControls = !showControls }) {
+        if (!isListLoaded) {
+            Box(Modifier.fillMaxSize(), Alignment.Center) {
+                if (posterBitmap != null) {
+                    Image(posterBitmap!!, null, Modifier.fillMaxSize().blur(40.dp).alpha(0.4f), contentScale = ContentScale.Crop)
+                }
+                CircularProgressIndicator(color = KakaoYellow)
+            }
+        } else {
+            LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
+                itemsIndexed(imageNames) { index, name ->
+                    WebtoonPage(path, name, manager, sessionCache)
+                    
+                    // 획기적 전략 3: 다음 페이지 자동 프리페칭
+                    LaunchedEffect(listState.firstVisibleItemIndex) {
+                        val nextIndex = index + 1
+                        if (nextIndex < imageNames.size && nextIndex <= listState.firstVisibleItemIndex + 3) {
+                            val nextName = imageNames[nextIndex]
+                            if (!sessionCache.containsKey(nextName)) {
+                                scope.launch(Dispatchers.Default) {
+                                    val bytes = manager.extractImage(path, nextName)
+                                    bytes?.toImageBitmap()?.let { sessionCache[nextName] = it }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        AnimatedVisibility(showControls, enter = fadeIn(), exit = fadeOut()) {
+            Box(Modifier.fillMaxWidth().background(BgBlack.copy(0.8f)).statusBarsPadding().padding(16.dp)) {
+                Icon(Icons.Default.Close, null, tint = TextPureWhite, modifier = Modifier.align(Alignment.CenterStart).clickable { onClose() }.padding(8.dp))
+                if (isListLoaded) {
+                    Text("${listState.firstVisibleItemIndex + 1} / ${imageNames.size}", Modifier.align(Alignment.Center), color = TextPureWhite, fontWeight = FontWeight.Bold)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun WebtoonPage(zipPath: String, imageName: String, manager: ZipManager, cache: MutableMap<String, ImageBitmap>) {
+    var bitmap by remember(imageName) { mutableStateOf(cache[imageName]) }
+    var isLoading by remember(imageName) { mutableStateOf(bitmap == null) }
+
+    if (bitmap == null) {
+        LaunchedEffect(imageName) {
+            val bytes = manager.extractImage(zipPath, imageName)
+            if (bytes != null) {
+                val b = bytes.toImageBitmap()
+                if (b != null) {
+                    bitmap = b
+                    cache[imageName] = b
+                }
+            }
+            isLoading = false
+        }
+    }
+
+    Box(Modifier.fillMaxWidth().wrapContentHeight().defaultMinSize(minHeight = 400.dp), contentAlignment = Alignment.Center) {
+        if (isLoading) {
+            CircularProgressIndicator(Modifier.size(30.dp), color = KakaoYellow.copy(alpha = 0.4f), strokeWidth = 2.dp)
+        } else if (bitmap != null) {
+            Image(bitmap!!, null, Modifier.fillMaxWidth(), contentScale = ContentScale.FillWidth)
         }
     }
 }
@@ -420,75 +530,6 @@ fun SearchScreen(
                     modifier = Modifier.padding(horizontal = 24.dp, vertical = 12.dp)
                 )
                 FolderGridView(state.searchResults, false, onFileClick, {}, viewModel.posterRepository)
-            }
-        }
-    }
-}
-
-@Composable
-fun WebtoonViewer(
-    path: String, 
-    manager: ZipManager, 
-    posterUrl: String?, 
-    repo: PosterRepository,
-    onClose: () -> Unit, 
-    onError: (String) -> Unit
-) {
-    val listState = rememberLazyListState()
-    val loadedImages = remember { mutableStateListOf<Pair<String, ImageBitmap>>() }
-    var posterBitmap by remember { mutableStateOf<ImageBitmap?>(null) }
-    var isFinished by remember { mutableStateOf(false) }
-    var showControls by remember { mutableStateOf(true) }
-    var progress by remember { mutableStateOf(0f) }
-
-    LaunchedEffect(posterUrl) {
-        posterUrl?.let { url ->
-            posterBitmap = repo.getImage(url)
-        }
-    }
-
-    LaunchedEffect(path) {
-        manager.streamAllImages(path, { progress = it }) { name, bytes ->
-            val bitmap = bytes.toImageBitmap()
-            if (bitmap != null) loadedImages.add(name to bitmap)
-        }
-        isFinished = true
-        if (loadedImages.isEmpty()) onError("이미지를 불러올 수 없습니다.")
-    }
-
-    Box(Modifier.fillMaxSize().background(Color.Black).clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) { showControls = !showControls }) {
-        if (loadedImages.isEmpty()) {
-            Box(Modifier.fillMaxSize()) {
-                if (posterBitmap != null) {
-                    Image(posterBitmap!!, null, Modifier.fillMaxSize().blur(40.dp).alpha(0.4f), contentScale = ContentScale.Crop)
-                }
-                Column(Modifier.align(Alignment.Center), horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text(
-                        text = if (progress > 0) "Reading... ${(progress * 100).toInt()}%" else "Connecting...",
-                        color = Color.White.copy(alpha = 0.7f),
-                        fontSize = 14.sp
-                    )
-                }
-            }
-        }
-        LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
-            items(loadedImages) { (_, bitmap) -> Image(bitmap, null, Modifier.fillMaxWidth(), contentScale = ContentScale.FillWidth) }
-        }
-        Column(Modifier.align(Alignment.TopCenter).fillMaxWidth()) {
-            if (!isFinished) {
-                LinearProgressIndicator(
-                    progress = { progress },
-                    modifier = Modifier.fillMaxWidth().height(2.dp),
-                    color = KakaoYellow,
-                    trackColor = Color.Transparent
-                )
-            }
-            AnimatedVisibility(showControls, enter = fadeIn(), exit = fadeOut()) {
-                Box(Modifier.fillMaxWidth().background(BgBlack.copy(0.8f)).statusBarsPadding().padding(16.dp)) {
-                    Text("✕", color = TextPureWhite, fontSize = 20.sp, modifier = Modifier.align(Alignment.CenterStart).clickable { onClose() }.padding(8.dp))
-                    val statusText = if (isFinished) "${listState.firstVisibleItemIndex + 1} / ${loadedImages.size}" else "Loading..."
-                    Text(statusText, Modifier.align(Alignment.Center), color = TextPureWhite, fontWeight = FontWeight.Bold)
-                }
             }
         }
     }
