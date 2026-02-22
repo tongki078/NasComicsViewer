@@ -27,10 +27,12 @@ data class ComicBrowserUiState(
     val seriesEpisodes: List<NasFile> = emptyList(),
     val selectedZipPath: String? = null,
     val viewerPosterUrl: String? = null,
+    val currentChapterIndex: Int = -1,
     val isSearchMode: Boolean = false,
     val searchQuery: String = "",
     val searchResults: List<NasFile> = emptyList(),
-    val recentSearches: List<String> = emptyList()
+    val recentSearches: List<String> = emptyList(),
+    val readingPositions: Map<String, Int> = emptyMap()
 )
 
 class ComicViewModel(
@@ -48,7 +50,6 @@ class ComicViewModel(
     private var canLoadMore = true
     private val pageSize = 50
 
-    // 뒤로가기 시 스크롤 유지를 위해 이전 목록들을 저장함
     private val listCache = mutableMapOf<String, List<NasFile>>()
 
     private val nameMap = mapOf(
@@ -80,7 +81,6 @@ class ComicViewModel(
 
     fun scanBooks(path: String, index: Int? = null, isBack: Boolean = false) {
         if (isBack && listCache.containsKey(path)) {
-            // 뒤로가기인데 이미 캐시된 데이터가 있다면 스캔 없이 복구
             _uiState.update { state ->
                 state.copy(
                     selectedCategoryIndex = index ?: state.selectedCategoryIndex,
@@ -120,9 +120,7 @@ class ComicViewModel(
                 val result = nasRepository.scanComicFolders(path, currentPage, pageSize)
                 val processedFiles = processScanResult(result.items)
                 canLoadMore = processedFiles.size < result.total_items
-                
-                listCache[path] = processedFiles // 캐시에 저장
-                
+                listCache[path] = processedFiles
                 _uiState.update { it.copy(currentFiles = processedFiles, totalItems = result.total_items, isLoading = false) }
             } catch (e: Exception) {
                 _uiState.update { it.copy(errorMessage = "목록 로드 실패: ${e.message}", isLoading = false) }
@@ -140,9 +138,7 @@ class ComicViewModel(
                 val processedFiles = processScanResult(result.items)
                 val newFiles = _uiState.value.currentFiles + processedFiles
                 canLoadMore = newFiles.size < result.total_items
-                
-                listCache[uiState.value.currentPath] = newFiles // 캐시 업데이트
-                
+                listCache[uiState.value.currentPath] = newFiles
                 _uiState.update { it.copy(currentFiles = newFiles, isLoadingMore = false) }
             } catch (e: Exception) {
                 _uiState.update { it.copy(errorMessage = "추가 로드 실패: ${e.message}", isLoadingMore = false) }
@@ -160,9 +156,12 @@ class ComicViewModel(
 
     fun onFileClick(file: NasFile) {
         if (!file.isDirectory) {
+            val episodes = if (_uiState.value.isSeriesView) _uiState.value.seriesEpisodes else _uiState.value.currentFiles
+            val index = episodes.indexOfFirst { it.path == file.path }
             _uiState.update { it.copy(
                 selectedZipPath = file.path, 
-                viewerPosterUrl = file.metadata?.posterUrl ?: it.selectedMetadata?.posterUrl
+                viewerPosterUrl = file.metadata?.posterUrl ?: it.selectedMetadata?.posterUrl,
+                currentChapterIndex = index
             ) }
             return
         }
@@ -170,23 +169,52 @@ class ComicViewModel(
         viewModelScope.launch {
             _uiState.update { it.copy(isLoading = true) }
             try {
+                // 메타데이터 시도
                 val metadata = nasRepository.getMetadata(file.path)
-                if (metadata != null && (metadata.chapters?.isNotEmpty() == true || metadata.summary != "줄거리 정보가 없습니다.")) {
+                
+                // 실제 폴더 내용도 확인 (메타데이터가 없거나 에피소드가 없을 경우 대비)
+                val result = nasRepository.scanComicFolders(file.path, 1, 100)
+                val processedFiles = processScanResult(result.items)
+                
+                // 폴더 안에 파일(에피소드)이 하나라도 있으면 상세페이지 디자인으로 표시
+                val hasEpisodes = processedFiles.any { !it.isDirectory }
+                
+                if (hasEpisodes) {
                     _uiState.update { it.copy(
                         isSeriesView = true,
-                        selectedMetadata = metadata,
-                        seriesEpisodes = metadata.chapters ?: emptyList(),
+                        selectedMetadata = metadata ?: ComicMetadata(title = file.name, summary = "정보를 불러올 수 없습니다."),
+                        seriesEpisodes = if (metadata?.chapters?.isNotEmpty() == true) metadata.chapters!! else processedFiles.filter { !it.isDirectory },
                         isLoading = false,
-                        // 시리즈 뷰 진입 시 히스토리에는 추가하지만 목록은 유지함 (뒤로가기 시 즉시 복구 위해)
                         pathHistory = it.pathHistory + file.path
                     ) }
                 } else {
+                    // 폴더만 있는 경우 일반 카테고리 스캔으로 진행
                     scanBooks(file.path)
                 }
             } catch (e: Exception) {
+                // 실패시 일반 스캔으로 폴백
                 scanBooks(file.path)
             }
         }
+    }
+
+    fun navigateChapter(next: Boolean) {
+        val episodes = if (_uiState.value.isSeriesView) _uiState.value.seriesEpisodes else _uiState.value.currentFiles
+        val currentIndex = _uiState.value.currentChapterIndex
+        val nextIndex = if (next) currentIndex + 1 else currentIndex - 1
+        
+        if (nextIndex in episodes.indices) {
+            val nextFile = episodes[nextIndex]
+            _uiState.update { it.copy(
+                selectedZipPath = nextFile.path,
+                viewerPosterUrl = nextFile.metadata?.posterUrl ?: it.selectedMetadata?.posterUrl,
+                currentChapterIndex = nextIndex
+            ) }
+        }
+    }
+
+    fun saveReadingPosition(path: String, position: Int) {
+        _uiState.update { it.copy(readingPositions = it.readingPositions + (path to position)) }
     }
 
     fun onHome() {
@@ -231,7 +259,7 @@ class ComicViewModel(
     }
 
     fun closeViewer() { 
-        _uiState.update { it.copy(selectedZipPath = null, viewerPosterUrl = null) } 
+        _uiState.update { it.copy(selectedZipPath = null, viewerPosterUrl = null, currentChapterIndex = -1) } 
     }
 
     fun onBack() {
@@ -248,7 +276,6 @@ class ComicViewModel(
         if (history.size > 1) {
             val currentIsSeries = _uiState.value.isSeriesView
             if (currentIsSeries) {
-                // 시리즈 뷰에서 뒤로갈 때는 목록 캐시를 확인하여 즉시 복구
                 val parentPath = history[history.size - 2]
                 if (listCache.containsKey(parentPath)) {
                     _uiState.update { it.copy(
@@ -261,7 +288,6 @@ class ComicViewModel(
                     return
                 }
             }
-            
             val prevPath = history[history.size - 2]
             scanBooks(prevPath, isBack = true)
         } else {
