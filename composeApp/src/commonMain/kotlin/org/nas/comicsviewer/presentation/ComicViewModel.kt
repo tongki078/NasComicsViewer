@@ -15,6 +15,7 @@ data class ComicBrowserUiState(
     val categories: List<NasFile> = emptyList(),
     val selectedCategoryIndex: Int = 0,
     val currentFiles: List<NasFile> = emptyList(),
+    val recentComics: List<NasFile> = emptyList(),
     val isLoading: Boolean = false,
     val isLoadingMore: Boolean = false,
     val errorMessage: String? = null,
@@ -64,6 +65,7 @@ class ComicViewModel(
 
     init {
         loadRecentSearches()
+        loadRecentComics()
         checkServerAndLoadCategories()
     }
 
@@ -72,7 +74,6 @@ class ComicViewModel(
             _uiState.update { it.copy(isLoading = true, isIntroShowing = true) }
             try {
                 if (_uiState.value.isWebtoonMode) {
-                    // 웹툰 모드에서는 초성 카테고리 탭 없이 바로 전체 리스트를 보여줍니다.
                     _uiState.update { it.copy(categories = emptyList(), isLoading = false, isIntroShowing = false) }
                     scanBooks("")
                 } else {
@@ -190,6 +191,11 @@ class ComicViewModel(
     }
 
     fun onFileClick(file: NasFile) {
+        viewModelScope.launch {
+            posterRepository.addToRecent(file)
+            loadRecentComics()
+        }
+
         if (!file.isDirectory || _uiState.value.isSeriesView) {
             val episodes = if (_uiState.value.isSearchMode && _uiState.value.searchResults.isNotEmpty()) _uiState.value.searchResults else if (_uiState.value.isSeriesView) _uiState.value.seriesEpisodes else _uiState.value.currentFiles
             val index = episodes.indexOfFirst { it.path == file.path }
@@ -204,7 +210,6 @@ class ComicViewModel(
         viewModelScope.launch {
             _uiState.update { it.copy(isLoading = true) }
             try {
-                // 검색 모드에서 폴더 클릭 시 검색 모드 해제 (원활한 화면 전환을 위해)
                 val wasSearchMode = _uiState.value.isSearchMode
                 if (wasSearchMode) {
                     _uiState.update { it.copy(isSearchMode = false) }
@@ -214,7 +219,6 @@ class ComicViewModel(
                 val result = nasRepository.scanComicFolders(file.path, 1, 100)
                 val processedFiles = processScanResult(result.items)
                 
-                // 에피소드가 있거나, 파일인 경우 상세 페이지로 진입
                 val hasEpisodes = processedFiles.any { !it.isDirectory || it.path.lowercase().let { p -> p.endsWith(".zip") || p.endsWith(".cbz") || p.endsWith(".pdf") } }
                 
                 if (hasEpisodes) {
@@ -309,6 +313,15 @@ class ComicViewModel(
             try {
                 posterRepository.clearRecentSearches()
                 _uiState.update { it.copy(recentSearches = emptyList()) }
+            } catch (e: Exception) { }
+        }
+    }
+
+    fun loadRecentComics() {
+        viewModelScope.launch {
+            try {
+                val recent = posterRepository.getRecentComics()
+                _uiState.update { it.copy(recentComics = recent) }
             } catch (e: Exception) { }
         }
     }
