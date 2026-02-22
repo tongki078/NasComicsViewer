@@ -33,7 +33,8 @@ data class ComicBrowserUiState(
     val searchResults: List<NasFile> = emptyList(),
     val recentSearches: List<String> = emptyList(),
     val readingPositions: Map<String, Int> = emptyMap(),
-    val isSearchExecuted: Boolean = false
+    val isSearchExecuted: Boolean = false,
+    val isWebtoonMode: Boolean = false
 )
 
 class ComicViewModel(
@@ -74,11 +75,40 @@ class ComicViewModel(
                 _uiState.update { it.copy(categories = categories, isLoading = false, isIntroShowing = false) }
                 if (categories.isNotEmpty()) {
                     scanBooks(categories[0].path, 0)
+                } else if (_uiState.value.isWebtoonMode) {
+                    // 웹툰 모드일 때 빈 경로(루트)를 호출하여 초성 카테고리 목록을 가져오도록 처리
+                    scanBooks("", 0)
                 }
             } catch (e: Exception) {
                 _uiState.update { it.copy(errorMessage = "서버 연결 실패: ${e.message}", isLoading = false) }
             }
         }
+    }
+    
+    fun toggleServerMode() {
+        val newMode = !_uiState.value.isWebtoonMode
+        _uiState.update { it.copy(isWebtoonMode = newMode) }
+        
+        nasRepository.switchServer(newMode)
+        posterRepository.switchServer(newMode)
+        
+        listCache.clear()
+        
+        _uiState.update {
+            it.copy(
+                categories = emptyList(),
+                currentFiles = emptyList(),
+                pathHistory = emptyList(),
+                currentPath = "",
+                selectedCategoryIndex = 0,
+                isSeriesView = false,
+                selectedMetadata = null,
+                seriesEpisodes = emptyList(),
+                selectedZipPath = null
+            )
+        }
+        
+        checkServerAndLoadCategories()
     }
 
     fun scanBooks(path: String, index: Int? = null, isBack: Boolean = false) {
@@ -119,11 +149,17 @@ class ComicViewModel(
 
         scanJob = viewModelScope.launch {
             try {
-                val result = nasRepository.scanComicFolders(path, currentPage, pageSize)
-                val processedFiles = processScanResult(result.items)
-                canLoadMore = processedFiles.size < result.total_items
-                listCache[path] = processedFiles
-                _uiState.update { it.copy(currentFiles = processedFiles, totalItems = result.total_items, isLoading = false) }
+                if (_uiState.value.isWebtoonMode && path.isEmpty()) {
+                    val result = nasRepository.listFiles("")
+                    listCache[path] = result
+                    _uiState.update { it.copy(currentFiles = result, totalItems = result.size, isLoading = false) }
+                } else {
+                    val result = nasRepository.scanComicFolders(path, currentPage, pageSize)
+                    val processedFiles = processScanResult(result.items)
+                    canLoadMore = processedFiles.size < result.total_items
+                    listCache[path] = processedFiles
+                    _uiState.update { it.copy(currentFiles = processedFiles, totalItems = result.total_items, isLoading = false) }
+                }
             } catch (e: Exception) {
                 _uiState.update { it.copy(errorMessage = "목록 로드 실패: ${e.message}", isLoading = false) }
             }
@@ -132,6 +168,8 @@ class ComicViewModel(
 
     fun loadMoreBooks() {
         if (uiState.value.isLoading || uiState.value.isLoadingMore || !canLoadMore) return
+        if (uiState.value.isWebtoonMode && uiState.value.currentPath.isEmpty()) return
+        
         viewModelScope.launch {
             _uiState.update { it.copy(isLoadingMore = true) }
             try {
@@ -221,7 +259,11 @@ class ComicViewModel(
     }
 
     fun onHome() {
-        if (uiState.value.categories.isNotEmpty()) scanBooks(uiState.value.categories[0].path, 0)
+        if (_uiState.value.isWebtoonMode) {
+            scanBooks("", 0)
+        } else if (uiState.value.categories.isNotEmpty()) {
+            scanBooks(uiState.value.categories[0].path, 0)
+        }
     }
 
     fun toggleSearchMode(enabled: Boolean) {

@@ -31,7 +31,7 @@ actual fun providePosterRepository(context: Any?): PosterRepository {
 object IosPosterRepository : PosterRepository {
 
     private val client = HttpClient(Darwin) {}
-    private val baseUrl = "http://192.168.0.2:5555"
+    private var baseUrl = "http://192.168.0.2:5555"
     private val RECENT_SEARCHES_KEY = "recent_queries"
 
     private val memoryCache = mutableMapOf<String, ImageBitmap>()
@@ -42,6 +42,10 @@ object IosPosterRepository : PosterRepository {
             NSFileManager.defaultManager.createDirectoryAtPath(posterCacheDir, true, null, null)
         }
         posterCacheDir
+    }
+
+    override fun switchServer(isWebtoon: Boolean) {
+        baseUrl = if (isWebtoon) "http://192.168.0.2:5556" else "http://192.168.0.2:5555"
     }
 
     override suspend fun getImage(url: String): ImageBitmap? = withContext(Dispatchers.Default) {

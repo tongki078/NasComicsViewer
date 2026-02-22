@@ -13,12 +13,16 @@ import kotlinx.serialization.json.Json
 actual fun provideNasRepository(): NasRepository = IosNasRepository
 
 object IosNasRepository : NasRepository {
-    private val baseUrl = "http://192.168.0.2:5555"
+    private var baseUrl = "http://192.168.0.2:5555"
 
     private val client = HttpClient(Darwin) {
         install(ContentNegotiation) {
             json(Json { isLenient = true; ignoreUnknownKeys = true })
         }
+    }
+
+    override fun switchServer(isWebtoon: Boolean) {
+        baseUrl = if (isWebtoon) "http://192.168.0.2:5556" else "http://192.168.0.2:5555"
     }
 
     override suspend fun listFiles(path: String): List<NasFile> = withContext(Dispatchers.Default) {

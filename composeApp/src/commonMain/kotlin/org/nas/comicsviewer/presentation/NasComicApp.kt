@@ -100,12 +100,19 @@ fun NasComicApp(viewModel: ComicViewModel) {
                 SeriesDetailScreen(uiState, { viewModel.onFileClick(it) }, { viewModel.onBack() }, viewModel.posterRepository)
             } else {
                 Column(Modifier.fillMaxSize()) {
-                    TopBar(onHomeClick = { viewModel.onHome() }, onSearchClick = { viewModel.toggleSearchMode(true) })
-                    if (uiState.categories.isNotEmpty()) {
+                    TopBar(
+                        uiState = uiState,
+                        onHomeClick = { viewModel.onHome() }, 
+                        onSearchClick = { viewModel.toggleSearchMode(true) },
+                        onModeToggle = { viewModel.toggleServerMode() }
+                    )
+                    
+                    if (!uiState.isWebtoonMode && uiState.categories.isNotEmpty()) {
                         CategoryTabs(uiState) { path, index -> viewModel.scanBooks(path, index) }
                     }
+                    
                     Box(Modifier.weight(1f)) {
-                        val isWriterCategory = uiState.categories.getOrNull(uiState.selectedCategoryIndex)?.name == "작가"
+                        val isWriterCategory = !uiState.isWebtoonMode && uiState.categories.getOrNull(uiState.selectedCategoryIndex)?.name == "작가"
                         val isAtRoot = uiState.pathHistory.size <= 1
 
                         if (isWriterCategory && isAtRoot) {
@@ -114,18 +121,26 @@ fun NasComicApp(viewModel: ComicViewModel) {
                                 isLoading = uiState.isLoading,
                                 onFileClick = { viewModel.onFileClick(it) }
                             )
+                        } else if (uiState.isWebtoonMode && isAtRoot) {
+                            // 웹툰 루트(초성 목록)는 리스트 형태로 노출
+                            FolderListView(
+                                files = uiState.currentFiles,
+                                isLoading = uiState.isLoading,
+                                onFileClick = { viewModel.onFileClick(it) },
+                                isWebtoonRoot = true
+                            )
                         } else {
                             Column {
-                                if (isWriterCategory && !isAtRoot) {
+                                if ((isWriterCategory || uiState.isWebtoonMode) && !isAtRoot) {
                                     Row(
                                         Modifier.fillMaxWidth().clickable { viewModel.onBack() }.padding(horizontal = 16.dp, vertical = 12.dp),
                                         verticalAlignment = Alignment.CenterVertically
                                     ) {
                                         Icon(Icons.AutoMirrored.Filled.ArrowBack, null, tint = KakaoYellow, modifier = Modifier.size(18.dp))
                                         Spacer(Modifier.width(12.dp))
-                                        Text("작가 목록으로 돌아가기", color = KakaoYellow, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                                        Text(if (uiState.isWebtoonMode) "전체 목록으로 돌아가기" else "작가 목록으로 돌아가기", color = KakaoYellow, fontSize = 14.sp, fontWeight = FontWeight.Bold)
                                     }
-                                    Divider(color = SurfaceGrey, thickness = 0.5.dp)
+                                    HorizontalDivider(color = SurfaceGrey, thickness = 0.5.dp)
                                 }
                                 FolderGridView(
                                     files = uiState.currentFiles,
@@ -154,7 +169,8 @@ fun NasComicApp(viewModel: ComicViewModel) {
 fun FolderListView(
     files: List<NasFile>,
     isLoading: Boolean,
-    onFileClick: (NasFile) -> Unit
+    onFileClick: (NasFile) -> Unit,
+    isWebtoonRoot: Boolean = false
 ) {
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 20.dp)) {
         if (isLoading && files.isEmpty()) {
@@ -169,12 +185,13 @@ fun FolderListView(
                         .padding(horizontal = 20.dp, vertical = 16.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Icon(Icons.Default.Person, null, tint = TextMuted, modifier = Modifier.size(24.dp))
+                    val icon = if (isWebtoonRoot) Icons.AutoMirrored.Filled.List else Icons.Default.Person
+                    Icon(icon, null, tint = TextMuted, modifier = Modifier.size(24.dp))
                     Spacer(Modifier.width(16.dp))
                     Text(file.name, color = TextPureWhite, fontSize = 15.sp, fontWeight = FontWeight.Medium, modifier = Modifier.weight(1f))
                     Icon(Icons.AutoMirrored.Filled.ArrowForward, null, tint = TextMuted.copy(0.3f), modifier = Modifier.size(16.dp))
                 }
-                Divider(Modifier.padding(horizontal = 20.dp), color = SurfaceGrey, thickness = 0.5.dp)
+                HorizontalDivider(Modifier.padding(horizontal = 20.dp), color = SurfaceGrey, thickness = 0.5.dp)
             }
         }
     }
@@ -263,6 +280,7 @@ fun ComicCard(file: NasFile, repo: PosterRepository, showCategoryBadge: Boolean 
                 }
             }
 
+            // 웹툰/만화 시리즈 폴더(폴더인데 안에 압축파일들이 들어있는 경우) 뱃지
             if (file.isDirectory) {
                 Box(Modifier.align(Alignment.BottomStart).padding(4.dp).background(Color.Black.copy(0.6f), RoundedCornerShape(2.dp)).padding(horizontal = 4.dp, vertical = 1.dp)) {
                     Text("SERIES", color = KakaoYellow, fontSize = 7.sp, fontWeight = FontWeight.Black)
@@ -614,7 +632,7 @@ fun WebtoonViewer(
             ) {
                 Column {
                     Text("에피소드", Modifier.padding(16.dp), color = Color.White, fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                    Divider(color = Color.White.copy(0.1f))
+                    HorizontalDivider(color = Color.White.copy(0.1f))
                     val episodes = if (uiState.isSearchMode && uiState.searchResults.isNotEmpty()) uiState.searchResults else if (uiState.isSeriesView) uiState.seriesEpisodes else uiState.currentFiles
                     LazyColumn {
                         itemsIndexed(episodes) { idx, file ->
@@ -636,7 +654,7 @@ fun WebtoonViewer(
                                 )
                                 if (isSelected) Icon(Icons.Default.Check, null, tint = KakaoYellow, modifier = Modifier.size(14.dp))
                             }
-                            Divider(color = Color.White.copy(0.05f))
+                            HorizontalDivider(color = Color.White.copy(0.05f))
                         }
                     }
                 }
@@ -741,7 +759,7 @@ fun SearchScreen(state: ComicBrowserUiState, onQueryChange: (String) -> Unit, on
                             Text(history, color = TextPureWhite, fontSize = 14.sp, modifier = Modifier.weight(1f))
                             Icon(Icons.AutoMirrored.Filled.ArrowForward, null, tint = TextMuted, modifier = Modifier.size(16.dp).alpha(0.5f))
                         }
-                        Divider(color = SurfaceGrey, thickness = 0.5.dp)
+                        HorizontalDivider(color = SurfaceGrey, thickness = 0.5.dp)
                     }
                 }
             }
@@ -761,11 +779,44 @@ fun SearchScreen(state: ComicBrowserUiState, onQueryChange: (String) -> Unit, on
 }
 
 @Composable
-fun TopBar(onHomeClick: () -> Unit, onSearchClick: () -> Unit) {
+fun TopBar(uiState: ComicBrowserUiState, onHomeClick: () -> Unit, onSearchClick: () -> Unit, onModeToggle: () -> Unit) {
     Row(Modifier.fillMaxWidth().statusBarsPadding().padding(horizontal = 20.dp, vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) {
         Icon(Icons.Default.Home, null, tint = TextPureWhite, modifier = Modifier.size(28.dp).clickable(onClick = onHomeClick))
-        Spacer(Modifier.width(16.dp)); Text("NAS WEBTOON", style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Black, letterSpacing = (-0.5).sp), color = TextPureWhite)
-        Spacer(Modifier.weight(1f)); Icon(Icons.Default.Search, null, tint = TextPureWhite, modifier = Modifier.size(28.dp).clickable(onClick = onSearchClick))
+        Spacer(Modifier.width(16.dp))
+        
+        val titleText = if (uiState.isWebtoonMode) "NAS WEBTOON" else "NAS MANGA"
+        Text(titleText, style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Black, letterSpacing = (-0.5).sp), color = TextPureWhite)
+        
+        Spacer(Modifier.weight(1f))
+        
+        // 만화/웹툰 전환 버튼
+        Surface(
+            modifier = Modifier.clickable(onClick = onModeToggle),
+            color = if (uiState.isWebtoonMode) Color(0xFFE91E63) else KakaoYellow,
+            shape = RoundedCornerShape(12.dp)
+        ) {
+            Row(
+                Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Menu, // Replace with appropriate icon if you want
+                    contentDescription = "Switch Mode",
+                    tint = if (uiState.isWebtoonMode) Color.White else Color.Black,
+                    modifier = Modifier.size(16.dp)
+                )
+                Spacer(Modifier.width(4.dp))
+                Text(
+                    text = if (uiState.isWebtoonMode) "웹툰 모드" else "만화 모드",
+                    color = if (uiState.isWebtoonMode) Color.White else Color.Black,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 11.sp
+                )
+            }
+        }
+        
+        Spacer(Modifier.width(16.dp))
+        Icon(Icons.Default.Search, null, tint = TextPureWhite, modifier = Modifier.size(28.dp).clickable(onClick = onSearchClick))
     }
 }
 
@@ -785,7 +836,7 @@ fun IntroScreen() {
     Box(Modifier.fillMaxSize().background(BgBlack), contentAlignment = Alignment.Center) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             Box(Modifier.size(80.dp).border(2.dp, TextPureWhite, RoundedCornerShape(12.dp)), contentAlignment = Alignment.Center) { Box(Modifier.size(30.dp).background(KakaoYellow, RoundedCornerShape(2.dp))) }
-            Spacer(Modifier.height(24.dp)); Text("NAS WEBTOON", style = MaterialTheme.typography.headlineSmall.copy(fontWeight = FontWeight.Black, letterSpacing = 2.sp), color = TextPureWhite)
+            Spacer(Modifier.height(24.dp)); Text("NAS VIEWER", style = MaterialTheme.typography.headlineSmall.copy(fontWeight = FontWeight.Black, letterSpacing = 2.sp), color = TextPureWhite)
             Spacer(Modifier.height(48.dp)); LinearProgressIndicator(Modifier.width(120.dp).height(2.dp), color = KakaoYellow, trackColor = Color.White.copy(alpha = 0.1f))
         }
     }

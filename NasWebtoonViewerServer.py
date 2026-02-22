@@ -1,0 +1,492 @@
+from flask import Flask, jsonify, send_from_directory, request, send_file, Response, render_template_string, stream_with_context, redirect
+import os, urllib.parse, unicodedata, logging, time, zipfile, io, sys, sqlite3, json, threading, hashlib, yaml, queue
+from concurrent.futures import ThreadPoolExecutor
+
+# [로그 설정]
+logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s [%(name)s] %(message)s', stream=sys.stdout)
+logger = logging.getLogger("NasWebtoonServer")
+
+app = Flask(__name__)
+
+# --- 설정 ---
+# 웹툰 경로와 완전히 분리된 독립적인 DB를 사용합니다.
+BASE_PATH = "/volume2/video/GDS3/GDRIVE/READING/웹툰"
+METADATA_DB_PATH = '/volume2/video/NasWebtoonViewer.db'
+
+# 웹툰은 하위 카테고리 없이 직접 자음 폴더를 스캔합니다.
+ALLOWED_CATEGORIES = ["가", "나", "다", "라", "마", "바", "사", "아", "자", "차", "카", "타", "파", "하", "기타", "0Z", "A-Z"]
+FLATTEN_CATEGORIES = [] # 평탄화 불필요
+
+db_queue = queue.Queue()
+scanning_pool = ThreadPoolExecutor(max_workers=10)
+
+def normalize_nfc(s):
+    if s is None: return ""
+    return unicodedata.normalize('NFC', str(s))
+
+def get_path_hash(path):
+    p = os.path.abspath(path).replace(os.sep, '/')
+    return hashlib.md5(normalize_nfc(p).encode('utf-8')).hexdigest()
+
+def get_depth(rel_path):
+    if not rel_path or rel_path == ".": return 0
+    return len(rel_path.strip('/').split('/'))
+
+# --- DB 엔진 ---
+def db_writer_worker():
+    conn = sqlite3.connect(METADATA_DB_PATH, timeout=60)
+    conn.execute('PRAGMA journal_mode=WAL;')
+    conn.execute('PRAGMA synchronous=NORMAL;')
+    while True:
+        items = db_queue.get()
+        if items is None: break
+        try:
+            conn.executemany('INSERT OR REPLACE INTO entries VALUES (?,?,?,?,?,?,?,?,?,?,?)', items)
+            conn.commit()
+        except Exception as e: logger.error("DB Write Error: " + str(e))
+        finally: db_queue.task_done()
+
+threading.Thread(target=db_writer_worker, daemon=True).start()
+
+def init_db():
+    conn = sqlite3.connect(METADATA_DB_PATH)
+    with conn:
+        conn.execute('''CREATE TABLE IF NOT EXISTS entries (
+            path_hash TEXT PRIMARY KEY, parent_hash TEXT, abs_path TEXT,
+            rel_path TEXT, name TEXT, is_dir INTEGER,
+            poster_url TEXT, title TEXT, depth INTEGER, last_scanned REAL,
+            metadata TEXT
+        )''')
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_parent ON entries(parent_hash)')
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_title ON entries(title)')
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_rel ON entries(rel_path)')
+    conn.close()
+
+# --- 정보 추출 엔진 ---
+def is_comic_file(name):
+    return name.lower().endswith(('.zip', '.cbz', '.rar', '.cbr', '.pdf'))
+
+def is_image_file(name):
+    return name.lower().endswith(('.jpg', '.jpeg', '.png', '.webp', '.gif'))
+
+def get_comic_info(abs_path, rel_path):
+    title = normalize_nfc(os.path.basename(abs_path))
+    poster = None
+    meta_dict = {"summary": "줄거리 정보가 없습니다.", "writers": [], "genres": [], "status": "Unknown", "publisher": ""}
+
+    if os.path.isdir(abs_path):
+        yaml_path = os.path.join(abs_path, "kavita.yaml")
+        if os.path.exists(yaml_path):
+            try:
+                with open(yaml_path, 'r', encoding='utf-8') as f:
+                    data = yaml.safe_load(f)
+                    if data:
+                        if 'poster' in data: poster = (rel_path + "/" + data['poster']).replace("//", "/")
+                        meta_dict['summary'] = data.get('summary', meta_dict['summary'])
+                        meta_dict['writers'] = data.get('writers', []) if isinstance(data.get('writers'), list) else [data.get('writers')] if data.get('writers') else []
+                        meta_dict['genres'] = data.get('genres', []) if isinstance(data.get('genres'), list) else [data.get('genres')] if data.get('genres') else []
+                        meta_dict['status'] = data.get('status', 'Unknown')
+                        meta_dict['publisher'] = data.get('publisher', '')
+            except: pass
+        if not poster:
+            try:
+                with os.scandir(abs_path) as it:
+                    ents = sorted(list(it), key=lambda x: x.name)
+                    for e in ents:
+                        if is_image_file(e.name): poster = (rel_path + "/" + e.name).replace("//", "/"); break
+                    if not poster:
+                        for e in ents:
+                            if is_comic_file(e.name): poster = "zip_thumb://" + (rel_path + "/" + e.name).replace("//", "/"); break
+            except: pass
+    else:
+        poster = "zip_thumb://" + rel_path
+        title = os.path.splitext(title)[0]
+
+    if poster:
+        if poster.startswith("zip_thumb://"): poster = "zip_thumb://" + urllib.parse.quote(poster[12:])
+        else: poster = urllib.parse.quote(poster)
+    return title, poster, json.dumps(meta_dict, ensure_ascii=False)
+
+def scan_folder_sync(abs_path, recursive_depth=0):
+    abs_path = os.path.abspath(abs_path).replace(os.sep, '/')
+    root = os.path.abspath(BASE_PATH).replace(os.sep, '/')
+    rel_from_root = os.path.relpath(abs_path, BASE_PATH).replace(os.sep, '/')
+
+    if abs_path != root:
+        p_abs = os.path.dirname(abs_path)
+        p_hash = get_path_hash(p_abs)
+        title, poster, meta_json = get_comic_info(abs_path, rel_from_root)
+        folder_item = (get_path_hash(abs_path), p_hash, abs_path, rel_from_root, os.path.basename(abs_path), 1 if os.path.isdir(abs_path) else 0, poster, title, get_depth(rel_from_root), time.time(), meta_json)
+
+        conn = sqlite3.connect(METADATA_DB_PATH)
+        conn.execute('INSERT OR REPLACE INTO entries VALUES (?,?,?,?,?,?,?,?,?,?,?)', folder_item)
+        conn.commit()
+        conn.close()
+
+    items = []
+    try:
+        phash = get_path_hash(abs_path)
+        with os.scandir(abs_path) as it:
+            for e in it:
+                if e.is_dir() or is_comic_file(e.name):
+                    e_abs = os.path.abspath(e.path).replace(os.sep, '/')
+                    rel = os.path.relpath(e_abs, root).replace(os.sep, '/')
+                    title, poster, meta_json = get_comic_info(e_abs, rel)
+                    items.append((get_path_hash(e_abs), phash, e_abs, rel, normalize_nfc(e.name), 1 if e.is_dir() else 0, poster, title, get_depth(rel), time.time(), meta_json))
+        if items:
+            conn = sqlite3.connect(METADATA_DB_PATH)
+            conn.executemany('INSERT OR REPLACE INTO entries VALUES (?,?,?,?,?,?,?,?,?,?,?)', items)
+            conn.commit()
+            conn.close()
+            if recursive_depth > 0:
+                for item in items:
+                    if item[5] == 1: scan_folder_sync(item[2], recursive_depth - 1)
+    except: pass
+    return items
+
+@app.route('/categories')
+def get_categories():
+    # 웹툰용 서버에서는 카테고리(초성) 목록을 제공하되, isDirectory를 True로, path를 카테고리명으로 줍니다.
+    # 앱에서 이 정보를 바탕으로 /scan?path=가 등으로 요청하게 됩니다.
+    return jsonify([{'name': cat, 'path': cat, 'isDirectory': True} for cat in ALLOWED_CATEGORIES])
+
+# --- API ---
+@app.route('/metadata/admin')
+def metadata_admin():
+    target_path = request.args.get('path', '가')
+    html = """
+    <!DOCTYPE html><html><head><meta charset="utf-8"><title>🛠️ 메타데이터 실시간 업데이트</title><style>
+        body { font-family: 'Malgun Gothic', 'Apple SD Gothic Neo', sans-serif; background: #f0f2f5; color: #333; padding: 40px; }
+        .container { max-width: 1000px; margin: auto; background: white; padding: 40px; border-radius: 15px; box-shadow: 0 10px 30px rgba(0,0,0,0.1); }
+        h2 { border-bottom: 3px solid #eee; padding-bottom: 20px; margin-top: 0; color: #2c3e50; }
+        .desc { color: #7f8c8d; font-size: 15px; margin-bottom: 25px; line-height: 1.6; }
+        .form-group { display: flex; gap: 15px; margin-bottom: 35px; }
+        input { flex: 1; padding: 15px; border: 2px solid #ddd; border-radius: 8px; font-size: 16px; outline: none; transition: border-color 0.3s; }
+        input:focus { border-color: #3498db; }
+        button { padding: 15px 30px; background: #2c3e50; color: white; border: none; border-radius: 8px; font-weight: bold; cursor: pointer; font-size: 16px; transition: background 0.3s; }
+        button:hover { background: #1a252f; }
+        .progress-container { display: none; background: #fff; border: 1px solid #eee; padding: 25px; border-radius: 10px; margin-bottom: 30px; }
+        .progress-status { font-weight: bold; margin-bottom: 15px; font-size: 20px; color: #2c3e50; }
+        .progress-bar-bg { width: 100%; height: 30px; background: #ecf0f1; border-radius: 15px; overflow: hidden; margin-bottom: 15px; }
+        .progress-bar-fill { width: 0%; height: 100%; background: #3498db; transition: width 0.4s ease; box-shadow: inset 0 -2px 5px rgba(0,0,0,0.1); }
+        .stats { display: flex; justify-content: space-between; font-size: 16px; margin-bottom: 12px; font-weight: 500; }
+        .console { background: #282c34; color: #abb2bf; padding: 25px; border-radius: 10px; height: 450px; overflow-y: auto; font-family: 'Consolas', 'Monaco', monospace; font-size: 14px; line-height: 1.8; box-shadow: inset 0 2px 10px rgba(0,0,0,0.2); }
+        .log-line { margin-bottom: 6px; border-bottom: 1px solid #3e4451; padding-bottom: 4px; }
+        .success-text { color: #98c379; font-weight: bold; }
+        .fail-text { color: #e06c75; font-weight: bold; }
+        .init-text { color: #61afef; font-weight: bold; }
+    </style></head><body>
+    <div class="container">
+        <h2>🛠️ 메타데이터 실시간 업데이트 (웹툰)</h2>
+        <p class="desc">업데이트할 폴더의 경로를 입력하세요. (예: 가, 나, 다)<br>하위 모든 폴더를 탐색하여 kavita.yaml 및 첫 페이지 썸네일을 업데이트합니다.</p>
+        <div class="form-group">
+            <input type="text" id="pathInput" placeholder="경로 입력 (예: 가)" value=\"""" + target_path + """\">
+            <button id="startBtn" onclick="startUpdate()">업데이트 시작</button>
+        </div>
+        <div id="progressSection" class="progress-container">
+            <div class="progress-status" id="currentTask">준비 중...</div>
+            <div class="progress-bar-bg"><div class="progress-bar-fill" id="progressBar"></div></div>
+            <div class="stats">
+                <span id="counter">0 / 0</span>
+                <span id="percent">0%</span>
+            </div>
+            <div class="stats">
+                <span class="success-text">성공: <span id="successCount">0</span></span>
+                <span class="fail-text">실패: <span id="failCount">0</span></span>
+            </div>
+        </div>
+        <div class="console" id="logConsole"></div>
+    </div>
+    <script>
+        function startUpdate() {
+            const path = document.getElementById('pathInput').value;
+            const cb = document.getElementById('logConsole');
+            const ps = document.getElementById('progressSection');
+            const pb = document.getElementById('progressBar');
+            const btn = document.getElementById('startBtn');
+            btn.disabled = true;
+            cb.innerHTML = '';
+            ps.style.display = 'block';
+            const es = new EventSource('/metadata/scan_stream?path=' + encodeURIComponent(path));
+            let s = 0; let f = 0; let t = 0;
+            es.onmessage = function(e) {
+                const d = JSON.parse(e.data);
+                if (d.type === 'init') {
+                    t = d.total;
+                    document.getElementById('counter').innerText = '0 / ' + t;
+                } else if (d.type === 'log') {
+                    const l = document.createElement('div');
+                    l.className = 'log-line ' + (d.icon==='🚀'?'init-text':'');
+                    l.innerText = d.icon + ' ' + d.msg;
+                    cb.appendChild(l);
+                    cb.scrollTop = cb.scrollHeight;
+                } else if (d.type === 'progress') {
+                    const p = t > 0 ? Math.round((d.current / t) * 100) : 0;
+                    pb.style.width = p + '%';
+                    document.getElementById('percent').innerText = p + '%';
+                    document.getElementById('counter').innerText = d.current + ' / ' + t;
+                    document.getElementById('currentTask').innerText = '처리 중: ' + d.name;
+                    if (d.status === 'success') s++; else f++;
+                    document.getElementById('successCount').innerText = s;
+                    document.getElementById('failCount').innerText = f;
+                    const l = document.createElement('div');
+                    l.className = 'log-line';
+                    l.innerHTML = (d.status==='success'?'<span class="success-text">✅</span>':'<span class="fail-text">❌</span>') + ' [UPDATE] \\'' + d.name + '\\' updated via SCAN';
+                    cb.appendChild(l);
+                    cb.scrollTop = cb.scrollHeight;
+                }
+                if (d.msg && d.msg.indexOf('FINISH') !== -1) {
+                    es.close();
+                    btn.disabled = false;
+                }
+            };
+            es.onerror = function() { es.close(); btn.disabled = false; };
+        }
+    </script></body></html>
+    """
+    return render_template_string(html)
+
+@app.route('/metadata/scan_stream')
+def scan_stream():
+    target_rel = request.args.get('path', '').strip('/')
+    abs_root = os.path.abspath(os.path.join(BASE_PATH, target_rel)).replace(os.sep, '/')
+    def generate():
+        msg_search = "🔎 Searching folders in '" + (target_rel or "Root") + "'..."
+        yield "data: " + json.dumps({'type': 'log', 'msg': msg_search, 'icon': '🔍'}) + "\n\n"
+        targets = []
+        for root, dirs, files in os.walk(abs_root):
+            if any(is_comic_file(f) for f in files):
+                targets.append(root.replace(os.sep, '/'))
+        targets = sorted(list(set(targets)))
+        total = len(targets)
+        msg_init = "🚀 [INIT] Found " + str(total) + " manga items to update."
+        yield "data: " + json.dumps({'type': 'log', 'msg': msg_init, 'icon': '🚀'}) + "\n\n"
+        yield "data: " + json.dumps({'type': 'init', 'total': total}) + "\n\n"
+        for i, t_path in enumerate(targets):
+            try:
+                name = os.path.basename(t_path)
+                scan_folder_sync(t_path, 0)
+                yield "data: " + json.dumps({'type': 'progress', 'current': i+1, 'name': name, 'status': 'success'}) + "\n\n"
+            except:
+                yield "data: " + json.dumps({'type': 'progress', 'current': i+1, 'name': name, 'status': 'fail'}) + "\n\n"
+        yield "data: " + json.dumps({'type': 'log', 'msg': '🏁 [FINISH] Update completed.', 'icon': '🏁'}) + "\n\n"
+    return Response(stream_with_context(generate()), mimetype='text/event-stream')
+
+@app.route('/files')
+def list_files():
+    path = request.args.get('path', '')
+    if not path:
+        return get_categories()
+
+    abs_p = os.path.abspath(os.path.join(BASE_PATH, path)).replace(os.sep, '/')
+    parent_hash = get_path_hash(abs_p)
+    conn = sqlite3.connect(METADATA_DB_PATH)
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute("SELECT * FROM entries WHERE parent_hash = ? ORDER BY name", (parent_hash,)).fetchall()
+    conn.close()
+    if not rows: scan_folder_sync(abs_p, 0); return list_files()
+    return jsonify([{'name': r['name'], 'isDirectory': bool(r['is_dir']), 'path': r['rel_path']} for r in rows])
+
+@app.route('/scan')
+def scan_comics():
+    path = request.args.get('path', '')
+    if not path:
+        # 빈 경로 요청시 카테고리 목록(가, 나, 다)을 반환
+        return get_categories()
+
+    page = request.args.get('page', 1, type=int); psize = request.args.get('page_size', 50, type=int)
+    abs_p = os.path.abspath(os.path.join(BASE_PATH, path)).replace(os.sep, '/')
+
+    parent_hash = get_path_hash(abs_p)
+    conn = sqlite3.connect(METADATA_DB_PATH); conn.row_factory = sqlite3.Row
+
+    # 해당 카테고리 (가, 나, 다 등) 내부의 폴더 목록(작품 목록)을 불러옵니다
+    rows = conn.execute("SELECT * FROM entries WHERE parent_hash = ? ORDER BY name LIMIT ? OFFSET ?", (parent_hash, psize, (page-1)*psize)).fetchall()
+
+    # DB에 없으면 스캔 후 다시 시도
+    if not rows and page == 1:
+        conn.close()
+        scan_folder_sync(abs_p, 0)
+        return scan_comics()
+
+    items = []
+    for r in rows:
+        meta = json.loads(r['metadata'] or '{}')
+        meta['poster_url'] = r['poster_url']
+        meta['title'] = r['title']
+        items.append({'name': r['title'] or r['name'], 'isDirectory': bool(r['is_dir']), 'path': r['rel_path'], 'metadata': meta})
+    conn.close()
+    return jsonify({'total_items': 10000, 'page': page, 'page_size': psize, 'items': items})
+
+@app.route('/search')
+def search_comics():
+    query = request.args.get('query', '').strip()
+    if not query:
+        return jsonify({'total_items': 0, 'page': 1, 'page_size': 50, 'items': []})
+
+    page = request.args.get('page', 1, type=int)
+    psize = request.args.get('page_size', 50, type=int)
+
+    logger.info(f"🔎 SEARCH START: '{query}'")
+
+    conn = sqlite3.connect(METADATA_DB_PATH)
+    conn.row_factory = sqlite3.Row
+
+    q_nfc = unicodedata.normalize('NFC', query)
+    q_nfd = unicodedata.normalize('NFD', query)
+
+    patterns = set([f"%{q_nfc}%", f"%{q_nfd}%", f"%{query}%"])
+
+    where_clauses = []
+    params = []
+    for p in patterns:
+        where_clauses.append("title LIKE ?")
+        params.append(p)
+        where_clauses.append("name LIKE ?")
+        params.append(p)
+
+    where_stmt = " OR ".join(where_clauses)
+
+    sql = f"""
+    SELECT * FROM entries
+    WHERE path_hash IN (
+        SELECT DISTINCT
+            CASE
+                WHEN is_dir = 0 AND depth >= 3 THEN parent_hash
+                ELSE path_hash
+            END
+        FROM entries
+        WHERE ({where_stmt}) AND depth >= 2
+    )
+    ORDER BY last_scanned DESC LIMIT ? OFFSET ?
+    """
+
+    count_sql = f"""
+    SELECT COUNT(DISTINCT
+        CASE
+            WHEN is_dir = 0 AND depth >= 3 THEN parent_hash
+            ELSE path_hash
+        END)
+    FROM entries
+    WHERE ({where_stmt}) AND depth >= 2
+    """
+
+    try:
+        rows = conn.execute(sql, params + [psize, (page-1)*psize]).fetchall()
+        total_row = conn.execute(count_sql, params).fetchone()
+        total = total_row[0] if total_row else 0
+
+        items = []
+        for r in rows:
+            rel_path = r['rel_path']
+            category = rel_path.split('/')[0] if rel_path else "Unknown"
+
+            meta = json.loads(r['metadata'] or '{}')
+            meta['poster_url'] = r['poster_url']
+            meta['title'] = r['title']
+            meta['category'] = category
+
+            items.append({
+                'name': r['title'] or r['name'],
+                'isDirectory': bool(r['is_dir']),
+                'path': r['rel_path'],
+                'metadata': meta
+            })
+
+        logger.info(f"✅ SEARCH FINISH: Found {total} groups")
+        return jsonify({'total_items': total, 'page': page, 'page_size': psize, 'items': items})
+    except Exception as e:
+        logger.error(f"❌ SEARCH ERROR: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+    finally:
+        conn.close()
+
+@app.route('/metadata')
+def get_metadata():
+    path = request.args.get('path') or request.args.get('url')
+    if not path:
+        conn = sqlite3.connect(METADATA_DB_PATH); conn.row_factory = sqlite3.Row
+        rows = conn.execute("SELECT title, rel_path, poster_url FROM entries WHERE is_dir = 1 AND depth = 3 ORDER BY last_scanned DESC LIMIT 100").fetchall()
+        conn.close()
+        html_dashboard = """
+        <html><head><title>Nas Webtoon Dashboard</title><style>
+            body { font-family: sans-serif; background: #111; color: #eee; padding: 20px; }
+            .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 20px; }
+            .card { background: #222; padding: 15px; border-radius: 8px; text-align: center; }
+            img { width: 100%; height: 240px; object-fit: cover; border-radius: 4px; margin-bottom: 8px; }
+            a, button { color: #fff; text-decoration: none; font-size: 13px; display: block; margin-top: 5px; padding: 5px; border-radius: 4px; }
+            .btn-view { background: #3498db; }
+            .btn-update { background: #e67e22; border: none; width: 100%; cursor: pointer; }
+        </style></head><body>
+            <h1>최근 스캔된 웹툰 (100개) | <a href="/metadata/admin" style="display:inline; color:lime;">⚙️ 관리자 모드</a></h1>
+            <div class="grid">
+                {% for r in rows %}
+                <div class="card">
+                    <img src="/download?path={{ r.poster_url }}" onerror="this.src='https://via.placeholder.com/180x240?text=No+Image'">
+                    <div><b>{{ r.title }}</b></div>
+                    <a class="btn-view" href="/metadata?path={{ r.rel_path }}">JSON 정보</a>
+                    <button class="btn-update" onclick="location.href='/metadata/admin?path={{ r.rel_path }}'">🔄 재스캔</button>
+                </div>
+                {% endfor %}
+            </div>
+        </body></html>
+        """
+        return render_template_string(html_dashboard, rows=rows)
+    path = normalize_nfc(path); abs_p = os.path.abspath(os.path.join(BASE_PATH, path)).replace(os.sep, '/')
+    phash = get_path_hash(abs_p); conn = sqlite3.connect(METADATA_DB_PATH); conn.row_factory = sqlite3.Row
+    row = conn.execute("SELECT * FROM entries WHERE path_hash = ?", (phash,)).fetchone()
+    if not row: scan_folder_sync(os.path.dirname(abs_p), 0); row = conn.execute("SELECT * FROM entries WHERE path_hash = ?", (phash,)).fetchone()
+    if not row: conn.close(); return jsonify({"error": "Not found", "path": path}), 404
+    children = conn.execute("SELECT * FROM entries WHERE parent_hash = ? ORDER BY name", (phash,)).fetchall()
+    conn.close()
+    meta = json.loads(row['metadata'] or '{}'); meta['title'] = row['title']; meta['poster_url'] = row['poster_url']; meta['rel_path'] = row['rel_path']
+    meta['chapters'] = [{'name': c['name'], 'path': c['rel_path'], 'isDirectory': bool(c['is_dir']), 'metadata': {'poster_url': c['poster_url'], 'title': c['name']}} for c in children]
+    return jsonify(meta)
+
+@app.route('/zip_entries')
+def zip_entries():
+    path = urllib.parse.unquote(request.args.get('path', ''))
+    abs_p = os.path.join(BASE_PATH, path)
+    if not os.path.isfile(abs_p): return jsonify([])
+    try:
+        with zipfile.ZipFile(abs_p, 'r') as z:
+            imgs = sorted([n for n in z.namelist() if is_image_file(n)])
+            return jsonify(imgs)
+    except: return jsonify([])
+
+@app.route('/download_zip_entry')
+def download_zip_entry():
+    path = urllib.parse.unquote(request.args.get('path', '')); entry = urllib.parse.unquote(request.args.get('entry', ''))
+    abs_p = os.path.join(BASE_PATH, path)
+    if not os.path.isfile(abs_p): return "No Zip", 404
+    try:
+        with zipfile.ZipFile(abs_p, 'r') as z:
+            with z.open(entry) as f: return send_file(io.BytesIO(f.read()), mimetype='image/jpeg')
+    except: return "Error", 500
+
+@app.route('/download')
+def download():
+    p = urllib.parse.unquote(request.args.get('path', ''))
+    if p.startswith("zip_thumb://"):
+        azp = os.path.join(BASE_PATH, p[12:])
+        if os.path.isdir(azp):
+            try:
+                with os.scandir(azp) as it:
+                    for e in it:
+                        if is_comic_file(e.name): azp = e.path; break
+            except: pass
+        try:
+            with zipfile.ZipFile(azp, 'r') as z:
+                imgs = sorted([n for n in z.namelist() if is_image_file(n)])
+                if imgs:
+                    with z.open(imgs[0]) as f: return send_file(io.BytesIO(f.read()), mimetype='image/jpeg')
+        except: pass
+        return "No Image", 404
+    target_path = os.path.join(BASE_PATH, p)
+    return send_from_directory(os.path.dirname(target_path), os.path.basename(target_path))
+
+if __name__ == '__main__':
+    init_db()
+    for cat in ALLOWED_CATEGORIES: scanning_pool.submit(scan_folder_sync, os.path.join(BASE_PATH, cat), 1)
+    # 5556 포트로 실행 (기존 만화는 5555 포트 사용)
+    app.run(host='0.0.0.0', port=5556, threaded=True)

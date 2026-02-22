@@ -28,7 +28,7 @@ class AndroidPosterRepository(private val context: Context) : PosterRepository {
             connectTimeoutMillis = 10000
         }
     }
-    private val baseUrl = "http://192.168.0.2:5555"
+    private var baseUrl = "http://192.168.0.2:5555"
     private val prefs = context.getSharedPreferences("search_prefs", Context.MODE_PRIVATE)
 
     private val memoryCache: LruCache<String, ImageBitmap> = LruCache(40 * 1024 * 1024)
@@ -38,6 +38,10 @@ class AndroidPosterRepository(private val context: Context) : PosterRepository {
         return MessageDigest.getInstance("MD5")
             .digest(this.toByteArray())
             .joinToString("") { "%02x".format(it) }
+    }
+    
+    override fun switchServer(isWebtoon: Boolean) {
+        baseUrl = if (isWebtoon) "http://192.168.0.2:5556" else "http://192.168.0.2:5555"
     }
 
     override suspend fun getImage(url: String): ImageBitmap? = withContext(Dispatchers.IO) {

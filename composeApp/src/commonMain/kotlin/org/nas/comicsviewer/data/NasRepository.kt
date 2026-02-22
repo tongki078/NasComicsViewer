@@ -25,6 +25,7 @@ interface NasRepository {
     suspend fun scanComicFolders(path: String, page: Int, pageSize: Int): ScanResult
     suspend fun searchComics(query: String, page: Int, pageSize: Int): ScanResult
     suspend fun getMetadata(path: String): ComicMetadata?
+    fun switchServer(isWebtoon: Boolean)
 }
 
 expect fun provideNasRepository(): NasRepository

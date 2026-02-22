@@ -14,7 +14,8 @@ import kotlinx.serialization.json.Json
 actual fun provideNasRepository(): NasRepository = AndroidNasRepository.getInstance()
 
 class AndroidNasRepository private constructor() : NasRepository {
-    private val baseUrl = "http://192.168.0.2:5555"
+    private var baseUrl = "http://192.168.0.2:5555"
+    
     private val client = HttpClient(CIO) {
         install(ContentNegotiation) { json(Json { ignoreUnknownKeys = true; isLenient = true }) }
         install(HttpTimeout) { requestTimeoutMillis = 90000 }
@@ -25,6 +26,10 @@ class AndroidNasRepository private constructor() : NasRepository {
         fun getInstance() = instance ?: synchronized(this) { 
             instance ?: AndroidNasRepository().also { instance = it } 
         }
+    }
+    
+    override fun switchServer(isWebtoon: Boolean) {
+        baseUrl = if (isWebtoon) "http://192.168.0.2:5556" else "http://192.168.0.2:5555"
     }
 
     override suspend fun listFiles(path: String): List<NasFile> = withContext(Dispatchers.IO) {

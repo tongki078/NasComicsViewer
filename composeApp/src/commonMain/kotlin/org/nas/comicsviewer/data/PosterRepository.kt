@@ -23,6 +23,7 @@ interface PosterRepository {
     suspend fun insertRecentSearch(query: String)
     suspend fun getRecentSearches(): List<String>
     suspend fun clearRecentSearches()
+    fun switchServer(isWebtoon: Boolean)
 }
 
 // Context를 필요로 하는 Android와 필요 없는 iOS를 모두 지원하기 위해 Any? 타입 사용
