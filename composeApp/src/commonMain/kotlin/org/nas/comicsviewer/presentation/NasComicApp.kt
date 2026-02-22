@@ -107,7 +107,7 @@ fun NasComicApp(viewModel: ComicViewModel) {
                         onModeToggle = { viewModel.toggleServerMode() }
                     )
                     
-                    if (!uiState.isWebtoonMode && uiState.categories.isNotEmpty()) {
+                    if (uiState.categories.isNotEmpty()) {
                         CategoryTabs(uiState) { path, index -> viewModel.scanBooks(path, index) }
                     }
                     
@@ -120,14 +120,6 @@ fun NasComicApp(viewModel: ComicViewModel) {
                                 files = uiState.currentFiles,
                                 isLoading = uiState.isLoading,
                                 onFileClick = { viewModel.onFileClick(it) }
-                            )
-                        } else if (uiState.isWebtoonMode && isAtRoot) {
-                            // 웹툰 루트(초성 목록)는 리스트 형태로 노출
-                            FolderListView(
-                                files = uiState.currentFiles,
-                                isLoading = uiState.isLoading,
-                                onFileClick = { viewModel.onFileClick(it) },
-                                isWebtoonRoot = true
                             )
                         } else {
                             Column {
