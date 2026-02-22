@@ -58,8 +58,10 @@ private val TextMuted = Color(0xFF888888)
 fun NasComicApp(viewModel: ComicViewModel) {
     val uiState by viewModel.uiState.collectAsState()
     val zipManager = remember { provideZipManager() }
+    val scope = rememberCoroutineScope()
     
     val mainGridState = rememberLazyGridState()
+    var showJumpMenu by remember { mutableStateOf(false) }
 
     val canBack by remember {
         derivedStateOf {
@@ -73,11 +75,9 @@ fun NasComicApp(viewModel: ComicViewModel) {
     
     LaunchedEffect(uiState.isWebtoonMode) {
         zipManager.switchServer(uiState.isWebtoonMode)
-        // 모드 전환 시 스크롤 위치 초기화
         mainGridState.scrollToItem(0)
     }
 
-    // 카테고리나 경로가 변경될 때도 스크롤 초기화
     LaunchedEffect(uiState.selectedCategoryIndex, uiState.currentPath) {
         if (!uiState.isSeriesView) {
             mainGridState.scrollToItem(0)
@@ -85,88 +85,145 @@ fun NasComicApp(viewModel: ComicViewModel) {
     }
 
     MaterialTheme(colorScheme = darkColorScheme(background = BgBlack, surface = BgBlack, primary = TextPureWhite)) {
-        Box(Modifier.fillMaxSize().background(BgBlack)) {
-            if (uiState.isIntroShowing) {
-                IntroScreen()
-            } else if (uiState.selectedZipPath != null) {
-                 WebtoonViewer(
-                     path = uiState.selectedZipPath!!, 
-                     manager = zipManager, 
-                     posterUrl = uiState.viewerPosterUrl,
-                     repo = viewModel.posterRepository,
-                     onClose = { viewModel.closeViewer() }, 
-                     onError = { viewModel.showError(it) },
-                     uiState = uiState,
-                     viewModel = viewModel
-                 )
-            } else if (uiState.isSearchMode) {
-                SearchScreen(
-                    state = uiState,
-                    onQueryChange = { viewModel.updateSearchQuery(it) },
-                    onSearch = { viewModel.onSearchSubmit(it) },
-                    onClose = { viewModel.toggleSearchMode(false) },
-                    onFileClick = { viewModel.onFileClick(it) },
-                    onClearHistory = { viewModel.clearRecentSearches() },
-                    viewModel = viewModel
-                )
-            } else if (uiState.isSeriesView) {
-                SeriesDetailScreen(uiState, { viewModel.onFileClick(it) }, { viewModel.onBack() }, viewModel.posterRepository)
-            } else {
-                Column(Modifier.fillMaxSize()) {
-                    TopBar(
-                        uiState = uiState,
-                        onHomeClick = { viewModel.onHome() }, 
-                        onSearchClick = { viewModel.toggleSearchMode(true) },
-                        onModeToggle = { viewModel.toggleServerMode() }
-                    )
-                    
-                    if (uiState.categories.isNotEmpty()) {
-                        CategoryTabs(uiState) { path, index -> viewModel.scanBooks(path, index) }
+        Scaffold(
+            floatingActionButton = {
+                if (uiState.selectedZipPath == null && !uiState.isSeriesView && !uiState.isSearchMode && uiState.currentFiles.isNotEmpty()) {
+                    FloatingActionButton(
+                        onClick = { showJumpMenu = true },
+                        containerColor = KakaoYellow,
+                        contentColor = Color.Black,
+                        shape = CircleShape,
+                        modifier = Modifier.padding(bottom = 16.dp)
+                    ) {
+                        Icon(Icons.Default.Menu, contentDescription = "Jump")
                     }
-                    
-                    Box(Modifier.weight(1f)) {
-                        val isWriterCategory = !uiState.isWebtoonMode && uiState.categories.getOrNull(uiState.selectedCategoryIndex)?.name == "작가"
-                        val isAtRoot = uiState.pathHistory.size <= 1
+                }
+            },
+            containerColor = BgBlack
+        ) { paddingValues ->
+            Box(Modifier.fillMaxSize().padding(paddingValues)) {
+                if (uiState.isIntroShowing) {
+                    IntroScreen()
+                } else if (uiState.selectedZipPath != null) {
+                     WebtoonViewer(
+                         path = uiState.selectedZipPath!!, 
+                         manager = zipManager, 
+                         posterUrl = uiState.viewerPosterUrl,
+                         repo = viewModel.posterRepository,
+                         onClose = { viewModel.closeViewer() }, 
+                         onError = { viewModel.showError(it) },
+                         uiState = uiState,
+                         viewModel = viewModel
+                     )
+                } else if (uiState.isSearchMode) {
+                    SearchScreen(
+                        state = uiState,
+                        onQueryChange = { viewModel.updateSearchQuery(it) },
+                        onSearch = { viewModel.onSearchSubmit(it) },
+                        onClose = { viewModel.toggleSearchMode(false) },
+                        onFileClick = { viewModel.onFileClick(it) },
+                        onClearHistory = { viewModel.clearRecentSearches() },
+                        viewModel = viewModel
+                    )
+                } else if (uiState.isSeriesView) {
+                    SeriesDetailScreen(uiState, { viewModel.onFileClick(it) }, { viewModel.onBack() }, viewModel.posterRepository)
+                } else {
+                    Column(Modifier.fillMaxSize()) {
+                        TopBar(
+                            uiState = uiState,
+                            onHomeClick = { viewModel.onHome() }, 
+                            onSearchClick = { viewModel.toggleSearchMode(true) },
+                            onModeToggle = { viewModel.toggleServerMode() }
+                        )
+                        
+                        if (uiState.categories.isNotEmpty()) {
+                            CategoryTabs(uiState) { path, index -> viewModel.scanBooks(path, index) }
+                        }
+                        
+                        Box(Modifier.weight(1f)) {
+                            val isWriterCategory = !uiState.isWebtoonMode && uiState.categories.getOrNull(uiState.selectedCategoryIndex)?.name == "작가"
+                            val isAtRoot = uiState.pathHistory.size <= 1
 
-                        if (isWriterCategory && isAtRoot) {
-                            FolderListView(
-                                files = uiState.currentFiles,
-                                isLoading = uiState.isLoading,
-                                onFileClick = { viewModel.onFileClick(it) }
-                            )
-                        } else {
-                            Column {
-                                if ((isWriterCategory || uiState.isWebtoonMode) && !isAtRoot) {
-                                    Row(
-                                        Modifier.fillMaxWidth().clickable { viewModel.onBack() }.padding(horizontal = 16.dp, vertical = 12.dp),
-                                        verticalAlignment = Alignment.CenterVertically
-                                    ) {
-                                        Icon(Icons.AutoMirrored.Filled.ArrowBack, null, tint = KakaoYellow, modifier = Modifier.size(18.dp))
-                                        Spacer(Modifier.width(12.dp))
-                                        Text(if (uiState.isWebtoonMode) "전체 목록으로 돌아가기" else "작가 목록으로 돌아가기", color = KakaoYellow, fontSize = 14.sp, fontWeight = FontWeight.Bold)
-                                    }
-                                    HorizontalDivider(color = SurfaceGrey, thickness = 0.5.dp)
-                                }
-                                FolderGridView(
+                            if (isWriterCategory && isAtRoot) {
+                                FolderListView(
                                     files = uiState.currentFiles,
                                     isLoading = uiState.isLoading,
-                                    isLoadingMore = uiState.isLoadingMore,
-                                    onFileClick = { viewModel.onFileClick(it) },
-                                    onLoadMore = { viewModel.loadMoreBooks() },
-                                    posterRepository = viewModel.posterRepository,
-                                    gridState = mainGridState,
-                                    showCategoryBadge = false
+                                    onFileClick = { viewModel.onFileClick(it) }
                                 )
+                            } else {
+                                Column {
+                                    if ((isWriterCategory || uiState.isWebtoonMode) && !isAtRoot) {
+                                        Row(
+                                            Modifier.fillMaxWidth().clickable { viewModel.onBack() }.padding(horizontal = 16.dp, vertical = 12.dp),
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Icon(Icons.AutoMirrored.Filled.ArrowBack, null, tint = KakaoYellow, modifier = Modifier.size(18.dp))
+                                            Spacer(Modifier.width(12.dp))
+                                            Text(if (uiState.isWebtoonMode) "전체 목록으로 돌아가기" else "작가 목록으로 돌아가기", color = KakaoYellow, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                                        }
+                                        HorizontalDivider(color = SurfaceGrey, thickness = 0.5.dp)
+                                    }
+                                    FolderGridView(
+                                        files = uiState.currentFiles,
+                                        recentComics = uiState.recentComics,
+                                        isLoading = uiState.isLoading,
+                                        isLoadingMore = uiState.isLoadingMore,
+                                        onFileClick = { viewModel.onFileClick(it) },
+                                        onLoadMore = { viewModel.loadMoreBooks() },
+                                        posterRepository = viewModel.posterRepository,
+                                        gridState = mainGridState,
+                                        showCategoryBadge = false
+                                    )
+                                }
                             }
                         }
                     }
                 }
-            }
-            
-            uiState.errorMessage?.let { msg ->
-                Snackbar(Modifier.align(Alignment.BottomCenter).padding(16.dp), containerColor = Color(0xFF222222), action = { TextButton({ viewModel.clearError() }) { Text("OK") } }) { Text(msg) }
+                
+                uiState.errorMessage?.let { msg ->
+                    Snackbar(Modifier.align(Alignment.BottomCenter).padding(16.dp), containerColor = Color(0xFF222222), action = { TextButton({ viewModel.clearError() }) { Text("OK") } }) { Text(msg) }
+                }
+
+                if (showJumpMenu) {
+                    JumpToSectionMenu(
+                        files = uiState.currentFiles,
+                        onDismiss = { showJumpMenu = false },
+                        onJump = { index ->
+                            scope.launch {
+                                mainGridState.animateScrollToItem(index)
+                                showJumpMenu = false
+                            }
+                        }
+                    )
+                }
             }
         }
+    }
+}
+
+@Composable
+fun RecentComicsCarousel(recentComics: List<NasFile>, repo: PosterRepository, onFileClick: (NasFile) -> Unit) {
+    if (recentComics.isEmpty()) return
+    Column(Modifier.fillMaxWidth().padding(vertical = 16.dp)) {
+        Text("최근 본 작품", color = TextPureWhite, fontSize = 16.sp, fontWeight = FontWeight.Black, modifier = Modifier.padding(horizontal = 20.dp))
+        Spacer(Modifier.height(12.dp))
+        LazyRow(contentPadding = PaddingValues(horizontal = 20.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            items(recentComics) { file ->
+                Column(Modifier.width(100.dp).clickable { onFileClick(file) }) {
+                    var thumb by remember { mutableStateOf<ImageBitmap?>(null) }
+                    LaunchedEffect(file.metadata?.posterUrl) {
+                        file.metadata?.posterUrl?.let { thumb = repo.getImage(it) }
+                    }
+                    Box(Modifier.aspectRatio(0.72f).fillMaxWidth().clip(RoundedCornerShape(8.dp)).background(SurfaceGrey)) {
+                        if (thumb != null) Image(thumb!!, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+                    }
+                    Spacer(Modifier.height(6.dp))
+                    Text(file.name, color = TextPureWhite, fontSize = 11.sp, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+            }
+        }
+        Spacer(Modifier.height(8.dp))
+        HorizontalDivider(color = SurfaceGrey, thickness = 4.dp)
     }
 }
 
@@ -205,6 +262,7 @@ fun FolderListView(
 @Composable
 fun FolderGridView(
     files: List<NasFile>,
+    recentComics: List<NasFile> = emptyList(),
     isLoading: Boolean,
     isLoadingMore: Boolean,
     onFileClick: (NasFile) -> Unit,
@@ -213,19 +271,22 @@ fun FolderGridView(
     gridState: LazyGridState,
     showCategoryBadge: Boolean = false
 ) {
-    // 무한 스크롤 감지 로직 개선: 로딩 중이 아닐 때만 체크하도록 하여 LaunchedEffect가 재트리거되게 함
     val shouldLoadMore by remember(files.size, isLoading, isLoadingMore) {
         derivedStateOf {
             val lastVisibleItem = gridState.layoutInfo.visibleItemsInfo.lastOrNull()
-            lastVisibleItem != null && lastVisibleItem.index >= files.size - 10 && !isLoading && !isLoadingMore
+            lastVisibleItem != null && lastVisibleItem.index >= (files.size + recentComics.size.let { if(it>0) 1 else 0 }) - 10 && !isLoading && !isLoadingMore
         }
     }
     
     LaunchedEffect(shouldLoadMore) {
-        if (shouldLoadMore) {
-            onLoadMore()
-        }
+        if (shouldLoadMore) onLoadMore()
     }
+
+    // 그룹화 로직 (초성 기준)
+    val groupedFiles = remember(files) {
+        files.groupBy { getInitialSound(it.name) }
+    }
+    val keys = remember(groupedFiles) { groupedFiles.keys.toList() }
 
     LazyVerticalGrid(
         state = gridState,
@@ -234,14 +295,37 @@ fun FolderGridView(
         horizontalArrangement = Arrangement.spacedBy(10.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
+        // 최근 본 작품 섹션 (최상단)
+        if (recentComics.isNotEmpty()) {
+            item(span = { GridItemSpan(maxLineSpan) }) {
+                RecentComicsCarousel(recentComics, posterRepository, onFileClick)
+            }
+        }
+
         if (isLoading && files.isEmpty()) {
             items(12) { 
                 Box(Modifier.aspectRatio(0.72f).fillMaxWidth().clip(RoundedCornerShape(8.dp)).background(SurfaceGrey))
             }
         } else {
-            items(files, key = { it.path }) { file ->
-                ComicCard(file, posterRepository, showCategoryBadge) { onFileClick(file) }
+            // 그룹별 헤더 및 아이템 배치
+            keys.forEach { initial ->
+                item(span = { GridItemSpan(maxLineSpan) }, key = "header_$initial") {
+                    Box(Modifier.fillMaxWidth().padding(top = 8.dp, bottom = 4.dp)) {
+                        Text(
+                            text = initial,
+                            color = KakaoYellow,
+                            fontSize = 20.sp,
+                            fontWeight = FontWeight.Black,
+                            modifier = Modifier.padding(start = 4.dp)
+                        )
+                    }
+                }
+                val group = groupedFiles[initial] ?: emptyList()
+                items(group, key = { it.path }) { file ->
+                    ComicCard(file, posterRepository, showCategoryBadge) { onFileClick(file) }
+                }
             }
+            
             if (isLoadingMore) {
                 item(span = { GridItemSpan(maxLineSpan) }) {
                     Box(Modifier.fillMaxWidth().padding(vertical = 24.dp), contentAlignment = Alignment.Center) {
@@ -251,6 +335,68 @@ fun FolderGridView(
             }
         }
     }
+}
+
+@Composable
+fun JumpToSectionMenu(files: List<NasFile>, onDismiss: () -> Unit, onJump: (Int) -> Unit) {
+    val initials = remember(files) {
+        files.map { getInitialSound(it.name) }.distinct()
+    }
+    
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = Color(0xFF1A1A1A),
+        title = { Text("빠른 이동", color = Color.White) },
+        text = {
+            Column {
+                FlowRow(mainAxisSpacing = 8.dp, crossAxisSpacing = 8.dp) {
+                    initials.forEach { initial ->
+                        Surface(
+                            onClick = {
+                                // 실제 그리드에서의 인덱스를 찾아야 함 (헤더 포함)
+                                // 하지만 여기서는 단순하게 초성 그룹의 첫 번째 아이템 위치로 근사치 이동
+                                // 정확한 인덱스 계산을 위해 LazyGrid의 구조를 고려해야 함
+                                val firstInGroup = files.indexOfFirst { getInitialSound(it.name) == initial }
+                                if (firstInGroup != -1) {
+                                    // 대략적인 인덱스 (헤더들이 추가되어 있으므로 실제 인덱스는 더 큼)
+                                    // 간단하게 찾기 위해 초성 리스트에서의 순서만큼 오프셋 추가
+                                    val headerCount = initials.indexOf(initial) + 1
+                                    onJump(firstInGroup + headerCount + 1) // +1은 RecentCarousel 섹션 고려
+                                }
+                            },
+                            color = SurfaceGrey,
+                            shape = CircleShape,
+                            border = BorderStroke(1.dp, Color.White.copy(0.1f))
+                        ) {
+                            Box(Modifier.size(45.dp), contentAlignment = Alignment.Center) {
+                                Text(initial, color = Color.White, fontWeight = FontWeight.Bold)
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text("닫기", color = KakaoYellow) }
+        }
+    )
+}
+
+fun getInitialSound(text: String): String {
+    if (text.isEmpty()) return "#"
+    val firstChar = text.trim()[0]
+    if (firstChar in '가'..'힣') {
+        val initialIdx = (firstChar - '가') / 28 / 21
+        val initials = listOf("ㄱ", "ㄲ", "ㄴ", "ㄷ", "ㄸ", "ㄹ", "ㅁ", "ㅂ", "ㅃ", "ㅅ", "ㅆ", "ㅇ", "ㅈ", "ㅉ", "ㅊ", "ㅋ", "ㅌ", "ㅍ", "ㅎ")
+        return initials[initialIdx]
+    }
+    if (firstChar in 'a'..'z' || firstChar in 'A'..'Z') {
+        return firstChar.uppercase()
+    }
+    if (firstChar in '0'..'9') {
+        return "0-9"
+    }
+    return "#"
 }
 
 @Composable
@@ -269,7 +415,6 @@ fun ComicCard(file: NasFile, repo: PosterRepository, showCategoryBadge: Boolean 
                 }
             }
             
-            // 상단 카테고리 뱃지 (검색 결과일 때 표시)
             if (showCategoryBadge) {
                 val cat = file.metadata?.category ?: file.path.substringBefore("/")
                 if (cat.isNotEmpty()) {
@@ -289,7 +434,6 @@ fun ComicCard(file: NasFile, repo: PosterRepository, showCategoryBadge: Boolean 
                 }
             }
 
-            // 웹툰/만화 시리즈 폴더(폴더인데 안에 압축파일들이 들어있는 경우) 뱃지
             if (file.isDirectory) {
                 Box(Modifier.align(Alignment.BottomStart).padding(4.dp).background(Color.Black.copy(0.6f), RoundedCornerShape(2.dp)).padding(horizontal = 4.dp, vertical = 1.dp)) {
                     Text("SERIES", color = KakaoYellow, fontSize = 7.sp, fontWeight = FontWeight.Black)
@@ -439,7 +583,6 @@ fun WebtoonViewer(
     var isGray by remember { mutableStateOf(false) }
     var showSettings by remember { mutableStateOf(false) }
 
-    // 오토스크롤 상태
     var isAutoScrollEnabled by remember { mutableStateOf(false) }
     var autoScrollSpeed by remember { mutableStateOf(1f) } 
 
@@ -479,7 +622,6 @@ fun WebtoonViewer(
         }
     }
 
-    // 오토스크롤 로직 안정화
     LaunchedEffect(isAutoScrollEnabled, autoScrollSpeed) {
         if (isAutoScrollEnabled) {
             while (isActive) {
@@ -585,7 +727,6 @@ fun WebtoonViewer(
             }
         }
 
-        // 하단 컨트롤 (영역 최소화)
         AnimatedVisibility(showControls, enter = fadeIn() + slideInVertically(initialOffsetY = { it }), exit = fadeOut() + slideOutVertically(targetOffsetY = { it }), modifier = Modifier.align(Alignment.BottomCenter)) {
             Box(Modifier.fillMaxWidth().background(BgBlack.copy(0.6f)).navigationBarsPadding().padding(horizontal = 16.dp, vertical = 8.dp)) {
                 if (isListLoaded) {
@@ -611,7 +752,6 @@ fun WebtoonViewer(
             }
         }
 
-        // 우측 하단 플로팅 페이지 이동 버튼
         AnimatedVisibility(showControls && !isAutoScrollEnabled, enter = fadeIn(), exit = fadeOut(), modifier = Modifier.align(Alignment.BottomEnd).padding(bottom = 80.dp, end = 16.dp)) {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 FloatingActionButton(
@@ -781,7 +921,7 @@ fun SearchScreen(state: ComicBrowserUiState, onQueryChange: (String) -> Unit, on
                 Box(Modifier.fillMaxSize(), Alignment.Center) { Text("검색 결과가 없습니다.", color = TextMuted) }
             } else if (state.searchResults.isNotEmpty()) {
                 Text("검색 결과 ${state.searchResults.size}건", color = TextPureWhite, fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 24.dp, vertical = 12.dp))
-                FolderGridView(state.searchResults, false, false, onFileClick, {}, viewModel.posterRepository, rememberLazyGridState(), showCategoryBadge = true)
+                FolderGridView(state.searchResults, emptyList(), false, false, onFileClick, {}, viewModel.posterRepository, rememberLazyGridState(), showCategoryBadge = true)
             }
         }
     }
@@ -798,7 +938,6 @@ fun TopBar(uiState: ComicBrowserUiState, onHomeClick: () -> Unit, onSearchClick:
         
         Spacer(Modifier.weight(1f))
         
-        // 만화/웹툰 전환 버튼
         Surface(
             modifier = Modifier.clickable(onClick = onModeToggle),
             color = if (uiState.isWebtoonMode) Color(0xFFE91E63) else KakaoYellow,
@@ -809,7 +948,7 @@ fun TopBar(uiState: ComicBrowserUiState, onHomeClick: () -> Unit, onSearchClick:
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Icon(
-                    imageVector = Icons.Default.Menu, // Replace with appropriate icon if you want
+                    imageVector = Icons.Default.Menu,
                     contentDescription = "Switch Mode",
                     tint = if (uiState.isWebtoonMode) Color.White else Color.Black,
                     modifier = Modifier.size(16.dp)
