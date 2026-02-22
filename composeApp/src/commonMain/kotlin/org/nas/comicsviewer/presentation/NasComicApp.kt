@@ -316,12 +316,14 @@ fun WebtoonViewer(
     val sessionCache = remember { mutableMapOf<String, ImageBitmap>() }
     val scope = rememberCoroutineScope()
 
-    // 전역 줌/오프셋 상태
+    // 권수 리스트 팝업 상태
+    var showEpisodeList by remember { mutableStateOf(false) }
+
+    // 전역 줌/오프셋 상태 (UX 개선 핵심)
     var scale by remember { mutableStateOf(1f) }
     var offset by remember { mutableStateOf(androidx.compose.ui.geometry.Offset.Zero) }
     val transformState = rememberTransformableState { zoomChange, offsetChange, _ ->
         scale = (scale * zoomChange).coerceIn(1f, 4f)
-        // 가로 이동(translationX)을 0으로 고정하여 좌우 흔들림 방지
         offset = androidx.compose.ui.geometry.Offset(0f, offset.y + offsetChange.y)
     }
 
@@ -337,10 +339,13 @@ fun WebtoonViewer(
         val names = manager.listImagesInZip(path)
         if (names.isNotEmpty()) {
             imageNames.clear(); imageNames.addAll(names); isListLoaded = true
+            
+            // 자동 이어보기 (UX 2)
             val lastPos = uiState.readingPositions[path] ?: 0
             if (lastPos > 0) {
                 scope.launch { listState.scrollToItem(lastPos) }
             }
+
             names.take(3).forEach { name ->
                 scope.launch(Dispatchers.Default) {
                     val bytes = manager.extractImage(path, name)
@@ -350,6 +355,7 @@ fun WebtoonViewer(
         } else { onError("이미지 목록을 가져올 수 없습니다.") }
     }
 
+    // 위치 저장
     LaunchedEffect(listState.firstVisibleItemIndex) {
         if (isListLoaded) {
             viewModel.saveReadingPosition(path, listState.firstVisibleItemIndex)
@@ -362,12 +368,13 @@ fun WebtoonViewer(
                 if (posterBitmap != null) Image(posterBitmap!!, null, Modifier.fillMaxSize().blur(40.dp).alpha(0.4f), contentScale = ContentScale.Crop)
             }
         } else {
+            // 전체를 감싸는 변환 레이어 (UX 개선)
             Box(
                 Modifier.fillMaxSize()
                     .graphicsLayer(
                         scaleX = scale,
                         scaleY = scale,
-                        translationX = 0f, // 가로 고정
+                        translationX = 0f,
                         translationY = offset.y
                     )
                     .transformable(state = transformState)
@@ -377,7 +384,10 @@ fun WebtoonViewer(
                     modifier = Modifier.fillMaxSize()
                         .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) { 
                             showControls = !showControls 
-                            if (showControls) showSettings = false
+                            if (showControls) {
+                                showSettings = false
+                                showEpisodeList = false
+                            }
                         }
                 ) {
                     itemsIndexed(imageNames) { index, name ->
@@ -397,6 +407,8 @@ fun WebtoonViewer(
                             }
                         }
                     }
+                    
+                    // 연속 정주행 (UX 1)
                     item {
                         Box(Modifier.fillMaxWidth().padding(40.dp), contentAlignment = Alignment.Center) {
                             Button(
@@ -412,6 +424,7 @@ fun WebtoonViewer(
             }
         }
 
+        // 밝기 필터 (UX 4)
         if (brightness < 1f) {
             Box(Modifier.fillMaxSize().run { 
                 val base = background(Color.Black.copy(alpha = 1f - brightness))
@@ -419,6 +432,7 @@ fun WebtoonViewer(
             })
         }
         
+        // 상단 컨트롤 바
         AnimatedVisibility(showControls, enter = fadeIn() + slideInVertically(), exit = fadeOut() + slideOutVertically()) {
             Box(Modifier.fillMaxWidth().background(BgBlack.copy(0.8f)).statusBarsPadding().padding(vertical = 4.dp, horizontal = 12.dp)) {
                 IconButton(onClick = onClose, modifier = Modifier.align(Alignment.CenterStart).size(36.dp)) {
@@ -427,12 +441,25 @@ fun WebtoonViewer(
                 if (isListLoaded) {
                     Text("${listState.firstVisibleItemIndex + 1} / ${imageNames.size}", Modifier.align(Alignment.Center), color = TextPureWhite, fontSize = 13.sp, fontWeight = FontWeight.Bold)
                 }
-                IconButton(onClick = { showSettings = !showSettings }, modifier = Modifier.align(Alignment.CenterEnd).size(36.dp)) {
-                    Icon(Icons.Default.Settings, null, tint = TextPureWhite, modifier = Modifier.size(20.dp))
+                Row(Modifier.align(Alignment.CenterEnd)) {
+                    // 권수 리스트 버튼 추가
+                    IconButton(onClick = { 
+                        showEpisodeList = !showEpisodeList
+                        if (showEpisodeList) showSettings = false
+                    }, modifier = Modifier.size(36.dp)) {
+                        Icon(Icons.AutoMirrored.Filled.List, null, tint = TextPureWhite, modifier = Modifier.size(20.dp))
+                    }
+                    IconButton(onClick = { 
+                        showSettings = !showSettings
+                        if (showSettings) showEpisodeList = false
+                    }, modifier = Modifier.size(36.dp)) {
+                        Icon(Icons.Default.Settings, null, tint = TextPureWhite, modifier = Modifier.size(20.dp))
+                    }
                 }
             }
         }
 
+        // 하단 컨트롤 및 네비게이션 (UX 3)
         AnimatedVisibility(showControls, enter = fadeIn() + slideInVertically(initialOffsetY = { it }), exit = fadeOut() + slideOutVertically(targetOffsetY = { it }), modifier = Modifier.align(Alignment.BottomCenter)) {
             Column(Modifier.fillMaxWidth().background(BgBlack.copy(0.8f)).navigationBarsPadding().padding(16.dp)) {
                 if (isListLoaded) {
@@ -450,11 +477,70 @@ fun WebtoonViewer(
                         IconButton(onClick = { viewModel.navigateChapter(true) }, enabled = uiState.currentChapterIndex < (if (uiState.isSeriesView) uiState.seriesEpisodes.size else uiState.currentFiles.size) - 1) {
                             Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, null, tint = if (uiState.currentChapterIndex < (if (uiState.isSeriesView) uiState.seriesEpisodes.size else uiState.currentFiles.size) - 1) Color.White else Color.Gray)
                         }
+                        
+                        // 페이지 이동 버튼 (UX 추가 요청)
+                        Spacer(Modifier.width(8.dp))
+                        Row {
+                            IconButton(onClick = { 
+                                scope.launch { 
+                                    listState.animateScrollToItem((listState.firstVisibleItemIndex - 1).coerceAtLeast(0)) 
+                                }
+                            }, modifier = Modifier.size(32.dp)) {
+                                Icon(Icons.Default.KeyboardArrowUp, null, tint = Color.White)
+                            }
+                            IconButton(onClick = { 
+                                scope.launch { 
+                                    listState.animateScrollToItem((listState.firstVisibleItemIndex + 1).coerceIn(imageNames.indices)) 
+                                }
+                            }, modifier = Modifier.size(32.dp)) {
+                                Icon(Icons.Default.KeyboardArrowDown, null, tint = Color.White)
+                            }
+                        }
                     }
                 }
             }
         }
 
+        // 권수 리스트 패널
+        if (showEpisodeList) {
+            Surface(
+                modifier = Modifier.align(Alignment.CenterEnd).padding(top = 60.dp, end = 16.dp, bottom = 16.dp).width(250.dp).fillMaxHeight(0.7f),
+                color = Color(0xFF1A1A1A),
+                shape = RoundedCornerShape(12.dp),
+                border = BorderStroke(1.dp, Color.White.copy(0.1f))
+            ) {
+                Column {
+                    Text("에피소드", Modifier.padding(16.dp), color = Color.White, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                    Divider(color = Color.White.copy(0.1f))
+                    val episodes = if (uiState.isSeriesView) uiState.seriesEpisodes else uiState.currentFiles
+                    LazyColumn {
+                        itemsIndexed(episodes) { idx, file ->
+                            val isSelected = uiState.currentChapterIndex == idx
+                            Row(
+                                Modifier.fillMaxWidth().clickable { 
+                                    viewModel.onFileClick(file)
+                                    showEpisodeList = false
+                                }.background(if (isSelected) KakaoYellow.copy(alpha = 0.1f) else Color.Transparent).padding(16.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = file.name, 
+                                    color = if (isSelected) KakaoYellow else Color.White, 
+                                    fontSize = 12.sp,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                if (isSelected) Icon(Icons.Default.Check, null, tint = KakaoYellow, modifier = Modifier.size(14.dp))
+                            }
+                            Divider(color = Color.White.copy(0.05f))
+                        }
+                    }
+                }
+            }
+        }
+
+        // 설정 패널 (UX 4)
         if (showSettings) {
             Surface(
                 modifier = Modifier.align(Alignment.CenterEnd).padding(16.dp).width(200.dp),
