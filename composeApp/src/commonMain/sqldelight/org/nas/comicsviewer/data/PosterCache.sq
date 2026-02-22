@@ -20,7 +20,7 @@ CREATE TABLE recent_comic (
     path TEXT NOT NULL PRIMARY KEY,
     name TEXT NOT NULL,
     poster_url TEXT,
-    is_directory INTEGER AS Boolean NOT NULL,
+    is_directory INTEGER AS kotlin.Boolean NOT NULL,
     last_read_at INTEGER NOT NULL
 );
 
