@@ -13,7 +13,7 @@ BASE_PATH = "/volume2/video/GDS3/GDRIVE/READING/만화"
 METADATA_DB_PATH = '/volume2/video/NasComicsViewer_v7.db'
 
 ALLOWED_CATEGORIES = ["완결A", "완결B", "마블", "번역", "연재", "작가"]
-FLATTEN_CATEGORIES = ["완결A", "완결B", "번역", "연재", "작가"]
+FLATTEN_CATEGORIES = ["완결A", "완결B", "번역", "연재"]
 
 db_queue = queue.Queue()
 scanning_pool = ThreadPoolExecutor(max_workers=10)
@@ -286,16 +286,20 @@ def scan_comics():
     is_flatten_cat = any(normalize_nfc(f).lower() == normalize_nfc(cat_name).lower() for f in FLATTEN_CATEGORIES)
     conn = sqlite3.connect(METADATA_DB_PATH); conn.row_factory = sqlite3.Row
     if is_flatten_cat and get_depth(rel_path) == 1:
+        # depth = 3인 항목(작품)들만 필터링하여 평탄화된 목록 제공
         rows = conn.execute("SELECT * FROM entries WHERE rel_path LIKE ? AND depth = 3 ORDER BY title LIMIT ? OFFSET ?", (path + '/%' if path else '%', psize, (page-1)*psize)).fetchall()
         if not rows and page == 1: conn.close(); scan_folder_sync(abs_p, 1); return scan_comics()
     else:
+        # 그 외 카테고리는 계층 구조(폴더 구조) 그대로 탐색
         parent_hash = get_path_hash(abs_p)
         rows = conn.execute("SELECT * FROM entries WHERE parent_hash = ? ORDER BY name LIMIT ? OFFSET ?", (parent_hash, psize, (page-1)*psize)).fetchall()
         if not rows and page == 1: conn.close(); scan_folder_sync(abs_p, 0); return scan_comics()
     items = []
     for r in rows:
-        meta = json.loads(r['metadata'] or '{}'); meta['poster_url'] = r['poster_url']; meta['title'] = r['title']
-        items.append({'name': r['title'], 'isDirectory': bool(r['is_dir']), 'path': r['rel_path'], 'metadata': meta})
+        meta = json.loads(r['metadata'] or '{}')
+        meta['poster_url'] = r['poster_url']
+        meta['title'] = r['title']
+        items.append({'name': r['title'] or r['name'], 'isDirectory': bool(r['is_dir']), 'path': r['rel_path'], 'metadata': meta})
     conn.close()
     return jsonify({'total_items': 10000, 'page': page, 'page_size': psize, 'items': items})
 
@@ -337,9 +341,14 @@ def search_comics():
 
         items = []
         for r in rows:
+            rel_path = r['rel_path']
+            category = rel_path.split('/')[0] if rel_path else "Unknown"
+
             meta = json.loads(r['metadata'] or '{}')
             meta['poster_url'] = r['poster_url']
             meta['title'] = r['title']
+            meta['category'] = category
+
             items.append({
                 'name': r['title'] or r['name'],
                 'isDirectory': bool(r['is_dir']),

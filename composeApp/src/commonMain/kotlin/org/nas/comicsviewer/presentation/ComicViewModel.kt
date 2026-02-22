@@ -171,6 +171,12 @@ class ComicViewModel(
         viewModelScope.launch {
             _uiState.update { it.copy(isLoading = true) }
             try {
+                // 검색 모드에서 폴더 클릭 시 검색 모드 해제 (원활한 화면 전환을 위해)
+                val wasSearchMode = _uiState.value.isSearchMode
+                if (wasSearchMode) {
+                    _uiState.update { it.copy(isSearchMode = false) }
+                }
+
                 val metadata = nasRepository.getMetadata(file.path)
                 val result = nasRepository.scanComicFolders(file.path, 1, 100)
                 val processedFiles = processScanResult(result.items)
@@ -189,6 +195,8 @@ class ComicViewModel(
                 }
             } catch (e: Exception) {
                 scanBooks(file.path)
+            } finally {
+                _uiState.update { it.copy(isLoading = false) }
             }
         }
     }

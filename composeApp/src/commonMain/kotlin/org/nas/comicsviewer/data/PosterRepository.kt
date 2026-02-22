@@ -14,7 +14,8 @@ data class ComicMetadata(
     val publisher: String? = null,
     @SerialName("poster_url") val posterUrl: String? = null,
     @SerialName("rel_path") val relPath: String? = null,
-    val chapters: List<NasFile>? = emptyList()
+    val chapters: List<NasFile>? = emptyList(),
+    val category: String? = null
 )
 
 interface PosterRepository {
