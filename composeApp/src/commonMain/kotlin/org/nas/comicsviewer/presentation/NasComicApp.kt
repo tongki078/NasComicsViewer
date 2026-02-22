@@ -87,6 +87,7 @@ fun NasComicApp(viewModel: ComicViewModel) {
     MaterialTheme(colorScheme = darkColorScheme(background = BgBlack, surface = BgBlack, primary = TextPureWhite)) {
         Scaffold(
             floatingActionButton = {
+                // 초성 이동 버튼은 리스트가 있을 때만 표시
                 if (uiState.selectedZipPath == null && !uiState.isSeriesView && !uiState.isSearchMode && uiState.currentFiles.isNotEmpty()) {
                     FloatingActionButton(
                         onClick = { showJumpMenu = true },
@@ -187,6 +188,7 @@ fun NasComicApp(viewModel: ComicViewModel) {
                 if (showJumpMenu) {
                     JumpToSectionMenu(
                         files = uiState.currentFiles,
+                        recentComicsCount = uiState.recentComics.size,
                         onDismiss = { showJumpMenu = false },
                         onJump = { index ->
                             scope.launch {
@@ -204,7 +206,7 @@ fun NasComicApp(viewModel: ComicViewModel) {
 @Composable
 fun RecentComicsCarousel(recentComics: List<NasFile>, repo: PosterRepository, onFileClick: (NasFile) -> Unit) {
     if (recentComics.isEmpty()) return
-    Column(Modifier.fillMaxWidth().padding(vertical = 16.dp)) {
+    Column(Modifier.fillMaxWidth().padding(top = 16.dp, bottom = 8.dp)) {
         Text("최근 본 작품", color = TextPureWhite, fontSize = 16.sp, fontWeight = FontWeight.Black, modifier = Modifier.padding(horizontal = 20.dp))
         Spacer(Modifier.height(12.dp))
         LazyRow(contentPadding = PaddingValues(horizontal = 20.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -222,7 +224,7 @@ fun RecentComicsCarousel(recentComics: List<NasFile>, repo: PosterRepository, on
                 }
             }
         }
-        Spacer(Modifier.height(8.dp))
+        Spacer(Modifier.height(16.dp))
         HorizontalDivider(color = SurfaceGrey, thickness = 4.dp)
     }
 }
@@ -274,19 +276,13 @@ fun FolderGridView(
     val shouldLoadMore by remember(files.size, isLoading, isLoadingMore) {
         derivedStateOf {
             val lastVisibleItem = gridState.layoutInfo.visibleItemsInfo.lastOrNull()
-            lastVisibleItem != null && lastVisibleItem.index >= (files.size + recentComics.size.let { if(it>0) 1 else 0 }) - 10 && !isLoading && !isLoadingMore
+            lastVisibleItem != null && lastVisibleItem.index >= (files.size + if(recentComics.isNotEmpty()) 1 else 0) - 10 && !isLoading && !isLoadingMore
         }
     }
     
     LaunchedEffect(shouldLoadMore) {
         if (shouldLoadMore) onLoadMore()
     }
-
-    // 그룹화 로직 (초성 기준)
-    val groupedFiles = remember(files) {
-        files.groupBy { getInitialSound(it.name) }
-    }
-    val keys = remember(groupedFiles) { groupedFiles.keys.toList() }
 
     LazyVerticalGrid(
         state = gridState,
@@ -295,7 +291,7 @@ fun FolderGridView(
         horizontalArrangement = Arrangement.spacedBy(10.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
-        // 최근 본 작품 섹션 (최상단)
+        // 최근 본 작품 섹션
         if (recentComics.isNotEmpty()) {
             item(span = { GridItemSpan(maxLineSpan) }) {
                 RecentComicsCarousel(recentComics, posterRepository, onFileClick)
@@ -307,23 +303,9 @@ fun FolderGridView(
                 Box(Modifier.aspectRatio(0.72f).fillMaxWidth().clip(RoundedCornerShape(8.dp)).background(SurfaceGrey))
             }
         } else {
-            // 그룹별 헤더 및 아이템 배치
-            keys.forEach { initial ->
-                item(span = { GridItemSpan(maxLineSpan) }, key = "header_$initial") {
-                    Box(Modifier.fillMaxWidth().padding(top = 8.dp, bottom = 4.dp)) {
-                        Text(
-                            text = initial,
-                            color = KakaoYellow,
-                            fontSize = 20.sp,
-                            fontWeight = FontWeight.Black,
-                            modifier = Modifier.padding(start = 4.dp)
-                        )
-                    }
-                }
-                val group = groupedFiles[initial] ?: emptyList()
-                items(group, key = { it.path }) { file ->
-                    ComicCard(file, posterRepository, showCategoryBadge) { onFileClick(file) }
-                }
+            // 미관상 좋지 않은 초성 헤더를 제거하고 리스트를 평탄하게 표시
+            items(files, key = { it.path }) { file ->
+                ComicCard(file, posterRepository, showCategoryBadge) { onFileClick(file) }
             }
             
             if (isLoadingMore) {
@@ -338,7 +320,7 @@ fun FolderGridView(
 }
 
 @Composable
-fun JumpToSectionMenu(files: List<NasFile>, onDismiss: () -> Unit, onJump: (Int) -> Unit) {
+fun JumpToSectionMenu(files: List<NasFile>, recentComicsCount: Int, onDismiss: () -> Unit, onJump: (Int) -> Unit) {
     val initials = remember(files) {
         files.map { getInitialSound(it.name) }.distinct()
     }
@@ -346,30 +328,27 @@ fun JumpToSectionMenu(files: List<NasFile>, onDismiss: () -> Unit, onJump: (Int)
     AlertDialog(
         onDismissRequest = onDismiss,
         containerColor = Color(0xFF1A1A1A),
-        title = { Text("빠른 이동", color = Color.White) },
+        title = { Text("빠른 이동", color = Color.White, fontWeight = FontWeight.Bold) },
         text = {
-            Column {
+            Column(Modifier.fillMaxWidth()) {
                 FlowRow(mainAxisSpacing = 8.dp, crossAxisSpacing = 8.dp) {
                     initials.forEach { initial ->
                         Surface(
                             onClick = {
-                                // 실제 그리드에서의 인덱스를 찾아야 함 (헤더 포함)
-                                // 하지만 여기서는 단순하게 초성 그룹의 첫 번째 아이템 위치로 근사치 이동
-                                // 정확한 인덱스 계산을 위해 LazyGrid의 구조를 고려해야 함
                                 val firstInGroup = files.indexOfFirst { getInitialSound(it.name) == initial }
                                 if (firstInGroup != -1) {
-                                    // 대략적인 인덱스 (헤더들이 추가되어 있으므로 실제 인덱스는 더 큼)
-                                    // 간단하게 찾기 위해 초성 리스트에서의 순서만큼 오프셋 추가
-                                    val headerCount = initials.indexOf(initial) + 1
-                                    onJump(firstInGroup + headerCount + 1) // +1은 RecentCarousel 섹션 고려
+                                    // 헤더가 제거되었으므로 인덱스 계산이 단순해짐
+                                    // RecentComicsCarousel이 있다면 1개의 아이템 오프셋 추가
+                                    val offset = if (recentComicsCount > 0) 1 else 0
+                                    onJump(firstInGroup + offset)
                                 }
                             },
                             color = SurfaceGrey,
                             shape = CircleShape,
                             border = BorderStroke(1.dp, Color.White.copy(0.1f))
                         ) {
-                            Box(Modifier.size(45.dp), contentAlignment = Alignment.Center) {
-                                Text(initial, color = Color.White, fontWeight = FontWeight.Bold)
+                            Box(Modifier.size(48.dp), contentAlignment = Alignment.Center) {
+                                Text(initial, color = KakaoYellow, fontWeight = FontWeight.Bold, fontSize = 16.sp)
                             }
                         }
                     }
@@ -377,7 +356,7 @@ fun JumpToSectionMenu(files: List<NasFile>, onDismiss: () -> Unit, onJump: (Int)
             }
         },
         confirmButton = {
-            TextButton(onClick = onDismiss) { Text("닫기", color = KakaoYellow) }
+            TextButton(onClick = onDismiss) { Text("닫기", color = Color.White) }
         }
     )
 }

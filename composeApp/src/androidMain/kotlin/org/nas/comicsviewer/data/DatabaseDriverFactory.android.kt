@@ -9,7 +9,7 @@ actual class DatabaseDriverFactory(private val context: Context) {
         return AndroidSqliteDriver(
             schema = ComicDatabase.Schema,
             context = context,
-            name = "comic_v2.db", // DB 이름 변경으로 강제 재생성 유도
+            name = "comic_v3.db", // 스키마 변경 반영을 위해 DB 이름 변경
             callback = object : AndroidSqliteDriver.Callback(ComicDatabase.Schema) {}
         )
     }
