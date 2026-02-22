@@ -16,6 +16,7 @@ import platform.Foundation.NSCachesDirectory
 import platform.Foundation.NSData
 import platform.Foundation.NSFileManager
 import platform.Foundation.NSSearchPathForDirectoriesInDomains
+import platform.Foundation.NSUserDefaults
 import platform.Foundation.NSUserDomainMask
 import platform.Foundation.dataWithBytes
 import platform.Foundation.dataWithContentsOfFile
@@ -31,6 +32,7 @@ object IosPosterRepository : PosterRepository {
 
     private val client = HttpClient(Darwin) {}
     private val baseUrl = "http://192.168.0.2:5555"
+    private val RECENT_SEARCHES_KEY = "recent_queries"
 
     private val memoryCache = mutableMapOf<String, ImageBitmap>()
     private val diskCacheDir: String by lazy {
@@ -67,7 +69,8 @@ object IosPosterRepository : PosterRepository {
             } else {
                 "$baseUrl/download?path=${url.encodeURLPathPart()}"
             }
-            val bytes: ByteArray = client.get(downloadUrl).body()
+            val response = client.get(downloadUrl)
+            val bytes: ByteArray = response.body()
             if (bytes.isNotEmpty()) {
                 bytes.usePinned { pinned ->
                     val data = NSData.dataWithBytes(pinned.addressOf(0), bytes.size.toULong())
@@ -86,9 +89,22 @@ object IosPosterRepository : PosterRepository {
         null
     }
 
-    override suspend fun insertRecentSearch(query: String) {}
-    override suspend fun getRecentSearches(): List<String> = emptyList()
-    override suspend fun clearRecentSearches() {}
+    override suspend fun insertRecentSearch(query: String) {
+        val current = getRecentSearches().toMutableList()
+        current.remove(query)
+        current.add(0, query)
+        val saved = current.take(10).joinToString("|||")
+        NSUserDefaults.standardUserDefaults.setObject(saved, RECENT_SEARCHES_KEY)
+    }
+
+    override suspend fun getRecentSearches(): List<String> {
+        val saved = NSUserDefaults.standardUserDefaults.stringForKey(RECENT_SEARCHES_KEY) ?: ""
+        return if (saved.isEmpty()) emptyList() else saved.split("|||")
+    }
+
+    override suspend fun clearRecentSearches() {
+        NSUserDefaults.standardUserDefaults.removeObjectForKey(RECENT_SEARCHES_KEY)
+    }
 
     private fun NSData.toByteArray(): ByteArray {
         return ByteArray(this.length.toInt()).apply {

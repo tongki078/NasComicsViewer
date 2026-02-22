@@ -23,6 +23,7 @@ interface NasRepository {
     suspend fun listFiles(path: String): List<NasFile>
     suspend fun getFileContent(path: String): ByteArray
     suspend fun scanComicFolders(path: String, page: Int, pageSize: Int): ScanResult
+    suspend fun searchComics(query: String, page: Int, pageSize: Int): ScanResult
     suspend fun getMetadata(path: String): ComicMetadata?
 }
 

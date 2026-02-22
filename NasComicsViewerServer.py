@@ -55,6 +55,9 @@ def init_db():
             poster_url TEXT, title TEXT, depth INTEGER, last_scanned REAL,
             metadata TEXT
         )''')
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_parent ON entries(parent_hash)')
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_title ON entries(title)')
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_rel ON entries(rel_path)')
     conn.close()
 
 # --- 정보 추출 엔진 ---
@@ -111,7 +114,7 @@ def scan_folder_sync(abs_path, recursive_depth=0):
         p_abs = os.path.dirname(abs_path)
         p_hash = get_path_hash(p_abs)
         title, poster, meta_json = get_comic_info(abs_path, rel_from_root)
-        folder_item = (get_path_hash(abs_path), p_hash, abs_path, rel_from_root, os.path.basename(abs_path), 1, poster, title, get_depth(rel_from_root), time.time(), meta_json)
+        folder_item = (get_path_hash(abs_path), p_hash, abs_path, rel_from_root, os.path.basename(abs_path), 1 if os.path.isdir(abs_path) else 0, poster, title, get_depth(rel_from_root), time.time(), meta_json)
 
         conn = sqlite3.connect(METADATA_DB_PATH)
         conn.execute('INSERT OR REPLACE INTO entries VALUES (?,?,?,?,?,?,?,?,?,?,?)', folder_item)
@@ -295,6 +298,62 @@ def scan_comics():
         items.append({'name': r['title'], 'isDirectory': bool(r['is_dir']), 'path': r['rel_path'], 'metadata': meta})
     conn.close()
     return jsonify({'total_items': 10000, 'page': page, 'page_size': psize, 'items': items})
+
+@app.route('/search')
+def search_comics():
+    query = request.args.get('query', '').strip()
+    if not query:
+        return jsonify({'total_items': 0, 'page': 1, 'page_size': 50, 'items': []})
+
+    page = request.args.get('page', 1, type=int)
+    psize = request.args.get('page_size', 50, type=int)
+
+    logger.info(f"🔎 SEARCH START: '{query}'")
+
+    conn = sqlite3.connect(METADATA_DB_PATH)
+    conn.row_factory = sqlite3.Row
+
+    q_nfc = unicodedata.normalize('NFC', query)
+    q_nfd = unicodedata.normalize('NFD', query)
+
+    patterns = set([f"%{q_nfc}%", f"%{q_nfd}%", f"%{query}%"])
+
+    where_clauses = []
+    params = []
+    for p in patterns:
+        where_clauses.append("title LIKE ?")
+        params.append(p)
+        where_clauses.append("name LIKE ?")
+        params.append(p)
+
+    where_stmt = " OR ".join(where_clauses)
+
+    sql = f"SELECT * FROM entries WHERE ({where_stmt}) AND depth >= 1 ORDER BY last_scanned DESC LIMIT ? OFFSET ?"
+    count_sql = f"SELECT COUNT(*) FROM entries WHERE ({where_stmt}) AND depth >= 1"
+
+    try:
+        rows = conn.execute(sql, params + [psize, (page-1)*psize]).fetchall()
+        total = conn.execute(count_sql, params).fetchone()[0]
+
+        items = []
+        for r in rows:
+            meta = json.loads(r['metadata'] or '{}')
+            meta['poster_url'] = r['poster_url']
+            meta['title'] = r['title']
+            items.append({
+                'name': r['title'] or r['name'],
+                'isDirectory': bool(r['is_dir']),
+                'path': r['rel_path'],
+                'metadata': meta
+            })
+
+        logger.info(f"✅ SEARCH FINISH: Found {total} items")
+        return jsonify({'total_items': total, 'page': page, 'page_size': psize, 'items': items})
+    except Exception as e:
+        logger.error(f"❌ SEARCH ERROR: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+    finally:
+        conn.close()
 
 @app.route('/metadata')
 def get_metadata():

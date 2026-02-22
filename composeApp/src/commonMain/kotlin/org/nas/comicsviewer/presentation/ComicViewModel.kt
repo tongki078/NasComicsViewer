@@ -32,7 +32,8 @@ data class ComicBrowserUiState(
     val searchQuery: String = "",
     val searchResults: List<NasFile> = emptyList(),
     val recentSearches: List<String> = emptyList(),
-    val readingPositions: Map<String, Int> = emptyMap()
+    val readingPositions: Map<String, Int> = emptyMap(),
+    val isSearchExecuted: Boolean = false
 )
 
 class ComicViewModel(
@@ -157,7 +158,7 @@ class ComicViewModel(
 
     fun onFileClick(file: NasFile) {
         if (!file.isDirectory) {
-            val episodes = if (_uiState.value.isSeriesView) _uiState.value.seriesEpisodes else _uiState.value.currentFiles
+            val episodes = if (_uiState.value.isSearchMode && _uiState.value.searchResults.isNotEmpty()) _uiState.value.searchResults else if (_uiState.value.isSeriesView) _uiState.value.seriesEpisodes else _uiState.value.currentFiles
             val index = episodes.indexOfFirst { it.path == file.path }
             _uiState.update { it.copy(
                 selectedZipPath = file.path, 
@@ -193,7 +194,7 @@ class ComicViewModel(
     }
 
     fun navigateChapter(next: Boolean) {
-        val episodes = if (_uiState.value.isSeriesView) _uiState.value.seriesEpisodes else _uiState.value.currentFiles
+        val episodes = if (_uiState.value.isSearchMode && _uiState.value.searchResults.isNotEmpty()) _uiState.value.searchResults else if (_uiState.value.isSeriesView) _uiState.value.seriesEpisodes else _uiState.value.currentFiles
         val currentIndex = _uiState.value.currentChapterIndex
         val nextIndex = if (next) currentIndex + 1 else currentIndex - 1
         
@@ -216,37 +217,34 @@ class ComicViewModel(
     }
 
     fun toggleSearchMode(enabled: Boolean) {
-        _uiState.update { it.copy(isSearchMode = enabled, searchQuery = "", searchResults = emptyList()) }
+        _uiState.update { it.copy(isSearchMode = enabled, searchQuery = "", searchResults = emptyList(), isSearchExecuted = false) }
         if (enabled) loadRecentSearches()
     }
 
     fun updateSearchQuery(query: String) {
-        _uiState.update { it.copy(searchQuery = query) }
+        _uiState.update { it.copy(searchQuery = query, isSearchExecuted = if (query.isEmpty()) false else it.isSearchExecuted) }
     }
 
     fun onSearchSubmit(query: String) {
         if (query.isBlank()) return
         searchJob?.cancel()
         searchJob = viewModelScope.launch {
-            _uiState.update { it.copy(isLoading = true) }
+            _uiState.update { it.copy(isLoading = true, searchQuery = query, isSearchExecuted = true) }
             try {
-                // 최근 검색어 저장
                 posterRepository.insertRecentSearch(query)
                 loadRecentSearches()
                 
-                // 실제 검색 수행 (현재 서버 API에 검색 기능이 없으므로 전체 스캔 후 필터링하거나 서버 기능을 활용해야 함)
-                // 여기서는 예시로 루트부터 스캔하는 시뮬레이션을 하거나 특정 경로를 검색함
-                val searchResult = nasRepository.scanComicFolders("", 1, 100) // 빈 경로는 전체 검색을 의도 (서버 지원 필요)
-                val filtered = processScanResult(searchResult.items).filter { it.name.contains(query, ignoreCase = true) }
+                val searchResult = nasRepository.searchComics(query, 1, 100)
+                val processed = processScanResult(searchResult.items)
                 
-                _uiState.update { it.copy(searchResults = filtered, isLoading = false) }
+                _uiState.update { it.copy(searchResults = processed, isLoading = false) }
             } catch (e: Exception) {
                 _uiState.update { it.copy(errorMessage = "검색 실패: ${e.message}", isLoading = false) }
             }
         }
     }
 
-    private fun loadRecentSearches() {
+    fun loadRecentSearches() {
         viewModelScope.launch {
             try {
                 val history = posterRepository.getRecentSearches()
@@ -259,7 +257,7 @@ class ComicViewModel(
         viewModelScope.launch {
             try {
                 posterRepository.clearRecentSearches()
-                loadRecentSearches()
+                _uiState.update { it.copy(recentSearches = emptyList()) }
             } catch (e: Exception) { }
         }
     }

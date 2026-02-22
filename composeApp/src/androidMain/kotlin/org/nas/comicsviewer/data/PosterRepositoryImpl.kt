@@ -29,12 +29,11 @@ class AndroidPosterRepository(private val context: Context) : PosterRepository {
         }
     }
     private val baseUrl = "http://192.168.0.2:5555"
+    private val prefs = context.getSharedPreferences("search_prefs", Context.MODE_PRIVATE)
 
-    // 메모리 캐시는 키로 URL 그대로 사용
     private val memoryCache: LruCache<String, ImageBitmap> = LruCache(40 * 1024 * 1024)
     private val diskCacheDir = File(context.cacheDir, "poster_cache").apply { mkdirs() }
 
-    // 긴 URL을 안전한 짧은 파일명으로 변환하는 함수
     private fun String.toHash(): String {
         return MessageDigest.getInstance("MD5")
             .digest(this.toByteArray())
@@ -43,13 +42,8 @@ class AndroidPosterRepository(private val context: Context) : PosterRepository {
 
     override suspend fun getImage(url: String): ImageBitmap? = withContext(Dispatchers.IO) {
         if (url.isBlank()) return@withContext null
-
         val cacheKey = url.toHash()
-
-        // 1. 메모리 캐시 확인
         memoryCache.get(url)?.let { return@withContext it }
-
-        // 2. 디스크 캐시 확인
         val diskFile = File(diskCacheDir, cacheKey)
         if (diskFile.exists()) {
             try {
@@ -62,20 +56,15 @@ class AndroidPosterRepository(private val context: Context) : PosterRepository {
                 diskFile.delete()
             }
         }
-
-        // 3. 네트워크 다운로드
         try {
             val downloadUrl = if (url.startsWith("http")) {
                 url
             } else {
-                // 경로에 특수문자가 있을 수 있으므로 인코딩 처리
                 val encodedPath = URLEncoder.encode(url, "UTF-8").replace("+", "%20")
                 "$baseUrl/download?path=$encodedPath"
             }
-            
             val response = client.get(downloadUrl)
             val bytes: ByteArray = response.body()
-            
             if (bytes.isNotEmpty()) {
                 diskFile.writeBytes(bytes)
                 bytes.toImageBitmap()?.let {
@@ -86,11 +75,23 @@ class AndroidPosterRepository(private val context: Context) : PosterRepository {
         } catch (e: Exception) {
             Log.e("NasComics", "Download failed: $url", e)
         }
-
         null
     }
 
-    override suspend fun insertRecentSearch(query: String) {}
-    override suspend fun getRecentSearches(): List<String> = emptyList()
-    override suspend fun clearRecentSearches() {}
+    override suspend fun insertRecentSearch(query: String) {
+        val current = getRecentSearches().toMutableList()
+        current.remove(query)
+        current.add(0, query)
+        val saved = current.take(10).joinToString("|||")
+        prefs.edit().putString("recent_queries", saved).apply()
+    }
+
+    override suspend fun getRecentSearches(): List<String> {
+        val saved = prefs.getString("recent_queries", "") ?: ""
+        return if (saved.isEmpty()) emptyList() else saved.split("|||")
+    }
+
+    override suspend fun clearRecentSearches() {
+        prefs.edit().remove("recent_queries").apply()
+    }
 }

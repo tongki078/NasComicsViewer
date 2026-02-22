@@ -54,6 +54,21 @@ object IosNasRepository : NasRepository {
         }
     }
 
+    override suspend fun searchComics(query: String, page: Int, pageSize: Int): ScanResult = withContext(Dispatchers.Default) {
+        try {
+            client.get("$baseUrl/search") {
+                url {
+                    parameters.append("query", query)
+                    parameters.append("page", page.toString())
+                    parameters.append("page_size", pageSize.toString())
+                }
+            }.body()
+        } catch (e: Exception) {
+            println("DEBUG_NAS: Search error: ${e.message}")
+            ScanResult(0, 0, 0, emptyList())
+        }
+    }
+
     override suspend fun getMetadata(path: String): ComicMetadata? = withContext(Dispatchers.Default) {
         try {
             client.get("$baseUrl/metadata") { url { parameters.append("path", path) } }.body<ComicMetadata>()

@@ -10,6 +10,8 @@ import androidx.compose.foundation.lazy.*
 import androidx.compose.foundation.lazy.grid.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.*
 import androidx.compose.material.icons.filled.*
@@ -30,7 +32,9 @@ import androidx.compose.ui.graphics.ColorMatrix
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -439,7 +443,6 @@ fun WebtoonViewer(
                     Text("${listState.firstVisibleItemIndex + 1} / ${imageNames.size}", Modifier.align(Alignment.Center), color = TextPureWhite, fontSize = 13.sp, fontWeight = FontWeight.Bold)
                 }
                 Row(Modifier.align(Alignment.CenterEnd)) {
-                    // 아이콘 참조 오류 수정: PlayArrow만 사용하고 색상으로 상태 표시
                     IconButton(onClick = { isAutoScrollEnabled = !isAutoScrollEnabled }, modifier = Modifier.size(36.dp)) {
                         Icon(
                             imageVector = Icons.Default.PlayArrow, 
@@ -606,13 +609,33 @@ fun WebtoonPage(zipPath: String, imageName: String, manager: ZipManager, cache: 
 @Composable
 fun SearchScreen(state: ComicBrowserUiState, onQueryChange: (String) -> Unit, onSearch: (String) -> Unit, onClose: () -> Unit, onFileClick: (NasFile) -> Unit, onClearHistory: () -> Unit, viewModel: ComicViewModel) {
     val focusRequester = remember { FocusRequester() }
+    val focusManager = LocalFocusManager.current
     LaunchedEffect(Unit) { focusRequester.requestFocus() }
     Column(Modifier.fillMaxSize().background(BgBlack).statusBarsPadding()) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-            TextField(value = state.searchQuery, onValueChange = onQueryChange, modifier = Modifier.weight(1f).focusRequester(focusRequester), placeholder = { Text("제목 검색...", color = TextMuted) }, singleLine = true, colors = TextFieldDefaults.colors(focusedContainerColor = SurfaceGrey, unfocusedContainerColor = SurfaceGrey, focusedIndicatorColor = Color.Transparent, unfocusedIndicatorColor = Color.Transparent, cursorColor = KakaoYellow, focusedTextColor = TextPureWhite, unfocusedTextColor = TextPureWhite), shape = RoundedCornerShape(8.dp), leadingIcon = { Icon(Icons.Default.Search, null, tint = TextMuted) }, trailingIcon = { if (state.searchQuery.isNotEmpty()) Icon(Icons.Default.Close, null, tint = TextMuted, modifier = Modifier.clickable { onQueryChange("") }) }, keyboardActions = androidx.compose.foundation.text.KeyboardActions(onDone = { onSearch(state.searchQuery) }), keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(imeAction = androidx.compose.ui.text.input.ImeAction.Search))
+            TextField(
+                value = state.searchQuery, 
+                onValueChange = onQueryChange, 
+                modifier = Modifier.weight(1f).focusRequester(focusRequester), 
+                placeholder = { Text("제목 검색...", color = TextMuted) }, 
+                singleLine = true, 
+                colors = TextFieldDefaults.colors(focusedContainerColor = SurfaceGrey, unfocusedContainerColor = SurfaceGrey, focusedIndicatorColor = Color.Transparent, unfocusedIndicatorColor = Color.Transparent, cursorColor = KakaoYellow, focusedTextColor = TextPureWhite, unfocusedTextColor = TextPureWhite), 
+                shape = RoundedCornerShape(8.dp), 
+                leadingIcon = { Icon(Icons.Default.Search, null, tint = TextMuted) }, 
+                trailingIcon = { 
+                    Row {
+                        if (state.searchQuery.isNotEmpty()) {
+                            IconButton(onClick = { onQueryChange("") }) { Icon(Icons.Default.Close, null, tint = TextMuted) }
+                            IconButton(onClick = { onSearch(state.searchQuery); focusManager.clearFocus() }) { Icon(Icons.Default.Check, null, tint = KakaoYellow) }
+                        }
+                    }
+                }, 
+                keyboardActions = KeyboardActions(onSearch = { onSearch(state.searchQuery); focusManager.clearFocus() }), 
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search)
+            )
             Spacer(Modifier.width(8.dp)); Text("취소", color = TextPureWhite, modifier = Modifier.clickable { onClose() }.padding(8.dp))
         }
-        if (state.searchQuery.isEmpty()) {
+        if (!state.isSearchExecuted && state.searchQuery.isEmpty()) {
             if (state.recentSearches.isNotEmpty()) {
                 Row(Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 12.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                     Text("최근 검색어", color = TextPureWhite, fontWeight = FontWeight.Bold, fontSize = 16.sp)
@@ -628,8 +651,13 @@ fun SearchScreen(state: ComicBrowserUiState, onQueryChange: (String) -> Unit, on
                 }
             }
         } else {
-            if (state.searchResults.isEmpty()) Box(Modifier.fillMaxSize(), Alignment.Center) { Text("검색 결과가 없습니다.", color = TextMuted) }
-            else {
+            if (state.isLoading) {
+                Box(Modifier.fillMaxSize(), Alignment.Center) {
+                    CircularProgressIndicator(color = KakaoYellow)
+                }
+            } else if (state.isSearchExecuted && state.searchResults.isEmpty()) {
+                Box(Modifier.fillMaxSize(), Alignment.Center) { Text("검색 결과가 없습니다.", color = TextMuted) }
+            } else if (state.searchResults.isNotEmpty()) {
                 Text("검색 결과 ${state.searchResults.size}건", color = TextPureWhite, fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 24.dp, vertical = 12.dp))
                 FolderGridView(state.searchResults, false, false, onFileClick, {}, viewModel.posterRepository, rememberLazyGridState())
             }
