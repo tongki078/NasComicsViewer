@@ -15,3 +15,21 @@ DELETE FROM recent_search WHERE query = ?;
 
 clearRecentSearches:
 DELETE FROM recent_search;
+
+CREATE TABLE recent_comic (
+    path TEXT NOT NULL PRIMARY KEY,
+    name TEXT NOT NULL,
+    poster_url TEXT,
+    is_directory INTEGER AS Boolean NOT NULL,
+    last_read_at INTEGER NOT NULL
+);
+
+insertRecentComic:
+INSERT OR REPLACE INTO recent_comic (path, name, poster_url, is_directory, last_read_at)
+VALUES (?, ?, ?, ?, ?);
+
+getRecentComics:
+SELECT * FROM recent_comic ORDER BY last_read_at DESC LIMIT 20;
+
+deleteRecentComic:
+DELETE FROM recent_comic WHERE path = ?;
