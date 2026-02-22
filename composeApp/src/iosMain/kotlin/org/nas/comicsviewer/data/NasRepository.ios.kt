@@ -10,20 +10,15 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 
-actual fun provideNasRepository(): NasRepository = IosNasRepository.getInstance()
+actual fun provideNasRepository(): NasRepository = IosNasRepository
 
-class IosNasRepository private constructor() : NasRepository {
+object IosNasRepository : NasRepository {
     private val baseUrl = "http://192.168.0.2:5555"
 
     private val client = HttpClient(Darwin) {
         install(ContentNegotiation) {
             json(Json { isLenient = true; ignoreUnknownKeys = true })
         }
-    }
-
-    companion object {
-        @Volatile private var instance: IosNasRepository? = null
-        fun getInstance() = instance ?: synchronized(this) { instance ?: IosNasRepository().also { instance = it } }
     }
 
     override suspend fun listFiles(path: String): List<NasFile> = withContext(Dispatchers.Default) {

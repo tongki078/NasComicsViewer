@@ -1,4 +1,5 @@
 import org.jetbrains.compose.desktop.application.dsl.TargetFormat
+import org.jetbrains.kotlin.gradle.plugin.mpp.KotlinNativeTarget
 
 plugins {
     alias(libs.plugins.kotlinMultiplatform)
@@ -6,7 +7,7 @@ plugins {
     alias(libs.plugins.composeMultiplatform)
     alias(libs.plugins.composeCompiler)
     alias(libs.plugins.sqldelight)
-    kotlin("plugin.serialization") version "2.0.20"
+    alias(libs.plugins.kotlinSerialization)
 }
 
 kotlin {
@@ -27,6 +28,15 @@ kotlin {
         iosTarget.binaries.framework {
             baseName = "ComposeApp"
             isStatic = true
+            // 이 옵션이 Xcode 프로젝트에 sqlite3 라이브러리를 링크하도록 지시합니다.
+            linkerOpts("-lsqlite3")
+        }
+    }
+
+    // 모든 Native 타겟(iOS 포함)에 대해 링커 옵션을 강제로 추가합니다.
+    targets.withType<KotlinNativeTarget>().configureEach {
+        binaries.all {
+            linkerOpts("-lsqlite3")
         }
     }
 
@@ -40,8 +50,8 @@ kotlin {
             implementation(libs.androidx.lifecycle.viewmodelCompose)
             implementation(libs.androidx.lifecycle.runtimeCompose)
             implementation(libs.sqldelight.runtime)
+            implementation(libs.kotlinx.serialization.json)
 
-            implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.1")
             implementation("io.ktor:ktor-client-core:2.3.12")
             implementation("io.ktor:ktor-client-content-negotiation:2.3.12")
             implementation("io.ktor:ktor-serialization-kotlinx-json:2.3.12")
@@ -56,7 +66,7 @@ kotlin {
 
         iosMain.dependencies {
             implementation(libs.sqldelight.native.driver)
-            implementation("io.ktor:ktor-client-darwin:2.3.12")
+            implementation(libs.ktor.client.darwin)
         }
 
         commonTest.dependencies {

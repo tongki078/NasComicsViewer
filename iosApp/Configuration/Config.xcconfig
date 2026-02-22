@@ -5,3 +5,6 @@ PRODUCT_BUNDLE_IDENTIFIER=org.nas.comicsviewer.NasComicsViewer$(TEAM_ID)
 
 CURRENT_PROJECT_VERSION=1
 MARKETING_VERSION=1.0
+
+// SQLite 링크 에러 해결을 위해 추가
+OTHER_LDFLAGS = $(inherited) -lsqlite3

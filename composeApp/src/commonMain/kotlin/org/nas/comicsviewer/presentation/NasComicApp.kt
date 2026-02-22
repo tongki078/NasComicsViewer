@@ -1,11 +1,12 @@
 package org.nas.comicsviewer.presentation
 
 import androidx.compose.animation.*
+import androidx.compose.animation.core.*
 import androidx.compose.foundation.*
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.grid.*
 import androidx.compose.foundation.lazy.*
+import androidx.compose.foundation.lazy.grid.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -16,6 +17,8 @@ import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.*
 import androidx.compose.material3.TabRowDefaults.tabIndicatorOffset
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberLazyGridState
+import androidx.compose.runtime.saveable.rememberLazyListState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -49,6 +52,9 @@ private val TextMuted = Color(0xFF888888)
 fun NasComicApp(viewModel: ComicViewModel) {
     val uiState by viewModel.uiState.collectAsState()
     val zipManager = remember { provideZipManager() }
+    
+    // 메인 리스트 상태 보존
+    val mainGridState = rememberLazyGridState()
 
     BackHandler(enabled = uiState.selectedZipPath != null || uiState.pathHistory.size > 1 || uiState.isSearchMode || uiState.isSeriesView) {
         viewModel.onBack()
@@ -88,21 +94,17 @@ fun NasComicApp(viewModel: ComicViewModel) {
                     Box(Modifier.weight(1f)) {
                         FolderGridView(
                             files = uiState.currentFiles,
+                            isLoading = uiState.isLoading,
                             isLoadingMore = uiState.isLoadingMore,
                             onFileClick = { viewModel.onFileClick(it) },
                             onLoadMore = { viewModel.loadMoreBooks() },
-                            posterRepository = viewModel.posterRepository
+                            posterRepository = viewModel.posterRepository,
+                            gridState = mainGridState
                         )
                     }
                 }
             }
             
-            if (uiState.isLoading) {
-                Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.3f)), contentAlignment = Alignment.Center) {
-                    CircularProgressIndicator(color = KakaoYellow, strokeWidth = 2.dp)
-                }
-            }
-
             uiState.errorMessage?.let { msg ->
                 Snackbar(Modifier.align(Alignment.BottomCenter).padding(16.dp), containerColor = Color(0xFF222222), action = { TextButton({ viewModel.clearError() }) { Text("OK") } }) { Text(msg) }
             }
@@ -113,12 +115,13 @@ fun NasComicApp(viewModel: ComicViewModel) {
 @Composable
 fun FolderGridView(
     files: List<NasFile>,
+    isLoading: Boolean,
     isLoadingMore: Boolean,
     onFileClick: (NasFile) -> Unit,
     onLoadMore: () -> Unit,
-    posterRepository: PosterRepository
+    posterRepository: PosterRepository,
+    gridState: LazyGridState
 ) {
-    val gridState = rememberLazyGridState()
     val shouldLoadMore by remember {
         derivedStateOf {
             val lastVisibleItem = gridState.layoutInfo.visibleItemsInfo.lastOrNull()
@@ -128,6 +131,7 @@ fun FolderGridView(
     LaunchedEffect(shouldLoadMore) {
         if (shouldLoadMore) onLoadMore()
     }
+
     LazyVerticalGrid(
         state = gridState,
         columns = GridCells.Fixed(3),
@@ -135,16 +139,38 @@ fun FolderGridView(
         horizontalArrangement = Arrangement.spacedBy(10.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
-        items(files, key = { it.path }) { file ->
-            ComicCard(file, posterRepository) { onFileClick(file) }
-        }
-        if (isLoadingMore) {
-            item(span = { GridItemSpan(maxLineSpan) }) {
-                Box(Modifier.fillMaxWidth().padding(vertical = 24.dp), contentAlignment = Alignment.Center) {
-                    CircularProgressIndicator(color = KakaoYellow, strokeWidth = 2.dp, modifier = Modifier.size(24.dp))
+        if (isLoading && files.isEmpty()) {
+            items(12) { SkeletonCard() }
+        } else {
+            items(files, key = { it.path }) { file ->
+                ComicCard(file, posterRepository) { onFileClick(file) }
+            }
+            if (isLoadingMore) {
+                item(span = { GridItemSpan(maxLineSpan) }) {
+                    Box(Modifier.fillMaxWidth().padding(vertical = 24.dp), contentAlignment = Alignment.Center) {
+                        CircularProgressIndicator(color = KakaoYellow, strokeWidth = 2.dp, modifier = Modifier.size(24.dp))
+                    }
                 }
             }
         }
+    }
+}
+
+@Composable
+fun SkeletonCard() {
+    val infiniteTransition = rememberInfiniteTransition()
+    val alpha by infiniteTransition.animateFloat(
+        initialValue = 0.3f,
+        targetValue = 0.7f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(800, easing = LinearEasing),
+            repeatMode = RepeatMode.Reverse
+        )
+    )
+    Column(Modifier.fillMaxWidth()) {
+        Box(Modifier.aspectRatio(0.72f).fillMaxWidth().clip(RoundedCornerShape(4.dp)).background(SurfaceGrey.copy(alpha = alpha)))
+        Spacer(Modifier.height(8.dp))
+        Box(Modifier.fillMaxWidth(0.7f).height(12.dp).clip(RoundedCornerShape(2.dp)).background(SurfaceGrey.copy(alpha = alpha)))
     }
 }
 
@@ -330,7 +356,6 @@ fun WebtoonViewer(path: String, manager: ZipManager, posterUrl: String?, repo: P
             }
         }
         
-        // 상단 컨트롤 바 슬림화 수정
         AnimatedVisibility(showControls, enter = fadeIn(), exit = fadeOut()) {
             Box(Modifier.fillMaxWidth().background(BgBlack.copy(0.8f)).statusBarsPadding().padding(vertical = 4.dp, horizontal = 12.dp)) {
                 IconButton(onClick = onClose, modifier = Modifier.align(Alignment.CenterStart).size(36.dp)) {
@@ -396,7 +421,7 @@ fun SearchScreen(state: ComicBrowserUiState, onQueryChange: (String) -> Unit, on
             if (state.searchResults.isEmpty()) Box(Modifier.fillMaxSize(), Alignment.Center) { Text("검색 결과가 없습니다.", color = TextMuted) }
             else {
                 Text("검색 결과 ${state.searchResults.size}건", color = TextPureWhite, fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 24.dp, vertical = 12.dp))
-                FolderGridView(state.searchResults, false, onFileClick, {}, viewModel.posterRepository)
+                FolderGridView(state.searchResults, false, false, onFileClick, {}, viewModel.posterRepository, rememberLazyGridState())
             }
         }
     }
