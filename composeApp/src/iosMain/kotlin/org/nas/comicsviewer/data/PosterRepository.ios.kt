@@ -110,6 +110,11 @@ object IosPosterRepository : PosterRepository {
         NSUserDefaults.standardUserDefaults.removeObjectForKey(RECENT_SEARCHES_KEY)
     }
 
+    // iOS용 임시 구현 (추후 DB 연결 가능)
+    override suspend fun addToRecent(file: NasFile) {}
+    override suspend fun getRecentComics(): List<NasFile> = emptyList()
+    override suspend fun removeFromRecent(path: String) {}
+
     private fun NSData.toByteArray(): ByteArray {
         return ByteArray(this.length.toInt()).apply {
             usePinned { pinned ->
