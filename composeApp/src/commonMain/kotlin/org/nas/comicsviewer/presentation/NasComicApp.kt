@@ -70,6 +70,19 @@ fun NasComicApp(viewModel: ComicViewModel) {
     BackHandler(enabled = canBack) {
         viewModel.onBack()
     }
+    
+    LaunchedEffect(uiState.isWebtoonMode) {
+        zipManager.switchServer(uiState.isWebtoonMode)
+        // 모드 전환 시 스크롤 위치 초기화
+        mainGridState.scrollToItem(0)
+    }
+
+    // 카테고리나 경로가 변경될 때도 스크롤 초기화
+    LaunchedEffect(uiState.selectedCategoryIndex, uiState.currentPath) {
+        if (!uiState.isSeriesView) {
+            mainGridState.scrollToItem(0)
+        }
+    }
 
     MaterialTheme(colorScheme = darkColorScheme(background = BgBlack, surface = BgBlack, primary = TextPureWhite)) {
         Box(Modifier.fillMaxSize().background(BgBlack)) {
@@ -200,14 +213,18 @@ fun FolderGridView(
     gridState: LazyGridState,
     showCategoryBadge: Boolean = false
 ) {
-    val shouldLoadMore by remember {
+    // 무한 스크롤 감지 로직 개선: 로딩 중이 아닐 때만 체크하도록 하여 LaunchedEffect가 재트리거되게 함
+    val shouldLoadMore by remember(files.size, isLoading, isLoadingMore) {
         derivedStateOf {
             val lastVisibleItem = gridState.layoutInfo.visibleItemsInfo.lastOrNull()
-            lastVisibleItem != null && lastVisibleItem.index >= files.size - 10
+            lastVisibleItem != null && lastVisibleItem.index >= files.size - 10 && !isLoading && !isLoadingMore
         }
     }
+    
     LaunchedEffect(shouldLoadMore) {
-        if (shouldLoadMore) onLoadMore()
+        if (shouldLoadMore) {
+            onLoadMore()
+        }
     }
 
     LazyVerticalGrid(

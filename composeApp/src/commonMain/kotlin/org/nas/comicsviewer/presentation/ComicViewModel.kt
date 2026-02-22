@@ -72,7 +72,7 @@ class ComicViewModel(
             _uiState.update { it.copy(isLoading = true, isIntroShowing = true) }
             try {
                 if (_uiState.value.isWebtoonMode) {
-                    // 웹툰 모드에서는 카테고리 탭을 가져오지 않고 바로 빈 경로(전체 리스트) 스캔
+                    // 웹툰 모드에서는 초성 카테고리 탭 없이 바로 전체 리스트를 보여줍니다.
                     _uiState.update { it.copy(categories = emptyList(), isLoading = false, isIntroShowing = false) }
                     scanBooks("")
                 } else {
@@ -171,7 +171,7 @@ class ComicViewModel(
                 currentPage++
                 val result = nasRepository.scanComicFolders(uiState.value.currentPath, currentPage, pageSize)
                 val processedFiles = processScanResult(result.items)
-                val newFiles = _uiState.value.currentFiles + processedFiles
+                val newFiles = uiState.value.currentFiles + processedFiles
                 canLoadMore = newFiles.size < result.total_items
                 listCache[uiState.value.currentPath] = newFiles
                 _uiState.update { it.copy(currentFiles = newFiles, isLoadingMore = false) }
@@ -190,7 +190,7 @@ class ComicViewModel(
     }
 
     fun onFileClick(file: NasFile) {
-        if (!file.isDirectory) {
+        if (!file.isDirectory || _uiState.value.isSeriesView) {
             val episodes = if (_uiState.value.isSearchMode && _uiState.value.searchResults.isNotEmpty()) _uiState.value.searchResults else if (_uiState.value.isSeriesView) _uiState.value.seriesEpisodes else _uiState.value.currentFiles
             val index = episodes.indexOfFirst { it.path == file.path }
             _uiState.update { it.copy(
@@ -213,13 +213,15 @@ class ComicViewModel(
                 val metadata = nasRepository.getMetadata(file.path)
                 val result = nasRepository.scanComicFolders(file.path, 1, 100)
                 val processedFiles = processScanResult(result.items)
-                val hasEpisodes = processedFiles.any { !it.isDirectory }
+                
+                // 에피소드가 있거나, 파일인 경우 상세 페이지로 진입
+                val hasEpisodes = processedFiles.any { !it.isDirectory || it.path.lowercase().let { p -> p.endsWith(".zip") || p.endsWith(".cbz") || p.endsWith(".pdf") } }
                 
                 if (hasEpisodes) {
                     _uiState.update { it.copy(
                         isSeriesView = true,
                         selectedMetadata = metadata ?: ComicMetadata(title = file.name, summary = "정보를 불러올 수 없습니다."),
-                        seriesEpisodes = if (metadata?.chapters?.isNotEmpty() == true) metadata.chapters!! else processedFiles.filter { !it.isDirectory },
+                        seriesEpisodes = if (metadata?.chapters?.isNotEmpty() == true) metadata.chapters!! else processedFiles,
                         isLoading = false,
                         pathHistory = it.pathHistory + file.path
                     ) }

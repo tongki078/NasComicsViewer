@@ -11,16 +11,20 @@ import kotlinx.coroutines.withContext
 import org.nas.comicsviewer.domain.model.ComicInfo
 import kotlinx.serialization.json.Json
 
-actual fun provideZipManager(): ZipManager = IosZipManager()
+actual fun provideZipManager(): ZipManager = IosZipManager
 
-class IosZipManager : ZipManager {
+object IosZipManager : ZipManager {
 
     private val client = HttpClient(Darwin) {
         install(ContentNegotiation) {
             json(Json { isLenient = true; ignoreUnknownKeys = true })
         }
     }
-    private val baseUrl = "http://192.168.0.2:5555"
+    private var baseUrl = "http://192.168.0.2:5555"
+
+    override fun switchServer(isWebtoon: Boolean) {
+        baseUrl = if (isWebtoon) "http://192.168.0.2:5556" else "http://192.168.0.2:5555"
+    }
 
     override suspend fun listImagesInZip(filePath: String): List<String> = withContext(Dispatchers.Default) {
         try {

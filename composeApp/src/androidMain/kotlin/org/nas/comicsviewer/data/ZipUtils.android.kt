@@ -12,9 +12,9 @@ import kotlinx.coroutines.withContext
 import org.nas.comicsviewer.domain.model.ComicInfo
 import kotlinx.serialization.json.Json
 
-actual fun provideZipManager(): ZipManager = AndroidZipManager()
+actual fun provideZipManager(): ZipManager = AndroidZipManager.getInstance()
 
-class AndroidZipManager : ZipManager {
+class AndroidZipManager private constructor() : ZipManager {
 
     private val client = HttpClient(CIO) {
         install(ContentNegotiation) {
@@ -26,7 +26,18 @@ class AndroidZipManager : ZipManager {
             socketTimeoutMillis = 30000
         }
     }
-    private val baseUrl = "http://192.168.0.2:5555"
+    private var baseUrl = "http://192.168.0.2:5555"
+
+    companion object {
+        @Volatile private var instance: AndroidZipManager? = null
+        fun getInstance() = instance ?: synchronized(this) {
+            instance ?: AndroidZipManager().also { instance = it }
+        }
+    }
+
+    override fun switchServer(isWebtoon: Boolean) {
+        baseUrl = if (isWebtoon) "http://192.168.0.2:5556" else "http://192.168.0.2:5555"
+    }
 
     override suspend fun listImagesInZip(filePath: String): List<String> = withContext(Dispatchers.IO) {
         try {

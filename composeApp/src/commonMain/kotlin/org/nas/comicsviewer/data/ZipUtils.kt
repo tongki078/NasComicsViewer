@@ -14,6 +14,7 @@ interface ZipManager {
     )
 
     fun getComicInfo(zipPath: String): ComicInfo?
+    fun switchServer(isWebtoon: Boolean)
 }
 
 expect fun provideZipManager(): ZipManager
