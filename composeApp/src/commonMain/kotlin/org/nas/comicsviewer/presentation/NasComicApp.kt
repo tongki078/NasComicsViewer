@@ -61,7 +61,6 @@ fun NasComicApp(viewModel: ComicViewModel) {
     val scope = rememberCoroutineScope()
     
     val mainGridState = rememberLazyGridState()
-    var showJumpMenu by remember { mutableStateOf(false) }
 
     val canBack by remember {
         derivedStateOf {
@@ -85,119 +84,139 @@ fun NasComicApp(viewModel: ComicViewModel) {
     }
 
     MaterialTheme(colorScheme = darkColorScheme(background = BgBlack, surface = BgBlack, primary = TextPureWhite)) {
-        Scaffold(
-            floatingActionButton = {
-                // 초성 이동 버튼은 리스트가 있을 때만 표시
-                if (uiState.selectedZipPath == null && !uiState.isSeriesView && !uiState.isSearchMode && uiState.currentFiles.isNotEmpty()) {
-                    FloatingActionButton(
-                        onClick = { showJumpMenu = true },
-                        containerColor = KakaoYellow,
-                        contentColor = Color.Black,
-                        shape = CircleShape,
-                        modifier = Modifier.padding(bottom = 16.dp)
-                    ) {
-                        Icon(Icons.Default.Menu, contentDescription = "Jump")
-                    }
-                }
-            },
-            containerColor = BgBlack
-        ) { paddingValues ->
-            Box(Modifier.fillMaxSize().padding(paddingValues)) {
-                if (uiState.isIntroShowing) {
-                    IntroScreen()
-                } else if (uiState.selectedZipPath != null) {
-                     WebtoonViewer(
-                         path = uiState.selectedZipPath!!, 
-                         manager = zipManager, 
-                         posterUrl = uiState.viewerPosterUrl,
-                         repo = viewModel.posterRepository,
-                         onClose = { viewModel.closeViewer() }, 
-                         onError = { viewModel.showError(it) },
-                         uiState = uiState,
-                         viewModel = viewModel
-                     )
-                } else if (uiState.isSearchMode) {
-                    SearchScreen(
-                        state = uiState,
-                        onQueryChange = { viewModel.updateSearchQuery(it) },
-                        onSearch = { viewModel.onSearchSubmit(it) },
-                        onClose = { viewModel.toggleSearchMode(false) },
-                        onFileClick = { viewModel.onFileClick(it) },
-                        onClearHistory = { viewModel.clearRecentSearches() },
-                        viewModel = viewModel
+        Box(Modifier.fillMaxSize().background(BgBlack)) {
+            if (uiState.isIntroShowing) {
+                IntroScreen()
+            } else if (uiState.selectedZipPath != null) {
+                 WebtoonViewer(
+                     path = uiState.selectedZipPath!!, 
+                     manager = zipManager, 
+                     posterUrl = uiState.viewerPosterUrl,
+                     repo = viewModel.posterRepository,
+                     onClose = { viewModel.closeViewer() }, 
+                     onError = { viewModel.showError(it) },
+                     uiState = uiState,
+                     viewModel = viewModel
+                 )
+            } else if (uiState.isSearchMode) {
+                SearchScreen(
+                    state = uiState,
+                    onQueryChange = { viewModel.updateSearchQuery(it) },
+                    onSearch = { viewModel.onSearchSubmit(it) },
+                    onClose = { viewModel.toggleSearchMode(false) },
+                    onFileClick = { viewModel.onFileClick(it) },
+                    onClearHistory = { viewModel.clearRecentSearches() },
+                    viewModel = viewModel
+                )
+            } else if (uiState.isSeriesView) {
+                SeriesDetailScreen(uiState, { viewModel.onFileClick(it) }, { viewModel.onBack() }, viewModel.posterRepository)
+            } else {
+                Column(Modifier.fillMaxSize()) {
+                    TopBar(
+                        uiState = uiState,
+                        onHomeClick = { viewModel.onHome() }, 
+                        onSearchClick = { viewModel.toggleSearchMode(true) },
+                        onModeToggle = { viewModel.toggleServerMode() }
                     )
-                } else if (uiState.isSeriesView) {
-                    SeriesDetailScreen(uiState, { viewModel.onFileClick(it) }, { viewModel.onBack() }, viewModel.posterRepository)
-                } else {
-                    Column(Modifier.fillMaxSize()) {
-                        TopBar(
-                            uiState = uiState,
-                            onHomeClick = { viewModel.onHome() }, 
-                            onSearchClick = { viewModel.toggleSearchMode(true) },
-                            onModeToggle = { viewModel.toggleServerMode() }
-                        )
-                        
-                        if (uiState.categories.isNotEmpty()) {
-                            CategoryTabs(uiState) { path, index -> viewModel.scanBooks(path, index) }
-                        }
-                        
-                        Box(Modifier.weight(1f)) {
-                            val isWriterCategory = !uiState.isWebtoonMode && uiState.categories.getOrNull(uiState.selectedCategoryIndex)?.name == "작가"
-                            val isAtRoot = uiState.pathHistory.size <= 1
+                    
+                    if (uiState.categories.isNotEmpty()) {
+                        CategoryTabs(uiState) { path, index -> viewModel.scanBooks(path, index) }
+                    }
+                    
+                    Box(Modifier.weight(1f)) {
+                        val isWriterCategory = !uiState.isWebtoonMode && uiState.categories.getOrNull(uiState.selectedCategoryIndex)?.name == "작가"
+                        val isAtRoot = uiState.pathHistory.size <= 1
 
-                            if (isWriterCategory && isAtRoot) {
-                                FolderListView(
+                        if (isWriterCategory && isAtRoot) {
+                            FolderListView(
+                                files = uiState.currentFiles,
+                                isLoading = uiState.isLoading,
+                                onFileClick = { viewModel.onFileClick(it) }
+                            )
+                        } else {
+                            Box(Modifier.fillMaxSize()) {
+                                FolderGridView(
                                     files = uiState.currentFiles,
+                                    recentComics = uiState.recentComics,
                                     isLoading = uiState.isLoading,
-                                    onFileClick = { viewModel.onFileClick(it) }
+                                    isLoadingMore = uiState.isLoadingMore,
+                                    onFileClick = { viewModel.onFileClick(it) },
+                                    onLoadMore = { viewModel.loadMoreBooks() },
+                                    posterRepository = viewModel.posterRepository,
+                                    gridState = mainGridState,
+                                    showCategoryBadge = false
                                 )
-                            } else {
-                                Column {
-                                    if ((isWriterCategory || uiState.isWebtoonMode) && !isAtRoot) {
-                                        Row(
-                                            Modifier.fillMaxWidth().clickable { viewModel.onBack() }.padding(horizontal = 16.dp, vertical = 12.dp),
-                                            verticalAlignment = Alignment.CenterVertically
-                                        ) {
-                                            Icon(Icons.AutoMirrored.Filled.ArrowBack, null, tint = KakaoYellow, modifier = Modifier.size(18.dp))
-                                            Spacer(Modifier.width(12.dp))
-                                            Text(if (uiState.isWebtoonMode) "전체 목록으로 돌아가기" else "작가 목록으로 돌아가기", color = KakaoYellow, fontSize = 14.sp, fontWeight = FontWeight.Bold)
-                                        }
-                                        HorizontalDivider(color = SurfaceGrey, thickness = 0.5.dp)
-                                    }
-                                    FolderGridView(
+
+                                // 사이드 인덱스 바 추가
+                                if (uiState.currentFiles.isNotEmpty() && !uiState.isLoading) {
+                                    SideIndexBar(
                                         files = uiState.currentFiles,
-                                        recentComics = uiState.recentComics,
-                                        isLoading = uiState.isLoading,
-                                        isLoadingMore = uiState.isLoadingMore,
-                                        onFileClick = { viewModel.onFileClick(it) },
-                                        onLoadMore = { viewModel.loadMoreBooks() },
-                                        posterRepository = viewModel.posterRepository,
-                                        gridState = mainGridState,
-                                        showCategoryBadge = false
+                                        recentComicsCount = uiState.recentComics.size,
+                                        onJump = { index ->
+                                            scope.launch {
+                                                mainGridState.scrollToItem(index)
+                                            }
+                                        },
+                                        modifier = Modifier.align(Alignment.CenterEnd)
                                     )
                                 }
                             }
                         }
                     }
                 }
-                
-                uiState.errorMessage?.let { msg ->
-                    Snackbar(Modifier.align(Alignment.BottomCenter).padding(16.dp), containerColor = Color(0xFF222222), action = { TextButton({ viewModel.clearError() }) { Text("OK") } }) { Text(msg) }
-                }
+            }
+            
+            uiState.errorMessage?.let { msg ->
+                Snackbar(Modifier.align(Alignment.BottomCenter).padding(16.dp), containerColor = Color(0xFF222222), action = { TextButton({ viewModel.clearError() }) { Text("OK") } }) { Text(msg) }
+            }
+        }
+    }
+}
 
-                if (showJumpMenu) {
-                    JumpToSectionMenu(
-                        files = uiState.currentFiles,
-                        recentComicsCount = uiState.recentComics.size,
-                        onDismiss = { showJumpMenu = false },
-                        onJump = { index ->
-                            scope.launch {
-                                mainGridState.animateScrollToItem(index)
-                                showJumpMenu = false
+@Composable
+fun SideIndexBar(
+    files: List<NasFile>, 
+    recentComicsCount: Int, 
+    onJump: (Int) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val initials = remember(files) {
+        files.map { getInitialSound(it.name) }.distinct()
+    }
+
+    Box(
+        modifier = modifier
+            .fillMaxHeight()
+            .width(40.dp)
+            .padding(vertical = 40.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center,
+            modifier = Modifier
+                .background(Color.Black.copy(0.3f), RoundedCornerShape(20.dp))
+                .padding(vertical = 8.dp)
+        ) {
+            initials.forEach { initial ->
+                Text(
+                    text = initial,
+                    color = KakaoYellow.copy(alpha = 0.7f),
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Black,
+                    modifier = Modifier
+                        .padding(vertical = 2.dp)
+                        .clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null
+                        ) {
+                            val firstInGroup = files.indexOfFirst { getInitialSound(it.name) == initial }
+                            if (firstInGroup != -1) {
+                                val offset = if (recentComicsCount > 0) 1 else 0
+                                onJump(firstInGroup + offset)
                             }
                         }
-                    )
-                }
+                )
             }
         }
     }
@@ -291,7 +310,6 @@ fun FolderGridView(
         horizontalArrangement = Arrangement.spacedBy(10.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
-        // 최근 본 작품 섹션
         if (recentComics.isNotEmpty()) {
             item(span = { GridItemSpan(maxLineSpan) }) {
                 RecentComicsCarousel(recentComics, posterRepository, onFileClick)
@@ -303,7 +321,6 @@ fun FolderGridView(
                 Box(Modifier.aspectRatio(0.72f).fillMaxWidth().clip(RoundedCornerShape(8.dp)).background(SurfaceGrey))
             }
         } else {
-            // 미관상 좋지 않은 초성 헤더를 제거하고 리스트를 평탄하게 표시
             items(files, key = { it.path }) { file ->
                 ComicCard(file, posterRepository, showCategoryBadge) { onFileClick(file) }
             }
@@ -319,55 +336,30 @@ fun FolderGridView(
     }
 }
 
-@Composable
-fun JumpToSectionMenu(files: List<NasFile>, recentComicsCount: Int, onDismiss: () -> Unit, onJump: (Int) -> Unit) {
-    val initials = remember(files) {
-        files.map { getInitialSound(it.name) }.distinct()
-    }
-    
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        containerColor = Color(0xFF1A1A1A),
-        title = { Text("빠른 이동", color = Color.White, fontWeight = FontWeight.Bold) },
-        text = {
-            Column(Modifier.fillMaxWidth()) {
-                FlowRow(mainAxisSpacing = 8.dp, crossAxisSpacing = 8.dp) {
-                    initials.forEach { initial ->
-                        Surface(
-                            onClick = {
-                                val firstInGroup = files.indexOfFirst { getInitialSound(it.name) == initial }
-                                if (firstInGroup != -1) {
-                                    // 헤더가 제거되었으므로 인덱스 계산이 단순해짐
-                                    // RecentComicsCarousel이 있다면 1개의 아이템 오프셋 추가
-                                    val offset = if (recentComicsCount > 0) 1 else 0
-                                    onJump(firstInGroup + offset)
-                                }
-                            },
-                            color = SurfaceGrey,
-                            shape = CircleShape,
-                            border = BorderStroke(1.dp, Color.White.copy(0.1f))
-                        ) {
-                            Box(Modifier.size(48.dp), contentAlignment = Alignment.Center) {
-                                Text(initial, color = KakaoYellow, fontWeight = FontWeight.Bold, fontSize = 16.sp)
-                            }
-                        }
-                    }
-                }
-            }
-        },
-        confirmButton = {
-            TextButton(onClick = onDismiss) { Text("닫기", color = Color.White) }
-        }
-    )
-}
-
 fun getInitialSound(text: String): String {
     if (text.isEmpty()) return "#"
     val firstChar = text.trim()[0]
     if (firstChar in '가'..'힣') {
         val initialIdx = (firstChar - '가') / 28 / 21
-        val initials = listOf("ㄱ", "ㄲ", "ㄴ", "ㄷ", "ㄸ", "ㄹ", "ㅁ", "ㅂ", "ㅃ", "ㅅ", "ㅆ", "ㅇ", "ㅈ", "ㅉ", "ㅊ", "ㅋ", "ㅌ", "ㅍ", "ㅎ")
-        return initials[initialIdx]
+        val initials = listOf("ㄱ", "ㄴ", "ㄷ", "ㄹ", "ㅁ", "ㅂ", "ㅅ", "ㅇ", "ㅈ", "ㅊ", "ㅋ", "ㅌ", "ㅍ", "ㅎ")
+        val targetIdx = when(initialIdx) {
+            0, 1 -> 0 // ㄱ, ㄲ -> ㄱ
+            2 -> 1    // ㄴ
+            3, 4 -> 2 // ㄷ, ㄸ -> ㄷ
+            5 -> 3    // ㄹ
+            6 -> 4    // ㅁ
+            7, 8 -> 5 // ㅂ, ㅃ -> ㅂ
+            9, 10 -> 6// ㅅ, ㅆ -> ㅅ
+            11 -> 7   // ㅇ
+            12, 13 -> 8// ㅈ, ㅉ -> ㅈ
+            14 -> 9   // ㅊ
+            15 -> 10  // ㅋ
+            16 -> 11  // ㅌ
+            17 -> 12  // ㅍ
+            18 -> 13  // ㅎ
+            else -> 0
+        }
+        return initials.getOrElse(targetIdx) { "ㄱ" }
     }
     if (firstChar in 'a'..'z' || firstChar in 'A'..'Z') {
         return firstChar.uppercase()
