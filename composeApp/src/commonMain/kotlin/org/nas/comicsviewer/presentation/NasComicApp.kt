@@ -17,8 +17,6 @@ import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.*
 import androidx.compose.material3.TabRowDefaults.tabIndicatorOffset
 import androidx.compose.runtime.*
-import androidx.compose.runtime.saveable.rememberLazyGridState
-import androidx.compose.runtime.saveable.rememberLazyListState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -168,7 +166,7 @@ fun SkeletonCard() {
         )
     )
     Column(Modifier.fillMaxWidth()) {
-        Box(Modifier.aspectRatio(0.72f).fillMaxWidth().clip(RoundedCornerShape(4.dp)).background(SurfaceGrey.copy(alpha = alpha)))
+        Box(Modifier.aspectRatio(0.72f).fillMaxWidth().clip(RoundedCornerShape(8.dp)).background(SurfaceGrey.copy(alpha = alpha)))
         Spacer(Modifier.height(8.dp))
         Box(Modifier.fillMaxWidth(0.7f).height(12.dp).clip(RoundedCornerShape(2.dp)).background(SurfaceGrey.copy(alpha = alpha)))
     }
