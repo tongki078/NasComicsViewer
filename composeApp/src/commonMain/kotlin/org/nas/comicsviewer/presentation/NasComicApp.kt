@@ -330,7 +330,6 @@ fun WebtoonViewer(path: String, manager: ZipManager, posterUrl: String?, repo: P
         if (!isListLoaded) {
             Box(Modifier.fillMaxSize(), Alignment.Center) {
                 if (posterBitmap != null) Image(posterBitmap!!, null, Modifier.fillMaxSize().blur(40.dp).alpha(0.4f), contentScale = ContentScale.Crop)
-                CircularProgressIndicator(color = KakaoYellow)
             }
         } else {
             LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
@@ -383,9 +382,7 @@ fun WebtoonPage(zipPath: String, imageName: String, manager: ZipManager, cache: 
     }
 
     Box(Modifier.fillMaxWidth().wrapContentHeight().defaultMinSize(minHeight = 450.dp), contentAlignment = Alignment.Center) {
-        if (isLoading && bitmap == null) {
-            CircularProgressIndicator(Modifier.size(30.dp), color = KakaoYellow.copy(alpha = 0.4f), strokeWidth = 2.dp)
-        } else if (bitmap != null) {
+        if (bitmap != null) {
             Image(bitmap!!, null, Modifier.fillMaxWidth(), contentScale = ContentScale.FillWidth)
         }
     }
