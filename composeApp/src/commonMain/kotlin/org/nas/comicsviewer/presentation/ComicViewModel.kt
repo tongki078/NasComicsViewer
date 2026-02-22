@@ -46,6 +46,7 @@ class ComicViewModel(
     val uiState: StateFlow<ComicBrowserUiState> = _uiState.asStateFlow()
 
     private var scanJob: Job? = null
+    private var searchJob: Job? = null
     private var currentPage = 1
     private var canLoadMore = true
     private val pageSize = 50
@@ -169,14 +170,9 @@ class ComicViewModel(
         viewModelScope.launch {
             _uiState.update { it.copy(isLoading = true) }
             try {
-                // 메타데이터 시도
                 val metadata = nasRepository.getMetadata(file.path)
-                
-                // 실제 폴더 내용도 확인 (메타데이터가 없거나 에피소드가 없을 경우 대비)
                 val result = nasRepository.scanComicFolders(file.path, 1, 100)
                 val processedFiles = processScanResult(result.items)
-                
-                // 폴더 안에 파일(에피소드)이 하나라도 있으면 상세페이지 디자인으로 표시
                 val hasEpisodes = processedFiles.any { !it.isDirectory }
                 
                 if (hasEpisodes) {
@@ -188,11 +184,9 @@ class ComicViewModel(
                         pathHistory = it.pathHistory + file.path
                     ) }
                 } else {
-                    // 폴더만 있는 경우 일반 카테고리 스캔으로 진행
                     scanBooks(file.path)
                 }
             } catch (e: Exception) {
-                // 실패시 일반 스캔으로 폴백
                 scanBooks(file.path)
             }
         }
@@ -232,11 +226,23 @@ class ComicViewModel(
 
     fun onSearchSubmit(query: String) {
         if (query.isBlank()) return
-        viewModelScope.launch {
+        searchJob?.cancel()
+        searchJob = viewModelScope.launch {
+            _uiState.update { it.copy(isLoading = true) }
             try {
+                // 최근 검색어 저장
                 posterRepository.insertRecentSearch(query)
                 loadRecentSearches()
-            } catch (e: Exception) { }
+                
+                // 실제 검색 수행 (현재 서버 API에 검색 기능이 없으므로 전체 스캔 후 필터링하거나 서버 기능을 활용해야 함)
+                // 여기서는 예시로 루트부터 스캔하는 시뮬레이션을 하거나 특정 경로를 검색함
+                val searchResult = nasRepository.scanComicFolders("", 1, 100) // 빈 경로는 전체 검색을 의도 (서버 지원 필요)
+                val filtered = processScanResult(searchResult.items).filter { it.name.contains(query, ignoreCase = true) }
+                
+                _uiState.update { it.copy(searchResults = filtered, isLoading = false) }
+            } catch (e: Exception) {
+                _uiState.update { it.copy(errorMessage = "검색 실패: ${e.message}", isLoading = false) }
+            }
         }
     }
 

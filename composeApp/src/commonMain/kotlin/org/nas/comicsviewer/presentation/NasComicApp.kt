@@ -37,6 +37,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.nas.comicsviewer.BackHandler
@@ -316,10 +317,8 @@ fun WebtoonViewer(
     val sessionCache = remember { mutableMapOf<String, ImageBitmap>() }
     val scope = rememberCoroutineScope()
 
-    // 권수 리스트 팝업 상태
     var showEpisodeList by remember { mutableStateOf(false) }
 
-    // 전역 줌/오프셋 상태 (UX 개선 핵심)
     var scale by remember { mutableStateOf(1f) }
     var offset by remember { mutableStateOf(androidx.compose.ui.geometry.Offset.Zero) }
     val transformState = rememberTransformableState { zoomChange, offsetChange, _ ->
@@ -327,11 +326,14 @@ fun WebtoonViewer(
         offset = androidx.compose.ui.geometry.Offset(0f, offset.y + offsetChange.y)
     }
 
-    // 필터 및 밝기 상태
     var brightness by remember { mutableStateOf(1f) }
     var isSepia by remember { mutableStateOf(false) }
     var isGray by remember { mutableStateOf(false) }
     var showSettings by remember { mutableStateOf(false) }
+
+    // 오토스크롤 상태
+    var isAutoScrollEnabled by remember { mutableStateOf(false) }
+    var autoScrollSpeed by remember { mutableStateOf(1f) } 
 
     LaunchedEffect(posterUrl) { posterUrl?.let { posterBitmap = repo.getImage(it) } }
 
@@ -339,13 +341,10 @@ fun WebtoonViewer(
         val names = manager.listImagesInZip(path)
         if (names.isNotEmpty()) {
             imageNames.clear(); imageNames.addAll(names); isListLoaded = true
-            
-            // 자동 이어보기 (UX 2)
             val lastPos = uiState.readingPositions[path] ?: 0
             if (lastPos > 0) {
                 scope.launch { listState.scrollToItem(lastPos) }
             }
-
             names.take(3).forEach { name ->
                 scope.launch(Dispatchers.Default) {
                     val bytes = manager.extractImage(path, name)
@@ -355,10 +354,24 @@ fun WebtoonViewer(
         } else { onError("이미지 목록을 가져올 수 없습니다.") }
     }
 
-    // 위치 저장
     LaunchedEffect(listState.firstVisibleItemIndex) {
         if (isListLoaded) {
             viewModel.saveReadingPosition(path, listState.firstVisibleItemIndex)
+        }
+    }
+
+    // 오토스크롤 로직 안정화
+    LaunchedEffect(isAutoScrollEnabled, autoScrollSpeed) {
+        if (isAutoScrollEnabled) {
+            while (isActive) {
+                try {
+                    listState.scrollBy(autoScrollSpeed)
+                } catch (e: Exception) {
+                    isAutoScrollEnabled = false
+                    break
+                }
+                delay(16)
+            }
         }
     }
 
@@ -368,7 +381,6 @@ fun WebtoonViewer(
                 if (posterBitmap != null) Image(posterBitmap!!, null, Modifier.fillMaxSize().blur(40.dp).alpha(0.4f), contentScale = ContentScale.Crop)
             }
         } else {
-            // 전체를 감싸는 변환 레이어 (UX 개선)
             Box(
                 Modifier.fillMaxSize()
                     .graphicsLayer(
@@ -407,24 +419,10 @@ fun WebtoonViewer(
                             }
                         }
                     }
-                    
-                    // 연속 정주행 (UX 1)
-                    item {
-                        Box(Modifier.fillMaxWidth().padding(40.dp), contentAlignment = Alignment.Center) {
-                            Button(
-                                onClick = { viewModel.navigateChapter(true) },
-                                colors = ButtonDefaults.buttonColors(containerColor = KakaoYellow, contentColor = Color.Black),
-                                shape = RoundedCornerShape(8.dp)
-                            ) {
-                                Text("다음 화 보기", fontWeight = FontWeight.Bold)
-                            }
-                        }
-                    }
                 }
             }
         }
 
-        // 밝기 필터 (UX 4)
         if (brightness < 1f) {
             Box(Modifier.fillMaxSize().run { 
                 val base = background(Color.Black.copy(alpha = 1f - brightness))
@@ -432,7 +430,6 @@ fun WebtoonViewer(
             })
         }
         
-        // 상단 컨트롤 바
         AnimatedVisibility(showControls, enter = fadeIn() + slideInVertically(), exit = fadeOut() + slideOutVertically()) {
             Box(Modifier.fillMaxWidth().background(BgBlack.copy(0.8f)).statusBarsPadding().padding(vertical = 4.dp, horizontal = 12.dp)) {
                 IconButton(onClick = onClose, modifier = Modifier.align(Alignment.CenterStart).size(36.dp)) {
@@ -442,7 +439,15 @@ fun WebtoonViewer(
                     Text("${listState.firstVisibleItemIndex + 1} / ${imageNames.size}", Modifier.align(Alignment.Center), color = TextPureWhite, fontSize = 13.sp, fontWeight = FontWeight.Bold)
                 }
                 Row(Modifier.align(Alignment.CenterEnd)) {
-                    // 권수 리스트 버튼 추가
+                    // 아이콘 참조 오류 수정: PlayArrow만 사용하고 색상으로 상태 표시
+                    IconButton(onClick = { isAutoScrollEnabled = !isAutoScrollEnabled }, modifier = Modifier.size(36.dp)) {
+                        Icon(
+                            imageVector = Icons.Default.PlayArrow, 
+                            contentDescription = null, 
+                            tint = if (isAutoScrollEnabled) KakaoYellow else TextPureWhite, 
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
                     IconButton(onClick = { 
                         showEpisodeList = !showEpisodeList
                         if (showEpisodeList) showSettings = false
@@ -459,49 +464,52 @@ fun WebtoonViewer(
             }
         }
 
-        // 하단 컨트롤 및 네비게이션 (UX 3)
+        // 하단 컨트롤 (영역 최소화)
         AnimatedVisibility(showControls, enter = fadeIn() + slideInVertically(initialOffsetY = { it }), exit = fadeOut() + slideOutVertically(targetOffsetY = { it }), modifier = Modifier.align(Alignment.BottomCenter)) {
-            Column(Modifier.fillMaxWidth().background(BgBlack.copy(0.8f)).navigationBarsPadding().padding(16.dp)) {
+            Box(Modifier.fillMaxWidth().background(BgBlack.copy(0.6f)).navigationBarsPadding().padding(horizontal = 16.dp, vertical = 8.dp)) {
                 if (isListLoaded) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        IconButton(onClick = { viewModel.navigateChapter(false) }, enabled = uiState.currentChapterIndex > 0) {
-                            Icon(Icons.AutoMirrored.Filled.KeyboardArrowLeft, null, tint = if (uiState.currentChapterIndex > 0) Color.White else Color.Gray)
+                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                        IconButton(onClick = { viewModel.navigateChapter(false) }, enabled = uiState.currentChapterIndex > 0, modifier = Modifier.size(32.dp)) {
+                            Icon(Icons.AutoMirrored.Filled.KeyboardArrowLeft, null, tint = if (uiState.currentChapterIndex > 0) Color.White else Color.Gray, modifier = Modifier.size(20.dp))
                         }
+                        
                         Slider(
                             value = listState.firstVisibleItemIndex.toFloat(),
                             onValueChange = { scope.launch { listState.scrollToItem(it.toInt()) } },
                             valueRange = 0f..(imageNames.size - 1).coerceAtLeast(0).toFloat(),
-                            modifier = Modifier.weight(1f),
-                            colors = SliderDefaults.colors(thumbColor = KakaoYellow, activeTrackColor = KakaoYellow)
+                            modifier = Modifier.weight(1f).height(32.dp),
+                            colors = SliderDefaults.colors(thumbColor = KakaoYellow, activeTrackColor = KakaoYellow, inactiveTrackColor = Color.White.copy(0.2f))
                         )
-                        IconButton(onClick = { viewModel.navigateChapter(true) }, enabled = uiState.currentChapterIndex < (if (uiState.isSeriesView) uiState.seriesEpisodes.size else uiState.currentFiles.size) - 1) {
-                            Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, null, tint = if (uiState.currentChapterIndex < (if (uiState.isSeriesView) uiState.seriesEpisodes.size else uiState.currentFiles.size) - 1) Color.White else Color.Gray)
-                        }
                         
-                        // 페이지 이동 버튼 (UX 추가 요청)
-                        Spacer(Modifier.width(8.dp))
-                        Row {
-                            IconButton(onClick = { 
-                                scope.launch { 
-                                    listState.animateScrollToItem((listState.firstVisibleItemIndex - 1).coerceAtLeast(0)) 
-                                }
-                            }, modifier = Modifier.size(32.dp)) {
-                                Icon(Icons.Default.KeyboardArrowUp, null, tint = Color.White)
-                            }
-                            IconButton(onClick = { 
-                                scope.launch { 
-                                    listState.animateScrollToItem((listState.firstVisibleItemIndex + 1).coerceIn(imageNames.indices)) 
-                                }
-                            }, modifier = Modifier.size(32.dp)) {
-                                Icon(Icons.Default.KeyboardArrowDown, null, tint = Color.White)
-                            }
+                        IconButton(onClick = { viewModel.navigateChapter(true) }, enabled = uiState.currentChapterIndex < (if (uiState.isSeriesView) uiState.seriesEpisodes.size else uiState.currentFiles.size) - 1, modifier = Modifier.size(32.dp)) {
+                            Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, null, tint = if (uiState.currentChapterIndex < (if (uiState.isSeriesView) uiState.seriesEpisodes.size else uiState.currentFiles.size) - 1) Color.White else Color.Gray, modifier = Modifier.size(20.dp))
                         }
                     }
                 }
             }
         }
 
-        // 권수 리스트 패널
+        // 우측 하단 플로팅 페이지 이동 버튼
+        AnimatedVisibility(showControls && !isAutoScrollEnabled, enter = fadeIn(), exit = fadeOut(), modifier = Modifier.align(Alignment.BottomEnd).padding(bottom = 80.dp, end = 16.dp)) {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                FloatingActionButton(
+                    onClick = { scope.launch { listState.animateScrollToItem((listState.firstVisibleItemIndex - 1).coerceAtLeast(0)) } },
+                    containerColor = Color.Black.copy(0.5f),
+                    contentColor = Color.White,
+                    modifier = Modifier.size(40.dp),
+                    shape = CircleShape
+                ) { Icon(Icons.Default.KeyboardArrowUp, null) }
+                
+                FloatingActionButton(
+                    onClick = { scope.launch { listState.animateScrollToItem((listState.firstVisibleItemIndex + 1).coerceIn(imageNames.indices)) } },
+                    containerColor = Color.Black.copy(0.5f),
+                    contentColor = Color.White,
+                    modifier = Modifier.size(40.dp),
+                    shape = CircleShape
+                ) { Icon(Icons.Default.KeyboardArrowDown, null) }
+            }
+        }
+
         if (showEpisodeList) {
             Surface(
                 modifier = Modifier.align(Alignment.CenterEnd).padding(top = 60.dp, end = 16.dp, bottom = 16.dp).width(250.dp).fillMaxHeight(0.7f),
@@ -540,7 +548,6 @@ fun WebtoonViewer(
             }
         }
 
-        // 설정 패널 (UX 4)
         if (showSettings) {
             Surface(
                 modifier = Modifier.align(Alignment.CenterEnd).padding(16.dp).width(200.dp),
@@ -551,6 +558,9 @@ fun WebtoonViewer(
                 Column(Modifier.padding(16.dp)) {
                     Text("밝기 조절", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
                     Slider(value = brightness, onValueChange = { brightness = it }, valueRange = 0.2f..1f, colors = SliderDefaults.colors(thumbColor = KakaoYellow, activeTrackColor = KakaoYellow))
+                    Spacer(Modifier.height(16.dp))
+                    Text("오토스크롤 속도", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                    Slider(value = autoScrollSpeed, onValueChange = { autoScrollSpeed = it }, valueRange = 0.5f..10f, colors = SliderDefaults.colors(thumbColor = KakaoYellow, activeTrackColor = KakaoYellow))
                     Spacer(Modifier.height(16.dp))
                     Text("이미지 필터", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
                     Spacer(Modifier.height(8.dp))
