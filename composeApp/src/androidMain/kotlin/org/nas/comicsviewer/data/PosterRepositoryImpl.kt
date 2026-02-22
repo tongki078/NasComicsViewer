@@ -9,6 +9,7 @@ import io.ktor.client.call.body
 import io.ktor.client.engine.cio.CIO
 import io.ktor.client.plugins.HttpTimeout
 import io.ktor.client.request.get
+import io.ktor.client.statement.HttpResponse
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.nas.comicsviewer.toImageBitmap
@@ -44,10 +45,14 @@ class AndroidPosterRepository(private val context: Context, private val database
     
     override fun switchServer(isWebtoon: Boolean) {
         baseUrl = if (isWebtoon) "http://192.168.0.2:5556" else "http://192.168.0.2:5555"
+        provideZipManager().switchServer(isWebtoon)
     }
 
     override suspend fun getImage(url: String): ImageBitmap? = withContext(Dispatchers.IO) {
         if (url.isBlank()) return@withContext null
+        
+        Log.d("PosterLoader_FINAL", "Attempting to load URL: $url")
+        
         val cacheKey = url.toHash()
         memoryCache.get(url)?.let { return@withContext it }
         val diskFile = File(diskCacheDir, cacheKey)
@@ -62,14 +67,52 @@ class AndroidPosterRepository(private val context: Context, private val database
                 diskFile.delete()
             }
         }
-        try {
-            val downloadUrl = if (url.startsWith("http")) {
-                url
-            } else {
-                val encodedPath = URLEncoder.encode(url, "UTF-8").replace("+", "%20")
-                "$baseUrl/download?path=$encodedPath"
+
+        if (url.startsWith("zip_thumb://")) {
+            try {
+                val zipPath = url.removePrefix("zip_thumb://")
+                val zipManager = provideZipManager()
+                val imagesInZip = zipManager.listImagesInZip(zipPath)
+                if (imagesInZip.isNotEmpty()) {
+                    val coverImage = imagesInZip.first()
+                    val bytes = zipManager.extractImage(zipPath, coverImage)
+                    if (bytes != null && bytes.isNotEmpty()) {
+                        diskFile.writeBytes(bytes)
+                        bytes.toImageBitmap()?.let {
+                            memoryCache.put(url, it)
+                            return@withContext it
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e("NasComics", "Failed to extract thumb from zip: $url", e)
             }
-            val response = client.get(downloadUrl)
+            return@withContext null
+        }
+
+        try {
+            val response: HttpResponse
+            
+            // 명확한 분기: 외부 URL (서버 주소로 시작하지 않는 http/https)는 앱이 직접 요청
+            if (url.startsWith("http") && !(url.startsWith("http://192.168.0.2:") || url.startsWith("https://192.168.0.2:"))) {
+                Log.d("PosterLoader_FINAL", "Requesting EXTERNAL URL directly: $url")
+                response = client.get(url)
+            } else {
+                // 2. 서버 내부 URL 또는 상대 경로 요청 (서버 프록시를 통함)
+                val downloadUrl: String
+                if (url.startsWith("http")) { // 서버 내부 URL (baseUrl로 시작하는 경우)
+                    val encodedPath = URLEncoder.encode(url.removePrefix("$baseUrl/download?path="), "UTF-8").replace("+", "%20")
+                    downloadUrl = "$baseUrl/download?path=$encodedPath"
+                } else { // DB에 저장된 상대 경로
+                    val encodedSegments = url.split("/").joinToString("/") { 
+                        URLEncoder.encode(it, "UTF-8").replace("+", "%20")
+                    }
+                    downloadUrl = "$baseUrl/download?path=$encodedSegments"
+                }
+                Log.d("PosterLoader_FINAL", "Requesting download URL via server: $downloadUrl")
+                response = client.get(downloadUrl)
+            }
+            
             val bytes: ByteArray = response.body()
             if (bytes.isNotEmpty()) {
                 diskFile.writeBytes(bytes)
@@ -100,19 +143,19 @@ class AndroidPosterRepository(private val context: Context, private val database
         queries.insertRecentComic(
             path = file.path,
             name = file.name,
-            poster_url = file.metadata?.posterUrl,
+            poster_url = file.metadata?.posterUrl, // metadata를 통해 접근
             is_directory = file.isDirectory,
             last_read_at = System.currentTimeMillis()
         )
     }
 
     override suspend fun getRecentComics(): List<NasFile> = withContext(Dispatchers.IO) {
-        queries.getRecentComics().executeAsList().map {
+        queries.getRecentComics().executeAsList().map { dbRow ->
             NasFile(
-                name = it.name,
-                path = it.path,
-                isDirectory = it.is_directory,
-                metadata = ComicMetadata(posterUrl = it.poster_url)
+                name = dbRow.name,
+                path = dbRow.path,
+                isDirectory = dbRow.is_directory,
+                metadata = ComicMetadata(posterUrl = dbRow.poster_url) // DB에서 가져온 값으로 ComicMetadata 생성
             )
         }
     }

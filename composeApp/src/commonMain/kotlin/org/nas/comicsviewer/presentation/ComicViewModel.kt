@@ -18,6 +18,7 @@ data class ComicBrowserUiState(
     val recentComics: List<NasFile> = emptyList(),
     val isLoading: Boolean = false,
     val isLoadingMore: Boolean = false,
+    val isRefreshing: Boolean = false,
     val errorMessage: String? = null,
     val currentPath: String = "",
     val pathHistory: List<String> = emptyList(),
@@ -84,7 +85,7 @@ class ComicViewModel(
                     }
                 }
             } catch (e: Exception) {
-                _uiState.update { it.copy(errorMessage = "서버 연결 실패: ${e.message}", isLoading = false) }
+                _uiState.update { it.copy(errorMessage = "서버 연결 실패", isLoading = false) }
             }
         }
     }
@@ -115,17 +116,24 @@ class ComicViewModel(
         checkServerAndLoadCategories()
     }
 
+    fun refresh() {
+        listCache.remove(_uiState.value.currentPath)
+        _uiState.update { it.copy(isRefreshing = true) }
+        scanBooks(_uiState.value.currentPath, _uiState.value.selectedCategoryIndex, isBack = false)
+    }
+
     fun scanBooks(path: String, index: Int? = null, isBack: Boolean = false) {
         if (isBack && listCache.containsKey(path)) {
             _uiState.update { state ->
                 state.copy(
                     selectedCategoryIndex = index ?: state.selectedCategoryIndex,
                     currentPath = path,
-                    pathHistory = state.pathHistory.dropLast(1),
+                    pathHistory = if (state.pathHistory.isEmpty()) listOf(path) else state.pathHistory.dropLast(1),
                     currentFiles = listCache[path] ?: emptyList(),
                     isSeriesView = false,
                     selectedMetadata = null,
-                    isLoading = false
+                    isLoading = false,
+                    isRefreshing = false
                 )
             }
             return
@@ -136,13 +144,13 @@ class ComicViewModel(
         canLoadMore = true
 
         _uiState.update { state ->
-            val newHistory = if (index != null) listOf(path) else if (isBack) state.pathHistory.dropLast(1) else state.pathHistory + path
+            val newHistory = if (index != null) listOf(path) else if (isBack) state.pathHistory.dropLast(1) else if (state.pathHistory.lastOrNull() == path) state.pathHistory else state.pathHistory + path
             state.copy(
                 selectedCategoryIndex = index ?: state.selectedCategoryIndex,
                 currentPath = path,
                 pathHistory = newHistory,
-                isLoading = true,
-                currentFiles = emptyList(),
+                isLoading = !state.isRefreshing,
+                currentFiles = if (state.isRefreshing) state.currentFiles else emptyList(),
                 totalItems = 0,
                 isSeriesView = false,
                 selectedMetadata = null,
@@ -157,9 +165,9 @@ class ComicViewModel(
                 val processedFiles = processScanResult(result.items)
                 canLoadMore = processedFiles.size < result.total_items
                 listCache[path] = processedFiles
-                _uiState.update { it.copy(currentFiles = processedFiles, totalItems = result.total_items, isLoading = false) }
+                _uiState.update { it.copy(currentFiles = processedFiles, totalItems = result.total_items, isLoading = false, isRefreshing = false) }
             } catch (e: Exception) {
-                _uiState.update { it.copy(errorMessage = "목록 로드 실패: ${e.message}", isLoading = false) }
+                _uiState.update { it.copy(errorMessage = "목록 로드 실패: ${e.message}", isLoading = false, isRefreshing = false) }
             }
         }
     }

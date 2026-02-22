@@ -58,7 +58,6 @@ private val TextMuted = Color(0xFF888888)
 fun NasComicApp(viewModel: ComicViewModel) {
     val uiState by viewModel.uiState.collectAsState()
     val zipManager = remember { provideZipManager() }
-    val scope = rememberCoroutineScope()
     
     val mainGridState = rememberLazyGridState()
 
@@ -116,7 +115,8 @@ fun NasComicApp(viewModel: ComicViewModel) {
                         uiState = uiState,
                         onHomeClick = { viewModel.onHome() }, 
                         onSearchClick = { viewModel.toggleSearchMode(true) },
-                        onModeToggle = { viewModel.toggleServerMode() }
+                        onModeToggle = { viewModel.toggleServerMode() },
+                        onRefresh = { viewModel.refresh() }
                     )
                     
                     if (uiState.categories.isNotEmpty()) {
@@ -134,33 +134,18 @@ fun NasComicApp(viewModel: ComicViewModel) {
                                 onFileClick = { viewModel.onFileClick(it) }
                             )
                         } else {
-                            Box(Modifier.fillMaxSize()) {
-                                FolderGridView(
-                                    files = uiState.currentFiles,
-                                    recentComics = uiState.recentComics,
-                                    isLoading = uiState.isLoading,
-                                    isLoadingMore = uiState.isLoadingMore,
-                                    onFileClick = { viewModel.onFileClick(it) },
-                                    onLoadMore = { viewModel.loadMoreBooks() },
-                                    posterRepository = viewModel.posterRepository,
-                                    gridState = mainGridState,
-                                    showCategoryBadge = false
-                                )
-
-                                // 사이드 인덱스 바 추가
-                                if (uiState.currentFiles.isNotEmpty() && !uiState.isLoading) {
-                                    SideIndexBar(
-                                        files = uiState.currentFiles,
-                                        recentComicsCount = uiState.recentComics.size,
-                                        onJump = { index ->
-                                            scope.launch {
-                                                mainGridState.scrollToItem(index)
-                                            }
-                                        },
-                                        modifier = Modifier.align(Alignment.CenterEnd)
-                                    )
-                                }
-                            }
+                            FolderGridView(
+                                files = uiState.currentFiles,
+                                recentComics = uiState.recentComics,
+                                isLoading = uiState.isLoading,
+                                isLoadingMore = uiState.isLoadingMore,
+                                isRefreshing = uiState.isRefreshing,
+                                onFileClick = { viewModel.onFileClick(it) },
+                                onLoadMore = { viewModel.loadMoreBooks() },
+                                posterRepository = viewModel.posterRepository,
+                                gridState = mainGridState,
+                                showCategoryBadge = false
+                            )
                         }
                     }
                 }
@@ -168,55 +153,6 @@ fun NasComicApp(viewModel: ComicViewModel) {
             
             uiState.errorMessage?.let { msg ->
                 Snackbar(Modifier.align(Alignment.BottomCenter).padding(16.dp), containerColor = Color(0xFF222222), action = { TextButton({ viewModel.clearError() }) { Text("OK") } }) { Text(msg) }
-            }
-        }
-    }
-}
-
-@Composable
-fun SideIndexBar(
-    files: List<NasFile>, 
-    recentComicsCount: Int, 
-    onJump: (Int) -> Unit,
-    modifier: Modifier = Modifier
-) {
-    val initials = remember(files) {
-        files.map { getInitialSound(it.name) }.distinct()
-    }
-
-    Box(
-        modifier = modifier
-            .fillMaxHeight()
-            .width(40.dp)
-            .padding(vertical = 40.dp),
-        contentAlignment = Alignment.Center
-    ) {
-        Column(
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.Center,
-            modifier = Modifier
-                .background(Color.Black.copy(0.3f), RoundedCornerShape(20.dp))
-                .padding(vertical = 8.dp)
-        ) {
-            initials.forEach { initial ->
-                Text(
-                    text = initial,
-                    color = KakaoYellow.copy(alpha = 0.7f),
-                    fontSize = 10.sp,
-                    fontWeight = FontWeight.Black,
-                    modifier = Modifier
-                        .padding(vertical = 2.dp)
-                        .clickable(
-                            interactionSource = remember { MutableInteractionSource() },
-                            indication = null
-                        ) {
-                            val firstInGroup = files.indexOfFirst { getInitialSound(it.name) == initial }
-                            if (firstInGroup != -1) {
-                                val offset = if (recentComicsCount > 0) 1 else 0
-                                onJump(firstInGroup + offset)
-                            }
-                        }
-                )
             }
         }
     }
@@ -232,11 +168,18 @@ fun RecentComicsCarousel(recentComics: List<NasFile>, repo: PosterRepository, on
             items(recentComics) { file ->
                 Column(Modifier.width(100.dp).clickable { onFileClick(file) }) {
                     var thumb by remember { mutableStateOf<ImageBitmap?>(null) }
-                    LaunchedEffect(file.metadata?.posterUrl) {
-                        file.metadata?.posterUrl?.let { thumb = repo.getImage(it) }
+                    val posterUrl = file.metadata?.posterUrl ?: file.path
+                    LaunchedEffect(posterUrl) {
+                        thumb = repo.getImage(posterUrl)
                     }
                     Box(Modifier.aspectRatio(0.72f).fillMaxWidth().clip(RoundedCornerShape(8.dp)).background(SurfaceGrey)) {
-                        if (thumb != null) Image(thumb!!, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+                        if (thumb != null) {
+                            Image(thumb!!, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+                        } else {
+                            Box(Modifier.fillMaxSize(), Alignment.Center) {
+                                Text("NAS", color = TextMuted, fontSize = 10.sp, fontWeight = FontWeight.Bold, modifier = Modifier.alpha(0.3f))
+                            }
+                        }
                     }
                     Spacer(Modifier.height(6.dp))
                     Text(file.name, color = TextPureWhite, fontSize = 11.sp, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -286,6 +229,7 @@ fun FolderGridView(
     recentComics: List<NasFile> = emptyList(),
     isLoading: Boolean,
     isLoadingMore: Boolean,
+    isRefreshing: Boolean = false,
     onFileClick: (NasFile) -> Unit,
     onLoadMore: () -> Unit,
     posterRepository: PosterRepository,
@@ -303,71 +247,45 @@ fun FolderGridView(
         if (shouldLoadMore) onLoadMore()
     }
 
-    LazyVerticalGrid(
-        state = gridState,
-        columns = GridCells.Fixed(3),
-        contentPadding = PaddingValues(16.dp),
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp)
-    ) {
-        if (recentComics.isNotEmpty()) {
-            item(span = { GridItemSpan(maxLineSpan) }) {
-                RecentComicsCarousel(recentComics, posterRepository, onFileClick)
-            }
-        }
-
-        if (isLoading && files.isEmpty()) {
-            items(12) { 
-                Box(Modifier.aspectRatio(0.72f).fillMaxWidth().clip(RoundedCornerShape(8.dp)).background(SurfaceGrey))
-            }
-        } else {
-            items(files, key = { it.path }) { file ->
-                ComicCard(file, posterRepository, showCategoryBadge) { onFileClick(file) }
-            }
-            
-            if (isLoadingMore) {
+    Box(Modifier.fillMaxSize()) {
+        LazyVerticalGrid(
+            state = gridState,
+            columns = GridCells.Fixed(3),
+            contentPadding = PaddingValues(16.dp),
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp)
+        ) {
+            if (recentComics.isNotEmpty()) {
                 item(span = { GridItemSpan(maxLineSpan) }) {
-                    Box(Modifier.fillMaxWidth().padding(vertical = 24.dp), contentAlignment = Alignment.Center) {
-                        CircularProgressIndicator(color = KakaoYellow, strokeWidth = 2.dp, modifier = Modifier.size(24.dp))
+                    RecentComicsCarousel(recentComics, posterRepository, onFileClick)
+                }
+            }
+
+            if (isLoading && files.isEmpty()) {
+                items(12) { 
+                    Box(Modifier.aspectRatio(0.72f).fillMaxWidth().clip(RoundedCornerShape(8.dp)).background(SurfaceGrey))
+                }
+            } else {
+                items(files, key = { it.path }) { file ->
+                    ComicCard(file, posterRepository, showCategoryBadge) { onFileClick(file) }
+                }
+                
+                if (isLoadingMore) {
+                    item(span = { GridItemSpan(maxLineSpan) }) {
+                        Box(Modifier.fillMaxWidth().padding(vertical = 24.dp), contentAlignment = Alignment.Center) {
+                            CircularProgressIndicator(color = KakaoYellow, strokeWidth = 2.dp, modifier = Modifier.size(24.dp))
+                        }
                     }
                 }
             }
         }
-    }
-}
-
-fun getInitialSound(text: String): String {
-    if (text.isEmpty()) return "#"
-    val firstChar = text.trim()[0]
-    if (firstChar in '가'..'힣') {
-        val initialIdx = (firstChar - '가') / 28 / 21
-        val initials = listOf("ㄱ", "ㄴ", "ㄷ", "ㄹ", "ㅁ", "ㅂ", "ㅅ", "ㅇ", "ㅈ", "ㅊ", "ㅋ", "ㅌ", "ㅍ", "ㅎ")
-        val targetIdx = when(initialIdx) {
-            0, 1 -> 0 // ㄱ, ㄲ -> ㄱ
-            2 -> 1    // ㄴ
-            3, 4 -> 2 // ㄷ, ㄸ -> ㄷ
-            5 -> 3    // ㄹ
-            6 -> 4    // ㅁ
-            7, 8 -> 5 // ㅂ, ㅃ -> ㅂ
-            9, 10 -> 6// ㅅ, ㅆ -> ㅅ
-            11 -> 7   // ㅇ
-            12, 13 -> 8// ㅈ, ㅉ -> ㅈ
-            14 -> 9   // ㅊ
-            15 -> 10  // ㅋ
-            16 -> 11  // ㅌ
-            17 -> 12  // ㅍ
-            18 -> 13  // ㅎ
-            else -> 0
+        
+        if (isRefreshing) {
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.TopCenter) {
+                CircularProgressIndicator(color = KakaoYellow, modifier = Modifier.padding(top = 16.dp).size(32.dp), strokeWidth = 3.dp)
+            }
         }
-        return initials.getOrElse(targetIdx) { "ㄱ" }
     }
-    if (firstChar in 'a'..'z' || firstChar in 'A'..'Z') {
-        return firstChar.uppercase()
-    }
-    if (firstChar in '0'..'9') {
-        return "0-9"
-    }
-    return "#"
 }
 
 @Composable
@@ -892,14 +810,14 @@ fun SearchScreen(state: ComicBrowserUiState, onQueryChange: (String) -> Unit, on
                 Box(Modifier.fillMaxSize(), Alignment.Center) { Text("검색 결과가 없습니다.", color = TextMuted) }
             } else if (state.searchResults.isNotEmpty()) {
                 Text("검색 결과 ${state.searchResults.size}건", color = TextPureWhite, fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 24.dp, vertical = 12.dp))
-                FolderGridView(state.searchResults, emptyList(), false, false, onFileClick, {}, viewModel.posterRepository, rememberLazyGridState(), showCategoryBadge = true)
+                FolderGridView(state.searchResults, emptyList(), false, false, false, onFileClick, {}, viewModel.posterRepository, rememberLazyGridState(), showCategoryBadge = true)
             }
         }
     }
 }
 
 @Composable
-fun TopBar(uiState: ComicBrowserUiState, onHomeClick: () -> Unit, onSearchClick: () -> Unit, onModeToggle: () -> Unit) {
+fun TopBar(uiState: ComicBrowserUiState, onHomeClick: () -> Unit, onSearchClick: () -> Unit, onModeToggle: () -> Unit, onRefresh: () -> Unit) {
     Row(Modifier.fillMaxWidth().statusBarsPadding().padding(horizontal = 20.dp, vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) {
         Icon(Icons.Default.Home, null, tint = TextPureWhite, modifier = Modifier.size(28.dp).clickable(onClick = onHomeClick))
         Spacer(Modifier.width(16.dp))
@@ -908,6 +826,12 @@ fun TopBar(uiState: ComicBrowserUiState, onHomeClick: () -> Unit, onSearchClick:
         Text(titleText, style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Black, letterSpacing = (-0.5).sp), color = TextPureWhite)
         
         Spacer(Modifier.weight(1f))
+        
+        IconButton(onClick = onRefresh, modifier = Modifier.size(28.dp)) {
+            Icon(Icons.Default.Refresh, "Refresh", tint = TextPureWhite)
+        }
+        
+        Spacer(Modifier.width(12.dp))
         
         Surface(
             modifier = Modifier.clickable(onClick = onModeToggle),
