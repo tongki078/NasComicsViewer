@@ -23,6 +23,12 @@ interface PosterRepository {
     suspend fun insertRecentSearch(query: String)
     suspend fun getRecentSearches(): List<String>
     suspend fun clearRecentSearches()
+    
+    // 최근 본 작품 관련 추가
+    suspend fun addToRecent(file: NasFile)
+    suspend fun getRecentComics(): List<NasFile>
+    suspend fun removeFromRecent(path: String)
+
     fun switchServer(isWebtoon: Boolean)
 }
 

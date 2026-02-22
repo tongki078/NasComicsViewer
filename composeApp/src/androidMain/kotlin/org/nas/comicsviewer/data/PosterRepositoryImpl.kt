@@ -17,10 +17,12 @@ import java.net.URLEncoder
 import java.security.MessageDigest
 
 actual fun providePosterRepository(context: Any?): PosterRepository {
-    return AndroidPosterRepository(requireNotNull(context) as Context)
+    val ctx = requireNotNull(context) as Context
+    val database = ComicDatabaseProvider(DatabaseDriverFactory(ctx)).database
+    return AndroidPosterRepository(ctx, database)
 }
 
-class AndroidPosterRepository(private val context: Context) : PosterRepository {
+class AndroidPosterRepository(private val context: Context, private val database: ComicDatabase) : PosterRepository {
 
     private val client = HttpClient(CIO) {
         install(HttpTimeout) { 
@@ -29,7 +31,7 @@ class AndroidPosterRepository(private val context: Context) : PosterRepository {
         }
     }
     private var baseUrl = "http://192.168.0.2:5555"
-    private val prefs = context.getSharedPreferences("search_prefs", Context.MODE_PRIVATE)
+    private val queries = database.posterCacheQueries
 
     private val memoryCache: LruCache<String, ImageBitmap> = LruCache(40 * 1024 * 1024)
     private val diskCacheDir = File(context.cacheDir, "poster_cache").apply { mkdirs() }
@@ -82,20 +84,40 @@ class AndroidPosterRepository(private val context: Context) : PosterRepository {
         null
     }
 
-    override suspend fun insertRecentSearch(query: String) {
-        val current = getRecentSearches().toMutableList()
-        current.remove(query)
-        current.add(0, query)
-        val saved = current.take(10).joinToString("|||")
-        prefs.edit().putString("recent_queries", saved).apply()
+    override suspend fun insertRecentSearch(query: String) = withContext(Dispatchers.IO) {
+        queries.insertRecentSearch(query, System.currentTimeMillis())
     }
 
-    override suspend fun getRecentSearches(): List<String> {
-        val saved = prefs.getString("recent_queries", "") ?: ""
-        return if (saved.isEmpty()) emptyList() else saved.split("|||")
+    override suspend fun getRecentSearches(): List<String> = withContext(Dispatchers.IO) {
+        queries.getRecentSearches().executeAsList()
     }
 
-    override suspend fun clearRecentSearches() {
-        prefs.edit().remove("recent_queries").apply()
+    override suspend fun clearRecentSearches() = withContext(Dispatchers.IO) {
+        queries.clearRecentSearches()
+    }
+
+    override suspend fun addToRecent(file: NasFile) = withContext(Dispatchers.IO) {
+        queries.insertRecentComic(
+            path = file.path,
+            name = file.name,
+            poster_url = file.metadata?.posterUrl,
+            is_directory = file.isDirectory,
+            last_read_at = System.currentTimeMillis()
+        )
+    }
+
+    override suspend fun getRecentComics(): List<NasFile> = withContext(Dispatchers.IO) {
+        queries.getRecentComics().executeAsList().map {
+            NasFile(
+                name = it.name,
+                path = it.path,
+                isDirectory = it.is_directory,
+                metadata = ComicMetadata(posterUrl = it.poster_url)
+            )
+        }
+    }
+
+    override suspend fun removeFromRecent(path: String) = withContext(Dispatchers.IO) {
+        queries.deleteRecentComic(path)
     }
 }
