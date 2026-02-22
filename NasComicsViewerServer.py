@@ -332,12 +332,37 @@ def search_comics():
 
     where_stmt = " OR ".join(where_clauses)
 
-    sql = f"SELECT * FROM entries WHERE ({where_stmt}) AND depth >= 1 ORDER BY last_scanned DESC LIMIT ? OFFSET ?"
-    count_sql = f"SELECT COUNT(*) FROM entries WHERE ({where_stmt}) AND depth >= 1"
+    # [수정] 만화책 권수 하나하나 검색되는 문제를 해결하기 위해 그룹화 로직 적용
+    # 1. 파일이 깊은 곳에 있다면 부모 폴더(시리즈)로 그룹핑
+    # 2. 결과는 고유한 path_hash를 가진 항목들만 반환
+    sql = f"""
+    SELECT * FROM entries
+    WHERE path_hash IN (
+        SELECT DISTINCT
+            CASE
+                WHEN is_dir = 0 AND depth >= 3 THEN parent_hash
+                ELSE path_hash
+            END
+        FROM entries
+        WHERE ({where_stmt}) AND depth >= 2
+    )
+    ORDER BY last_scanned DESC LIMIT ? OFFSET ?
+    """
+
+    count_sql = f"""
+    SELECT COUNT(DISTINCT
+        CASE
+            WHEN is_dir = 0 AND depth >= 3 THEN parent_hash
+            ELSE path_hash
+        END)
+    FROM entries
+    WHERE ({where_stmt}) AND depth >= 2
+    """
 
     try:
         rows = conn.execute(sql, params + [psize, (page-1)*psize]).fetchall()
-        total = conn.execute(count_sql, params).fetchone()[0]
+        total_row = conn.execute(count_sql, params).fetchone()
+        total = total_row[0] if total_row else 0
 
         items = []
         for r in rows:
@@ -356,7 +381,7 @@ def search_comics():
                 'metadata': meta
             })
 
-        logger.info(f"✅ SEARCH FINISH: Found {total} items")
+        logger.info(f"✅ SEARCH FINISH: Found {total} groups")
         return jsonify({'total_items': total, 'page': page, 'page_size': psize, 'items': items})
     except Exception as e:
         logger.error(f"❌ SEARCH ERROR: {str(e)}")

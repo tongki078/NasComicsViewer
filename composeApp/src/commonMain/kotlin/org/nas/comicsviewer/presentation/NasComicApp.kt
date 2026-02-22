@@ -134,7 +134,8 @@ fun NasComicApp(viewModel: ComicViewModel) {
                                     onFileClick = { viewModel.onFileClick(it) },
                                     onLoadMore = { viewModel.loadMoreBooks() },
                                     posterRepository = viewModel.posterRepository,
-                                    gridState = mainGridState
+                                    gridState = mainGridState,
+                                    showCategoryBadge = false
                                 )
                             }
                         }
@@ -187,7 +188,8 @@ fun FolderGridView(
     onFileClick: (NasFile) -> Unit,
     onLoadMore: () -> Unit,
     posterRepository: PosterRepository,
-    gridState: LazyGridState
+    gridState: LazyGridState,
+    showCategoryBadge: Boolean = false
 ) {
     val shouldLoadMore by remember {
         derivedStateOf {
@@ -212,7 +214,7 @@ fun FolderGridView(
             }
         } else {
             items(files, key = { it.path }) { file ->
-                ComicCard(file, posterRepository) { onFileClick(file) }
+                ComicCard(file, posterRepository, showCategoryBadge) { onFileClick(file) }
             }
             if (isLoadingMore) {
                 item(span = { GridItemSpan(maxLineSpan) }) {
@@ -226,7 +228,7 @@ fun FolderGridView(
 }
 
 @Composable
-fun ComicCard(file: NasFile, repo: PosterRepository, onClick: () -> Unit) {
+fun ComicCard(file: NasFile, repo: PosterRepository, showCategoryBadge: Boolean = false, onClick: () -> Unit) {
     var thumb by remember { mutableStateOf<ImageBitmap?>(null) }
     LaunchedEffect(file.metadata?.posterUrl) {
         file.metadata?.posterUrl?.let { thumb = repo.getImage(it) }
@@ -242,19 +244,22 @@ fun ComicCard(file: NasFile, repo: PosterRepository, onClick: () -> Unit) {
             }
             
             // 상단 카테고리 뱃지 (검색 결과일 때 표시)
-            file.metadata?.category?.let { cat ->
-                Surface(
-                    color = Color.Black.copy(alpha = 0.7f),
-                    shape = RoundedCornerShape(bottomEnd = 4.dp),
-                    modifier = Modifier.align(Alignment.TopStart)
-                ) {
-                    Text(
-                        text = cat,
-                        color = Color.White,
-                        fontSize = 8.sp,
-                        fontWeight = FontWeight.Bold,
-                        modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp)
-                    )
+            if (showCategoryBadge) {
+                val cat = file.metadata?.category ?: file.path.substringBefore("/")
+                if (cat.isNotEmpty()) {
+                    Surface(
+                        color = KakaoYellow.copy(alpha = 0.85f),
+                        shape = RoundedCornerShape(bottomEnd = 4.dp),
+                        modifier = Modifier.align(Alignment.TopStart)
+                    ) {
+                        Text(
+                            text = cat,
+                            color = Color.Black,
+                            fontSize = 9.sp,
+                            fontWeight = FontWeight.Black,
+                            modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp)
+                        )
+                    }
                 }
             }
 
@@ -570,8 +575,9 @@ fun WebtoonViewer(
                             colors = SliderDefaults.colors(thumbColor = KakaoYellow, activeTrackColor = KakaoYellow, inactiveTrackColor = Color.White.copy(0.2f))
                         )
                         
-                        IconButton(onClick = { viewModel.navigateChapter(true) }, enabled = uiState.currentChapterIndex < (if (uiState.isSeriesView) uiState.seriesEpisodes.size else uiState.currentFiles.size) - 1, modifier = Modifier.size(32.dp)) {
-                            Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, null, tint = if (uiState.currentChapterIndex < (if (uiState.isSeriesView) uiState.seriesEpisodes.size else uiState.currentFiles.size) - 1) Color.White else Color.Gray, modifier = Modifier.size(20.dp))
+                        val totalEpisodesCount = if (uiState.isSearchMode && uiState.searchResults.isNotEmpty()) uiState.searchResults.size else if (uiState.isSeriesView) uiState.seriesEpisodes.size else uiState.currentFiles.size
+                        IconButton(onClick = { viewModel.navigateChapter(true) }, enabled = uiState.currentChapterIndex < totalEpisodesCount - 1, modifier = Modifier.size(32.dp)) {
+                            Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, null, tint = if (uiState.currentChapterIndex < totalEpisodesCount - 1) Color.White else Color.Gray, modifier = Modifier.size(20.dp))
                         }
                     }
                 }
@@ -609,7 +615,7 @@ fun WebtoonViewer(
                 Column {
                     Text("에피소드", Modifier.padding(16.dp), color = Color.White, fontWeight = FontWeight.Bold, fontSize = 14.sp)
                     Divider(color = Color.White.copy(0.1f))
-                    val episodes = if (uiState.isSeriesView) uiState.seriesEpisodes else uiState.currentFiles
+                    val episodes = if (uiState.isSearchMode && uiState.searchResults.isNotEmpty()) uiState.searchResults else if (uiState.isSeriesView) uiState.seriesEpisodes else uiState.currentFiles
                     LazyColumn {
                         itemsIndexed(episodes) { idx, file ->
                             val isSelected = uiState.currentChapterIndex == idx
@@ -748,7 +754,7 @@ fun SearchScreen(state: ComicBrowserUiState, onQueryChange: (String) -> Unit, on
                 Box(Modifier.fillMaxSize(), Alignment.Center) { Text("검색 결과가 없습니다.", color = TextMuted) }
             } else if (state.searchResults.isNotEmpty()) {
                 Text("검색 결과 ${state.searchResults.size}건", color = TextPureWhite, fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 24.dp, vertical = 12.dp))
-                FolderGridView(state.searchResults, false, false, onFileClick, {}, viewModel.posterRepository, rememberLazyGridState())
+                FolderGridView(state.searchResults, false, false, onFileClick, {}, viewModel.posterRepository, rememberLazyGridState(), showCategoryBadge = true)
             }
         }
     }
