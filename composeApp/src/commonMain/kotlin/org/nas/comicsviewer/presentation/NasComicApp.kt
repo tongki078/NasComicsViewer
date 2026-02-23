@@ -39,6 +39,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.zIndex
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
@@ -335,38 +336,17 @@ fun ComicCard(file: NasFile, repo: PosterRepository, showCategoryBadge: Boolean 
         
         Spacer(Modifier.height(10.dp))
         
-        // 제목 표시 (metadata.title이 있으면 우선 사용)
         val displayTitle = if (!metadata?.title.isNullOrEmpty()) metadata?.title!! else file.name
-        Text(
-            text = displayTitle, 
-            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold, fontSize = 12.sp), 
-            maxLines = 1, 
-            overflow = TextOverflow.Ellipsis, 
-            color = TextPureWhite
-        )
+        Text(text = displayTitle, style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold, fontSize = 12.sp), maxLines = 1, overflow = TextOverflow.Ellipsis, color = TextPureWhite)
         
-        // 작가 정보 (writers)
         val writers = metadata?.writers?.joinToString(", ")
         if (!writers.isNullOrEmpty()) {
-            Text(
-                text = writers,
-                style = MaterialTheme.typography.bodySmall.copy(fontSize = 10.sp, color = KakaoYellow),
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.padding(top = 2.dp)
-            )
+            Text(text = writers, style = MaterialTheme.typography.bodySmall.copy(fontSize = 10.sp, color = KakaoYellow), maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 2.dp))
         }
         
-        // 출판사 정보 (publisher)
         val publisher = metadata?.publisher
         if (!publisher.isNullOrEmpty()) {
-            Text(
-                text = publisher,
-                style = MaterialTheme.typography.bodySmall.copy(fontSize = 9.sp, color = TextMuted),
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.padding(top = 1.dp)
-            )
+            Text(text = publisher, style = MaterialTheme.typography.bodySmall.copy(fontSize = 9.sp, color = TextMuted), maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 1.dp))
         }
     }
 }
@@ -378,49 +358,52 @@ fun SeriesDetailScreen(state: ComicBrowserUiState, onVolumeClick: (NasFile) -> U
     LaunchedEffect(metadata?.posterUrl) {
         metadata?.posterUrl?.let { url -> posterBitmap = repo.getImage(url) }
     }
-    Column(Modifier.fillMaxSize().background(BgBlack).verticalScroll(rememberScrollState())) {
-        Box(Modifier.fillMaxWidth().height(420.dp)) {
-            if (posterBitmap != null) {
-                Image(posterBitmap!!, null, Modifier.fillMaxSize().blur(30.dp).alpha(0.3f), contentScale = ContentScale.Crop)
-                Image(posterBitmap!!, null, Modifier.align(Alignment.BottomCenter).width(200.dp).height(280.dp).padding(bottom = 20.dp).clip(RoundedCornerShape(8.dp)).border(0.5.dp, Color.White.copy(0.2f), RoundedCornerShape(8.dp)), contentScale = ContentScale.Crop)
-            }
-            Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color.Transparent, BgBlack.copy(alpha = 0.5f), BgBlack))))
-            IconButton(onClick = onBack, modifier = Modifier.statusBarsPadding().padding(8.dp).background(Color.Black.copy(0.3f), CircleShape)) {
-                Icon(Icons.AutoMirrored.Filled.ArrowBack, null, tint = Color.White)
-            }
-        }
-        Column(Modifier.padding(horizontal = 24.dp)) {
-            Text(text = metadata?.title ?: "제목 없음", style = MaterialTheme.typography.headlineMedium.copy(fontWeight = FontWeight.Black), color = TextPureWhite)
-            Spacer(Modifier.height(12.dp))
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                val writers = if (!metadata?.writers.isNullOrEmpty()) metadata?.writers?.joinToString(", ") ?: "" else "작가 미상"
-                Text(text = writers, color = KakaoYellow, fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                Spacer(Modifier.width(12.dp))
-                Surface(color = Color(0xFF222222), shape = RoundedCornerShape(4.dp)) {
-                    Text(text = metadata?.status ?: "Unknown", modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp), color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+    Box(Modifier.fillMaxSize().background(BgBlack)) {
+        LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 80.dp)) {
+            item {
+                Box(Modifier.fillMaxWidth().height(420.dp)) {
+                    if (posterBitmap != null) {
+                        Image(posterBitmap!!, null, Modifier.fillMaxSize().blur(30.dp).alpha(0.3f), contentScale = ContentScale.Crop)
+                        Image(posterBitmap!!, null, Modifier.align(Alignment.BottomCenter).width(200.dp).height(280.dp).padding(bottom = 20.dp).clip(RoundedCornerShape(8.dp)).border(0.5.dp, Color.White.copy(0.2f), RoundedCornerShape(8.dp)), contentScale = ContentScale.Crop)
+                    }
+                    Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color.Transparent, BgBlack.copy(alpha = 0.5f), BgBlack))))
                 }
-            }
-            Spacer(Modifier.height(16.dp))
-            if (!metadata?.genres.isNullOrEmpty()) {
-                FlowRow(mainAxisSpacing = 8.dp, crossAxisSpacing = 8.dp) {
-                    metadata?.genres?.forEach { genre ->
-                        Surface(color = SurfaceGrey, shape = CircleShape, border = BorderStroke(0.5.dp, Color.White.copy(0.1f))) {
-                            Text(genre, modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp), color = TextMuted, fontSize = 11.sp)
+                Column(Modifier.padding(horizontal = 24.dp)) {
+                    Text(text = metadata?.title ?: "제목 없음", style = MaterialTheme.typography.headlineMedium.copy(fontWeight = FontWeight.Black), color = TextPureWhite)
+                    Spacer(Modifier.height(12.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        val writers = if (!metadata?.writers.isNullOrEmpty()) metadata?.writers?.joinToString(", ") ?: "" else "작가 미상"
+                        Text(text = writers, color = KakaoYellow, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                        Spacer(Modifier.width(12.dp))
+                        Surface(color = Color(0xFF222222), shape = RoundedCornerShape(4.dp)) {
+                            Text(text = metadata?.status ?: "Unknown", modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp), color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.Bold)
                         }
                     }
+                    Spacer(Modifier.height(16.dp))
+                    if (!metadata?.genres.isNullOrEmpty()) {
+                        FlowRow(mainAxisSpacing = 8.dp, crossAxisSpacing = 8.dp) {
+                            metadata?.genres?.forEach { genre ->
+                                Surface(color = SurfaceGrey, shape = CircleShape, border = BorderStroke(0.5.dp, Color.White.copy(0.1f))) {
+                                    Text(genre, modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp), color = TextMuted, fontSize = 11.sp)
+                                }
+                            }
+                        }
+                        Spacer(Modifier.height(24.dp))
+                    }
+                    Text(text = metadata?.summary ?: "등록된 줄거리가 없습니다.", color = TextMuted, fontSize = 14.sp, lineHeight = 22.sp)
+                    Spacer(Modifier.height(40.dp))
+                    Text("에피소드 (${state.seriesEpisodes.size})", color = TextPureWhite, fontWeight = FontWeight.Black, fontSize = 18.sp)
+                    Spacer(Modifier.height(16.dp))
                 }
-                Spacer(Modifier.height(24.dp))
             }
-            Text(text = metadata?.summary ?: "등록된 줄거리가 없습니다.", color = TextMuted, fontSize = 14.sp, lineHeight = 22.sp)
-            Spacer(Modifier.height(40.dp))
-            Text("에피소드 (${state.seriesEpisodes.size})", color = TextPureWhite, fontWeight = FontWeight.Black, fontSize = 18.sp)
-            Spacer(Modifier.height(16.dp))
+            items(state.seriesEpisodes) { file ->
+                Box(Modifier.padding(horizontal = 20.dp, vertical = 6.dp)) {
+                    VolumeListItem(file, repo) { onVolumeClick(file) }
+                }
+            }
         }
-        Column(Modifier.padding(horizontal = 20.dp).padding(bottom = 60.dp)) {
-            state.seriesEpisodes.forEach { file ->
-                VolumeListItem(file, repo) { onVolumeClick(file) }
-                Spacer(Modifier.height(12.dp))
-            }
+        IconButton(onClick = onBack, modifier = Modifier.padding(top = 40.dp, start = 8.dp).background(Color.Black.copy(0.3f), CircleShape)) {
+            Icon(Icons.AutoMirrored.Filled.ArrowBack, null, tint = Color.White)
         }
     }
 }
@@ -429,9 +412,7 @@ fun SeriesDetailScreen(state: ComicBrowserUiState, onVolumeClick: (NasFile) -> U
 fun VolumeListItem(file: NasFile, repo: PosterRepository, onClick: () -> Unit) {
     var thumb by remember { mutableStateOf<ImageBitmap?>(null) }
     val posterUrl = file.metadata?.posterUrl ?: file.path
-    LaunchedEffect(posterUrl) { 
-        thumb = repo.getImage(posterUrl) 
-    }
+    LaunchedEffect(posterUrl) { thumb = repo.getImage(posterUrl) }
     Surface(modifier = Modifier.fillMaxWidth().clickable(onClick = onClick), color = Color(0xFF0D0D0D), shape = RoundedCornerShape(8.dp), border = BorderStroke(0.5.dp, Color(0xFF1A1A1A))) {
         Row(Modifier.padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
             Box(Modifier.size(50.dp, 70.dp).clip(RoundedCornerShape(4.dp)).background(SurfaceGrey)) {
@@ -476,6 +457,18 @@ fun FlowRow(mainAxisSpacing: androidx.compose.ui.unit.Dp = 0.dp, crossAxisSpacin
     }
 }
 
+// [최적화] 공격적인 프리페칭을 위한 메모리 캐시 확대
+private val viewerImageCache = mutableMapOf<String, ImageBitmap>()
+private val viewerCacheKeys = mutableListOf<String>()
+private const val MAX_CACHE_SIZE = 30 // 기존 12에서 30으로 대폭 확대
+
+private fun getCachedBitmap(key: String): ImageBitmap? = viewerImageCache[key]
+private fun putCachedBitmap(key: String, bitmap: ImageBitmap) {
+    if (viewerImageCache.containsKey(key)) { viewerCacheKeys.remove(key) } 
+    else if (viewerCacheKeys.size >= MAX_CACHE_SIZE) { viewerImageCache.remove(viewerCacheKeys.removeAt(0)) }
+    viewerCacheKeys.add(key); viewerImageCache[key] = bitmap
+}
+
 @Composable
 fun WebtoonViewer(
     path: String, 
@@ -492,219 +485,122 @@ fun WebtoonViewer(
     var isListLoaded by remember { mutableStateOf(false) }
     var showControls by remember { mutableStateOf(true) }
     var posterBitmap by remember { mutableStateOf<ImageBitmap?>(null) }
-    val sessionCache = remember { mutableMapOf<String, ImageBitmap>() }
     val scope = rememberCoroutineScope()
-
     var showEpisodeList by remember { mutableStateOf(false) }
-
-    var scale by remember { mutableStateOf(1f) }
-    var offset by remember { mutableStateOf(androidx.compose.ui.geometry.Offset.Zero) }
-    val transformState = rememberTransformableState { zoomChange, offsetChange, _ ->
-        scale = (scale * zoomChange).coerceIn(1f, 4f)
-        offset = androidx.compose.ui.geometry.Offset(0f, offset.y + offsetChange.y)
-    }
-
+    
     var brightness by remember { mutableStateOf(1f) }
     var isSepia by remember { mutableStateOf(false) }
     var isGray by remember { mutableStateOf(false) }
     var showSettings by remember { mutableStateOf(false) }
-
     var isAutoScrollEnabled by remember { mutableStateOf(false) }
     var autoScrollSpeed by remember { mutableStateOf(1f) } 
 
     LaunchedEffect(posterUrl) { posterUrl?.let { posterBitmap = repo.getImage(it) } }
 
     LaunchedEffect(path) {
-        isListLoaded = false
-        imageNames.clear()
+        isListLoaded = false; imageNames.clear(); viewerImageCache.clear(); viewerCacheKeys.clear()
         try {
             val names = manager.listImagesInZip(path)
             if (names.isNotEmpty()) {
-                imageNames.addAll(names)
-                isListLoaded = true
+                imageNames.addAll(names); isListLoaded = true
                 val lastPos = uiState.readingPositions[path] ?: 0
-                if (lastPos > 0) {
-                    scope.launch { listState.scrollToItem(lastPos) }
-                }
-                names.take(3).forEach { name ->
-                    scope.launch(Dispatchers.Default) {
-                        val bytes = manager.extractImage(path, name)
-                        bytes?.toImageBitmap()?.let { sessionCache[name] = it }
-                    }
-                }
-            } else { 
-                onError("이미지 목록을 가져올 수 없습니다.") 
-                onClose()
-            }
-        } catch (e: Exception) {
-            onError("파일을 열 수 없습니다: ${e.message}")
-            onClose()
-        }
+                if (lastPos > 0) scope.launch { listState.scrollToItem(lastPos) }
+            } else { onError("이미지 목록을 가져올 수 없습니다."); onClose() }
+        } catch (e: Exception) { onError("파일을 열 수 없습니다: ${e.message}"); onClose() }
     }
 
+    // [최적화] 드래그 속도에 맞춘 공격적인 프리페칭 (다음 6장까지 미리 로드)
     LaunchedEffect(listState.firstVisibleItemIndex) {
         if (isListLoaded) {
             viewModel.saveReadingPosition(path, listState.firstVisibleItemIndex)
+            val currentIndex = listState.firstVisibleItemIndex
+            // 다음 6장까지 동시에 병렬로 로드
+            for (i in 1..6) {
+                val nextIndex = currentIndex + i
+                if (nextIndex < imageNames.size) {
+                    val nextName = imageNames[nextIndex]
+                    if (getCachedBitmap(nextName) == null) {
+                        scope.launch(Dispatchers.Default) {
+                            manager.extractImage(path, nextName)?.toImageBitmap()?.let {
+                                withContext(Dispatchers.Main) { putCachedBitmap(nextName, it) }
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
     LaunchedEffect(isAutoScrollEnabled, autoScrollSpeed) {
         if (isAutoScrollEnabled) {
             while (isActive) {
-                try {
-                    listState.scrollBy(autoScrollSpeed)
-                } catch (e: Exception) {
-                    isAutoScrollEnabled = false
-                    break
-                }
+                try { listState.scrollBy(autoScrollSpeed) } catch (e: Exception) { isAutoScrollEnabled = false; break }
                 delay(16)
             }
         }
     }
 
     Box(Modifier.fillMaxSize().background(Color.Black)) {
-        if (!isListLoaded) {
-            Box(Modifier.fillMaxSize(), Alignment.Center) {
-                if (posterBitmap != null) {
-                    Image(posterBitmap!!, null, Modifier.fillMaxSize().blur(40.dp).alpha(0.4f), contentScale = ContentScale.Crop)
+        if (isListLoaded) {
+            LazyColumn(
+                state = listState, 
+                modifier = Modifier.fillMaxSize().clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) { 
+                    showControls = !showControls; if (showControls) { showSettings = false; showEpisodeList = false }
                 }
-                CircularProgressIndicator(color = KakaoYellow)
+            ) {
+                itemsIndexed(imageNames) { index, name -> WebtoonPage(path, name, manager, isSepia, isGray) }
             }
         } else {
-            Box(
-                Modifier.fillMaxSize()
-                    .graphicsLayer(
-                        scaleX = scale,
-                        scaleY = scale,
-                        translationX = 0f,
-                        translationY = offset.y
-                    )
-                    .transformable(state = transformState)
-            ) {
-                LazyColumn(
-                    state = listState, 
-                    modifier = Modifier.fillMaxSize()
-                        .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) { 
-                            showControls = !showControls 
-                            if (showControls) {
-                                showSettings = false
-                                showEpisodeList = false
-                            }
-                        }
-                ) {
-                    itemsIndexed(imageNames) { index, name ->
-                        WebtoonPage(path, name, manager, sessionCache, isSepia, isGray)
-                        LaunchedEffect(listState.firstVisibleItemIndex) {
-                            val prefetchIndices = listOf(index + 1, index + 2)
-                            prefetchIndices.forEach { i ->
-                                if (i < imageNames.size && i <= listState.firstVisibleItemIndex + 5) {
-                                    val nextName = imageNames[i]
-                                    if (!sessionCache.containsKey(nextName)) {
-                                        scope.launch(Dispatchers.Default) {
-                                            val bytes = manager.extractImage(path, nextName)
-                                            bytes?.toImageBitmap()?.let { sessionCache[nextName] = it }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
+            Box(Modifier.fillMaxSize(), Alignment.Center) {
+                if (posterBitmap != null) Image(posterBitmap!!, null, Modifier.fillMaxSize().blur(40.dp).alpha(0.4f), contentScale = ContentScale.Crop)
             }
         }
 
-        if (brightness < 1f) {
-            Box(Modifier.fillMaxSize().run { 
-                val base = background(Color.Black.copy(alpha = 1f - brightness))
-                if (showControls) base else base.clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) { showControls = true }
-            })
-        }
+        if (brightness < 1f) Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 1f - brightness)))
         
-        AnimatedVisibility(showControls, enter = fadeIn() + slideInVertically(), exit = fadeOut() + slideOutVertically()) {
-            Box(Modifier.fillMaxWidth().background(BgBlack.copy(0.8f)).statusBarsPadding().padding(vertical = 4.dp, horizontal = 12.dp)) {
-                IconButton(onClick = onClose, modifier = Modifier.align(Alignment.CenterStart).size(36.dp)) {
-                    Icon(Icons.Default.Close, null, tint = TextPureWhite, modifier = Modifier.size(20.dp))
-                }
-                if (isListLoaded) {
-                    Text("${listState.firstVisibleItemIndex + 1} / ${imageNames.size}", Modifier.align(Alignment.Center), color = TextPureWhite, fontSize = 13.sp, fontWeight = FontWeight.Bold)
-                }
+        if (showControls) {
+            Box(Modifier.fillMaxWidth().height(60.dp).background(BgBlack.copy(0.8f)).align(Alignment.TopCenter).padding(horizontal = 12.dp)) {
+                IconButton(onClick = onClose, modifier = Modifier.align(Alignment.CenterStart).size(36.dp)) { Icon(Icons.Default.Close, null, tint = TextPureWhite, modifier = Modifier.size(20.dp)) }
+                if (isListLoaded) Text("${listState.firstVisibleItemIndex + 1} / ${imageNames.size}", Modifier.align(Alignment.Center), color = TextPureWhite, fontSize = 13.sp, fontWeight = FontWeight.Bold)
                 Row(Modifier.align(Alignment.CenterEnd)) {
-                    IconButton(onClick = { isAutoScrollEnabled = !isAutoScrollEnabled }, modifier = Modifier.size(36.dp)) {
-                        Icon(
-                            imageVector = Icons.Default.PlayArrow, 
-                            contentDescription = null, 
-                            tint = if (isAutoScrollEnabled) KakaoYellow else TextPureWhite, 
-                            modifier = Modifier.size(20.dp)
-                        )
-                    }
-                    IconButton(onClick = { 
-                        showEpisodeList = !showEpisodeList
-                        if (showEpisodeList) showSettings = false
-                    }, modifier = Modifier.size(36.dp)) {
-                        Icon(Icons.AutoMirrored.Filled.List, null, tint = TextPureWhite, modifier = Modifier.size(20.dp))
-                    }
-                    IconButton(onClick = { 
-                        showSettings = !showSettings
-                        if (showSettings) showEpisodeList = false
-                    }, modifier = Modifier.size(36.dp)) {
-                        Icon(Icons.Default.Settings, null, tint = TextPureWhite, modifier = Modifier.size(20.dp))
-                    }
+                    IconButton(onClick = { isAutoScrollEnabled = !isAutoScrollEnabled }, modifier = Modifier.size(36.dp)) { Icon(imageVector = Icons.Default.PlayArrow, contentDescription = null, tint = if (isAutoScrollEnabled) KakaoYellow else TextPureWhite, modifier = Modifier.size(20.dp)) }
+                    IconButton(onClick = { showEpisodeList = !showEpisodeList; if (showEpisodeList) showSettings = false }, modifier = Modifier.size(36.dp)) { Icon(Icons.AutoMirrored.Filled.List, null, tint = TextPureWhite, modifier = Modifier.size(20.dp)) }
+                    IconButton(onClick = { showSettings = !showSettings; if (showSettings) showEpisodeList = false }, modifier = Modifier.size(36.dp)) { Icon(Icons.Default.Settings, null, tint = TextPureWhite, modifier = Modifier.size(20.dp)) }
                 }
             }
         }
 
-        AnimatedVisibility(showControls, enter = fadeIn() + slideInVertically(initialOffsetY = { it }), exit = fadeOut() + slideOutVertically(targetOffsetY = { it }), modifier = Modifier.align(Alignment.BottomCenter)) {
-            Box(Modifier.fillMaxWidth().background(BgBlack.copy(0.6f)).navigationBarsPadding().padding(horizontal = 16.dp, vertical = 8.dp)) {
+        val pageAlpha by animateFloatAsState(if (showControls) 1f else 0f)
+        if (pageAlpha > 0.1f) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = 60.dp)
+                    .alpha(pageAlpha)
+                    .background(Color.Black.copy(0.7f), RoundedCornerShape(20.dp))
+                    .padding(horizontal = 16.dp, vertical = 8.dp)
+                    .zIndex(10f)
+            ) {
                 if (isListLoaded) {
-                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
-                        IconButton(onClick = { viewModel.navigateChapter(false) }, enabled = uiState.currentChapterIndex > 0, modifier = Modifier.size(32.dp)) {
-                            Icon(Icons.AutoMirrored.Filled.KeyboardArrowLeft, null, tint = if (uiState.currentChapterIndex > 0) Color.White else Color.Gray, modifier = Modifier.size(20.dp))
-                        }
-                        
-                        Slider(
-                            value = listState.firstVisibleItemIndex.toFloat(),
-                            onValueChange = { scope.launch { listState.scrollToItem(it.toInt()) } },
-                            valueRange = 0f..(imageNames.size - 1).coerceAtLeast(0).toFloat(),
-                            modifier = Modifier.weight(1f).height(32.dp),
-                            colors = SliderDefaults.colors(thumbColor = KakaoYellow, activeTrackColor = KakaoYellow, inactiveTrackColor = Color.White.copy(0.2f))
-                        )
-                        
-                        val totalEpisodesCount = if (uiState.isSearchMode && uiState.searchResults.isNotEmpty()) uiState.searchResults.size else if (uiState.isSeriesView) uiState.seriesEpisodes.size else uiState.currentFiles.size
-                        IconButton(onClick = { viewModel.navigateChapter(true) }, enabled = uiState.currentChapterIndex < totalEpisodesCount - 1, modifier = Modifier.size(32.dp)) {
-                            Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, null, tint = if (uiState.currentChapterIndex < totalEpisodesCount - 1) Color.White else Color.Gray, modifier = Modifier.size(20.dp))
-                        }
-                    }
+                    Text(
+                        text = "${listState.firstVisibleItemIndex + 1} / ${imageNames.size} P",
+                        color = KakaoYellow,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold
+                    )
                 }
             }
         }
 
-        AnimatedVisibility(showControls && !isAutoScrollEnabled, enter = fadeIn(), exit = fadeOut(), modifier = Modifier.align(Alignment.BottomEnd).padding(bottom = 80.dp, end = 16.dp)) {
+        AnimatedVisibility(showControls && !isAutoScrollEnabled, enter = fadeIn(), exit = fadeOut(), modifier = Modifier.align(Alignment.BottomEnd).padding(bottom = 100.dp, end = 16.dp)) {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                FloatingActionButton(
-                    onClick = { scope.launch { listState.animateScrollToItem((listState.firstVisibleItemIndex - 1).coerceAtLeast(0)) } },
-                    containerColor = Color.Black.copy(0.5f),
-                    contentColor = Color.White,
-                    modifier = Modifier.size(40.dp),
-                    shape = CircleShape
-                ) { Icon(Icons.Default.KeyboardArrowUp, null) }
-                
-                FloatingActionButton(
-                    onClick = { scope.launch { listState.animateScrollToItem((listState.firstVisibleItemIndex + 1).coerceIn(imageNames.indices)) } },
-                    containerColor = Color.Black.copy(0.5f),
-                    contentColor = Color.White,
-                    modifier = Modifier.size(40.dp),
-                    shape = CircleShape
-                ) { Icon(Icons.Default.KeyboardArrowDown, null) }
+                FloatingActionButton(onClick = { scope.launch { listState.animateScrollToItem((listState.firstVisibleItemIndex - 1).coerceAtLeast(0)) } }, containerColor = Color.Black.copy(0.5f), contentColor = Color.White, shape = CircleShape) { Icon(Icons.Default.KeyboardArrowUp, null) }
+                FloatingActionButton(onClick = { scope.launch { listState.animateScrollToItem((listState.firstVisibleItemIndex + 1).coerceIn(imageNames.indices)) } }, containerColor = Color.Black.copy(0.5f), contentColor = Color.White, shape = CircleShape) { Icon(Icons.Default.KeyboardArrowDown, null) }
             }
         }
 
         if (showEpisodeList) {
-            Surface(
-                modifier = Modifier.align(Alignment.CenterEnd).padding(top = 60.dp, end = 16.dp, bottom = 16.dp).width(250.dp).fillMaxHeight(0.7f),
-                color = Color(0xFF1A1A1A),
-                shape = RoundedCornerShape(12.dp),
-                border = BorderStroke(1.dp, Color.White.copy(0.1f))
-            ) {
+            Surface(modifier = Modifier.align(Alignment.CenterEnd).padding(top = 60.dp, end = 16.dp, bottom = 100.dp).width(280.dp).fillMaxHeight(0.6f), color = Color(0xFF1A1A1A), shape = RoundedCornerShape(12.dp), border = BorderStroke(1.dp, Color.White.copy(0.1f))) {
                 Column {
                     Text("에피소드", Modifier.padding(16.dp), color = Color.White, fontWeight = FontWeight.Bold, fontSize = 14.sp)
                     HorizontalDivider(color = Color.White.copy(0.1f))
@@ -712,21 +608,8 @@ fun WebtoonViewer(
                     LazyColumn {
                         itemsIndexed(episodes) { idx, file ->
                             val isSelected = uiState.currentChapterIndex == idx
-                            Row(
-                                Modifier.fillMaxWidth().clickable { 
-                                    viewModel.onFileClick(file)
-                                    showEpisodeList = false
-                                }.background(if (isSelected) KakaoYellow.copy(alpha = 0.1f) else Color.Transparent).padding(16.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Text(
-                                    text = file.name, 
-                                    color = if (isSelected) KakaoYellow else Color.White, 
-                                    fontSize = 12.sp,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                    modifier = Modifier.weight(1f)
-                                )
+                            Row(Modifier.fillMaxWidth().clickable { viewModel.onFileClick(file); showEpisodeList = false }.background(if (isSelected) KakaoYellow.copy(alpha = 0.1f) else Color.Transparent).padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+                                Text(text = file.name, color = if (isSelected) KakaoYellow else Color.White, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
                                 if (isSelected) Icon(Icons.Default.Check, null, tint = KakaoYellow, modifier = Modifier.size(14.dp))
                             }
                             HorizontalDivider(color = Color.White.copy(0.05f))
@@ -737,12 +620,7 @@ fun WebtoonViewer(
         }
 
         if (showSettings) {
-            Surface(
-                modifier = Modifier.align(Alignment.CenterEnd).padding(16.dp).width(200.dp),
-                color = Color(0xFF222222),
-                shape = RoundedCornerShape(12.dp),
-                border = BorderStroke(1.dp, Color.White.copy(0.1f))
-            ) {
+            Surface(modifier = Modifier.align(Alignment.CenterEnd).padding(16.dp).width(220.dp), color = Color(0xFF222222), shape = RoundedCornerShape(12.dp), border = BorderStroke(1.dp, Color.White.copy(0.1f))) {
                 Column(Modifier.padding(16.dp)) {
                     Text("밝기 조절", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
                     Slider(value = brightness, onValueChange = { brightness = it }, valueRange = 0.2f..1f, colors = SliderDefaults.colors(thumbColor = KakaoYellow, activeTrackColor = KakaoYellow))
@@ -764,18 +642,25 @@ fun WebtoonViewer(
 }
 
 @Composable
-fun WebtoonPage(zipPath: String, imageName: String, manager: ZipManager, cache: MutableMap<String, ImageBitmap>, isSepia: Boolean, isGray: Boolean) {
-    var bitmap by remember(imageName) { mutableStateOf(cache[imageName]) }
+fun WebtoonPage(zipPath: String, imageName: String, manager: ZipManager, isSepia: Boolean, isGray: Boolean) {
+    var pageBitmap by remember(imageName) { mutableStateOf(getCachedBitmap(imageName)) }
+    val scope = rememberCoroutineScope()
+    
     LaunchedEffect(imageName) {
-        if (bitmap == null) {
-            val bytes = manager.extractImage(zipPath, imageName)
-            bytes?.toImageBitmap()?.let {
-                bitmap = it; cache[imageName] = it
+        if (pageBitmap == null) {
+            scope.launch(Dispatchers.Default) {
+                manager.extractImage(zipPath, imageName)?.toImageBitmap()?.let {
+                    withContext(Dispatchers.Main) {
+                        pageBitmap = it
+                        putCachedBitmap(imageName, it)
+                    }
+                }
             }
         }
     }
-    Box(Modifier.fillMaxWidth().wrapContentHeight(), contentAlignment = Alignment.Center) {
-        if (bitmap != null) {
+    
+    Box(Modifier.fillMaxWidth().wrapContentHeight().defaultMinSize(minHeight = 400.dp), contentAlignment = Alignment.Center) {
+        if (pageBitmap != null) {
             val colorFilter = when {
                 isSepia -> ColorFilter.colorMatrix(ColorMatrix(floatArrayOf(
                     0.393f, 0.769f, 0.189f, 0f, 0f,
@@ -786,7 +671,7 @@ fun WebtoonPage(zipPath: String, imageName: String, manager: ZipManager, cache: 
                 isGray -> ColorFilter.colorMatrix(ColorMatrix().apply { setToSaturation(0f) })
                 else -> null
             }
-            Image(bitmap!!, null, Modifier.fillMaxWidth(), contentScale = ContentScale.FillWidth, colorFilter = colorFilter)
+            Image(bitmap = pageBitmap!!, contentDescription = null, modifier = Modifier.fillMaxWidth(), contentScale = ContentScale.FillWidth, colorFilter = colorFilter)
         }
     }
 }

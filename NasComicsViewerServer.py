@@ -1,6 +1,7 @@
 from flask import Flask, jsonify, send_from_directory, request, send_file, Response, render_template_string, \
     stream_with_context, redirect
 import os, urllib.parse, unicodedata, logging, time, zipfile, io, sys, sqlite3, json, threading, hashlib, yaml, queue
+import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
 # [로그 설정]
@@ -82,46 +83,91 @@ def is_image_file(name):
 def get_comic_info(abs_path, rel_path):
     title = normalize_nfc(os.path.basename(abs_path))
     poster = None
-    meta_dict = {"summary": "줄거리 정보가 없습니다.", "writers": [], "genres": [], "status": "Unknown", "publisher": ""}
+    meta_dict = {
+        "summary": "줄거리 정보가 없습니다.",
+        "writers": [],
+        "genres": [],
+        "tags": [],
+        "status": "Unknown",
+        "publisher": ""
+    }
 
-    if os.path.isdir(abs_path):
-        yaml_path = os.path.join(abs_path, "kavita.yaml")
-        if os.path.exists(yaml_path):
-            try:
-                with open(yaml_path, 'r', encoding='utf-8') as f:
-                    data = yaml.safe_load(f)
-                    if data:
-                        if 'poster' in data: poster = (rel_path + "/" + data['poster']).replace("//", "/")
-                        meta_dict['summary'] = data.get('summary', meta_dict['summary'])
-                        meta_dict['writers'] = data.get('writers', []) if isinstance(data.get('writers'), list) else [
-                            data.get('writers')] if data.get('writers') else []
-                        meta_dict['genres'] = data.get('genres', []) if isinstance(data.get('genres'), list) else [
-                            data.get('genres')] if data.get('genres') else []
-                        meta_dict['status'] = data.get('status', 'Unknown')
-                        meta_dict['publisher'] = data.get('publisher', '')
-            except:
-                pass
-        if not poster:
+    yaml_dir = abs_path if os.path.isdir(abs_path) else os.path.dirname(abs_path)
+    yaml_path = os.path.join(yaml_dir, "kavita.yaml")
+
+    if os.path.exists(yaml_path):
+        try:
+            with open(yaml_path, 'r', encoding='utf-8') as f:
+                data = yaml.safe_load(f)
+                if data:
+                    m = data.get('meta')
+                    if not isinstance(m, dict): m = data
+
+                    if isinstance(m, dict):
+                        if os.path.isdir(abs_path) and m.get('Name'):
+                            title = normalize_nfc(m['Name'])
+
+                        if m.get('Summary'): meta_dict['summary'] = m['Summary']
+                        pub = m.get('Person Publisher') or m.get('Publisher')
+                        if pub: meta_dict['publisher'] = pub
+
+                        writers = m.get('Person Writers') or m.get('Writers') or m.get('Author')
+                        if writers:
+                            if isinstance(writers, str): meta_dict['writers'] = [x.strip() for x in writers.split(',')]
+                            else: meta_dict['writers'] = writers
+
+                        genres = m.get('Genres') or m.get('Genre')
+                        if genres:
+                            if isinstance(genres, str): meta_dict['genres'] = [x.strip() for x in genres.split(',')]
+                            else: meta_dict['genres'] = genres
+
+                        tags = m.get('Tags')
+                        if tags:
+                            if isinstance(tags, str): meta_dict['tags'] = [x.strip() for x in tags.split(',')]
+                            else: meta_dict['tags'] = tags
+
+                        status_val = str(m.get('Publication Status', ''))
+                        if status_val == '2': meta_dict['status'] = '완결'
+                        elif status_val == '1': meta_dict['status'] = '연재'
+                        elif m.get('Status'): meta_dict['status'] = m['Status']
+
+                    s_list = data.get('search', [])
+                    if isinstance(s_list, list) and len(s_list) > 0:
+                        s = s_list[0]
+                        if s.get('poster_url'): poster = s['poster_url']
+                        if not meta_dict['writers'] and s.get('author'):
+                            meta_dict['writers'] = [s['author']]
+        except Exception as e:
+            logger.error(f"Kavita YAML Parsing Error in {rel_path}: {e}")
+
+    if not os.path.isdir(abs_path):
+        title = os.path.splitext(normalize_nfc(os.path.basename(abs_path)))[0]
+
+    if not poster:
+        if os.path.isdir(abs_path):
             try:
                 with os.scandir(abs_path) as it:
                     ents = sorted(list(it), key=lambda x: x.name)
                     for e in ents:
-                        if is_image_file(e.name): poster = (rel_path + "/" + e.name).replace("//", "/"); break
+                        if is_image_file(e.name):
+                            poster = (rel_path + "/" + e.name).replace("//", "/")
+                            break
                     if not poster:
                         for e in ents:
-                            if is_comic_file(e.name): poster = "zip_thumb://" + (rel_path + "/" + e.name).replace("//",
-                                                                                                                  "/"); break
-            except:
-                pass
-    else:
-        poster = "zip_thumb://" + rel_path
-        title = os.path.splitext(title)[0]
+                            if is_comic_file(e.name):
+                                poster = "zip_thumb://" + (rel_path + "/" + e.name).replace("//", "/")
+                                break
+            except: pass
+        else:
+            poster = "zip_thumb://" + rel_path
 
-    if poster:
+    if poster and not poster.startswith("http"):
         if poster.startswith("zip_thumb://"):
             poster = "zip_thumb://" + urllib.parse.quote(poster[12:])
         else:
             poster = urllib.parse.quote(poster)
+
+    meta_dict['poster_url'] = poster
     return title, poster, json.dumps(meta_dict, ensure_ascii=False)
 
 
@@ -173,96 +219,145 @@ def scan_folder_sync(abs_path, recursive_depth=0):
 def metadata_admin():
     target_path = request.args.get('path', '완결A')
     html = """
-    <!DOCTYPE html><html><head><meta charset="utf-8"><title>🛠️ 메타데이터 실시간 업데이트</title><style>
+    <!DOCTYPE html><html><head><meta charset="utf-8"><title>🛠️ 메타데이터 관리도구</title><style>
         body { font-family: 'Malgun Gothic', 'Apple SD Gothic Neo', sans-serif; background: #f0f2f5; color: #333; padding: 40px; }
         .container { max-width: 1000px; margin: auto; background: white; padding: 40px; border-radius: 15px; box-shadow: 0 10px 30px rgba(0,0,0,0.1); }
         h2 { border-bottom: 3px solid #eee; padding-bottom: 20px; margin-top: 0; color: #2c3e50; }
         .desc { color: #7f8c8d; font-size: 15px; margin-bottom: 25px; line-height: 1.6; }
-        .form-group { display: flex; gap: 15px; margin-bottom: 35px; }
+        .form-group { display: flex; gap: 10px; margin-bottom: 35px; }
         input { flex: 1; padding: 15px; border: 2px solid #ddd; border-radius: 8px; font-size: 16px; outline: none; transition: border-color 0.3s; }
         input:focus { border-color: #3498db; }
-        button { padding: 15px 30px; background: #2c3e50; color: white; border: none; border-radius: 8px; font-weight: bold; cursor: pointer; font-size: 16px; transition: background 0.3s; }
-        button:hover { background: #1a252f; }
+        button { padding: 15px 25px; border: none; border-radius: 8px; font-weight: bold; cursor: pointer; font-size: 15px; transition: background 0.3s; }
+        .btn-main { background: #2c3e50; color: white; }
+        .btn-test { background: #27ae60; color: white; }
+        .btn-del { background: #e74c3c; color: white; }
+        button:hover { opacity: 0.8; }
         .progress-container { display: none; background: #fff; border: 1px solid #eee; padding: 25px; border-radius: 10px; margin-bottom: 30px; }
-        .progress-status { font-weight: bold; margin-bottom: 15px; font-size: 20px; color: #2c3e50; }
-        .progress-bar-bg { width: 100%; height: 30px; background: #ecf0f1; border-radius: 15px; overflow: hidden; margin-bottom: 15px; }
-        .progress-bar-fill { width: 0%; height: 100%; background: #3498db; transition: width 0.4s ease; box-shadow: inset 0 -2px 5px rgba(0,0,0,0.1); }
-        .stats { display: flex; justify-content: space-between; font-size: 16px; margin-bottom: 12px; font-weight: 500; }
-        .console { background: #282c34; color: #abb2bf; padding: 25px; border-radius: 10px; height: 450px; overflow-y: auto; font-family: 'Consolas', 'Monaco', monospace; font-size: 14px; line-height: 1.8; box-shadow: inset 0 2px 10px rgba(0,0,0,0.2); }
+        .console { background: #282c34; color: #abb2bf; padding: 25px; border-radius: 10px; height: 450px; overflow-y: auto; font-family: 'Consolas', monospace; font-size: 14px; line-height: 1.8; }
         .log-line { margin-bottom: 6px; border-bottom: 1px solid #3e4451; padding-bottom: 4px; }
-        .success-text { color: #98c379; font-weight: bold; }
-        .fail-text { color: #e06c75; font-weight: bold; }
-        .init-text { color: #61afef; font-weight: bold; }
+        pre { background: #1e2127; padding: 10px; border-radius: 5px; color: #d19a66; white-space: pre-wrap; word-break: break-all; }
     </style></head><body>
     <div class="container">
-        <h2>🛠️ 메타데이터 실시간 업데이트</h2>
-        <p class="desc">업데이트할 폴더의 경로를 입력하세요. (예: 완결A, 작가/ㄱ)<br>하위 모든 폴더를 탐색하여 kavita.yaml 및 첫 페이지 썸네일을 업데이트합니다.</p>
+        <h2>🛠️ 메타데이터 관리 및 테스트</h2>
+        <p class="desc">업데이트할 폴더의 경로를 입력하세요. (예: 완결A/0Z/#좀비를 찾습니다)<br>중복된 데이터가 보인다면 제목으로 검색 후 삭제 기능을 사용하세요.</p>
         <div class="form-group">
-            <input type="text" id="pathInput" placeholder="경로 입력 (예: 완결A)" value=\"""" + target_path + """\">
-            <button id="startBtn" onclick="startUpdate()">업데이트 시작</button>
-        </div>
-        <div id="progressSection" class="progress-container">
-            <div class="progress-status" id="currentTask">준비 중...</div>
-            <div class="progress-bar-bg"><div class="progress-bar-fill" id="progressBar"></div></div>
-            <div class="stats">
-                <span id="counter">0 / 0</span>
-                <span id="percent">0%</span>
-            </div>
-            <div class="stats">
-                <span class="success-text">성공: <span id="successCount">0</span></span>
-                <span class="fail-text">실패: <span id="failCount">0</span></span>
-            </div>
+            <input type="text" id="pathInput" placeholder="경로 또는 검색어 입력" value=\"""" + target_path + """\">
+            <button class="btn-test" onclick="testSync()">단일 폴더 즉시 동기화 (YAML 테스트)</button>
+            <button class="btn-main" onclick="startUpdate()">하위 전체 스캔</button>
+            <button class="btn-del" onclick="deleteTitle()">제목으로 DB 삭제</button>
         </div>
         <div class="console" id="logConsole"></div>
     </div>
     <script>
+        const cb = document.getElementById('logConsole');
+        function addLog(msg) {
+            const l = document.createElement('div');
+            l.className = 'log-line';
+            l.innerHTML = msg;
+            cb.appendChild(l);
+            cb.scrollTop = cb.scrollHeight;
+        }
+
+        async function testSync() {
+            const path = document.getElementById('pathInput').value;
+            cb.innerHTML = '🚀 <b>테스트 시작:</b> ' + path + '<br>';
+            try {
+                const res = await fetch('/metadata/sync_single?path=' + encodeURIComponent(path));
+                const data = await res.json();
+                if (data.status === 'success') {
+                    addLog('✅ <b>성공!</b> ' + data.scanned_count + '개 항목 갱신됨.');
+                    addLog('<b>DB 저장 결과 샘플:</b><pre>' + JSON.stringify(data.db_result, null, 4) + '</pre>');
+                } else { addLog('❌ <b>에러:</b> ' + data.error); }
+            } catch (e) { addLog('❌ <b>실패:</b> ' + e); }
+        }
+
+        async function deleteTitle() {
+            const title = document.getElementById('pathInput').value;
+            if(!confirm(title + ' 이 포함된 모든 DB 기록을 삭제할까요?')) return;
+            try {
+                const res = await fetch('/metadata/delete_by_title?title=' + encodeURIComponent(title));
+                const data = await res.json();
+                addLog('🗑️ ' + data.count + '개의 항목이 삭제되었습니다.');
+            } catch (e) { addLog('❌ 실패: ' + e); }
+        }
+
         function startUpdate() {
             const path = document.getElementById('pathInput').value;
-            const cb = document.getElementById('logConsole');
-            const ps = document.getElementById('progressSection');
-            const pb = document.getElementById('progressBar');
-            const btn = document.getElementById('startBtn');
-            btn.disabled = true;
             cb.innerHTML = '';
-            ps.style.display = 'block';
             const es = new EventSource('/metadata/scan_stream?path=' + encodeURIComponent(path));
-            let s = 0; let f = 0; let t = 0;
             es.onmessage = function(e) {
                 const d = JSON.parse(e.data);
-                if (d.type === 'init') {
-                    t = d.total;
-                    document.getElementById('counter').innerText = '0 / ' + t;
-                } else if (d.type === 'log') {
-                    const l = document.createElement('div');
-                    l.className = 'log-line ' + (d.icon==='🚀'?'init-text':'');
-                    l.innerText = d.icon + ' ' + d.msg;
-                    cb.appendChild(l);
-                    cb.scrollTop = cb.scrollHeight;
-                } else if (d.type === 'progress') {
-                    const p = t > 0 ? Math.round((d.current / t) * 100) : 0;
-                    pb.style.width = p + '%';
-                    document.getElementById('percent').innerText = p + '%';
-                    document.getElementById('counter').innerText = d.current + ' / ' + t;
-                    document.getElementById('currentTask').innerText = '처리 중: ' + d.name;
-                    if (d.status === 'success') s++; else f++;
-                    document.getElementById('successCount').innerText = s;
-                    document.getElementById('failCount').innerText = f;
-                    const l = document.createElement('div');
-                    l.className = 'log-line';
-                    l.innerHTML = (d.status==='success'?'<span class="success-text">✅</span>':'<span class="fail-text">❌</span>') + ' [UPDATE] \\'' + d.name + '\\' updated via SCAN';
-                    cb.appendChild(l);
-                    cb.scrollTop = cb.scrollHeight;
-                }
-                if (d.msg && d.msg.indexOf('FINISH') !== -1) {
-                    es.close();
-                    btn.disabled = false;
-                }
+                if (d.type === 'log') addLog(d.msg);
+                else if (d.type === 'progress') addLog('🔄 [' + d.current + '/' + d.total + '] ' + d.name + ' 업데이트 완료');
+                if (d.msg && d.msg.includes('FINISH')) es.close();
             };
-            es.onerror = function() { es.close(); btn.disabled = false; };
         }
     </script></body></html>
     """
     return render_template_string(html)
+
+
+@app.route('/metadata/sync_single')
+def sync_single():
+    path = request.args.get('path', '').strip('/')
+    abs_p = os.path.abspath(os.path.join(BASE_PATH, path)).replace(os.sep, '/')
+    if not os.path.exists(abs_p):
+        return jsonify({"status": "error", "error": f"Path not found: {abs_p}"})
+    items = scan_folder_sync(abs_p, 0)
+    conn = sqlite3.connect(METADATA_DB_PATH); conn.row_factory = sqlite3.Row
+    row = conn.execute("SELECT * FROM entries WHERE abs_path = ?", (abs_p,)).fetchone()
+    if not row and items:
+        row = conn.execute("SELECT * FROM entries WHERE path_hash = ?", (items[0][0],)).fetchone()
+    conn.close()
+    if row:
+        res = dict(row); res['metadata'] = json.loads(res['metadata'])
+        return jsonify({"status": "success", "scanned_count": len(items), "db_result": res})
+    return jsonify({"status": "error", "error": "No DB record found."})
+
+
+@app.route('/metadata/delete_by_title')
+def delete_by_title():
+    title = request.args.get('title', '')
+    if not title: return jsonify({"count": 0})
+    conn = sqlite3.connect(METADATA_DB_PATH)
+    cursor = conn.execute("DELETE FROM entries WHERE title LIKE ? OR name LIKE ?", (f'%{title}%', f'%{title}%'))
+    count = cursor.rowcount
+    conn.commit(); conn.close()
+    return jsonify({"count": count})
+
+
+@app.route('/download')
+def download():
+    p = urllib.parse.unquote(request.args.get('path', ''))
+
+    # [수정] 외부 URL인 경우 리다이렉트가 아닌 프록시(Proxy) 처리
+    # 앱의 SSL/TLS 인증서 검증 오류를 원천 차단하기 위해 서버가 이미지를 직접 받아 전달합니다.
+    if p.startswith("http"):
+        try:
+            req = urllib.request.Request(p, headers={'User-Agent': 'Mozilla/5.0'})
+            with urllib.request.urlopen(req, timeout=10) as response:
+                return send_file(io.BytesIO(response.read()), mimetype=response.headers.get_content_type() or 'image/jpeg')
+        except Exception as e:
+            logger.error(f"Image Proxy Error for {p}: {e}")
+            return "Image Proxy Error", 500
+
+    if p.startswith("zip_thumb://"):
+        azp = os.path.join(BASE_PATH, p[12:])
+        if os.path.isdir(azp):
+            try:
+                with os.scandir(azp) as it:
+                    for e in it:
+                        if is_comic_file(e.name): azp = e.path; break
+            except: pass
+        try:
+            with zipfile.ZipFile(azp, 'r') as z:
+                imgs = sorted([n for n in z.namelist() if is_image_file(n)])
+                if imgs:
+                    with z.open(imgs[0]) as f: return send_file(io.BytesIO(f.read()), mimetype='image/jpeg')
+        except: pass
+        return "No Image", 404
+    target_path = os.path.join(BASE_PATH, p)
+    return send_from_directory(os.path.dirname(target_path), os.path.basename(target_path))
 
 
 @app.route('/metadata/scan_stream')
@@ -271,27 +366,25 @@ def scan_stream():
     abs_root = os.path.abspath(os.path.join(BASE_PATH, target_rel)).replace(os.sep, '/')
 
     def generate():
-        msg_search = "🔎 Searching folders in '" + (target_rel or "Root") + "'..."
-        yield "data: " + json.dumps({'type': 'log', 'msg': msg_search, 'icon': '🔍'}) + "\n\n"
+        # [수정] 즉각적인 피드백을 위해 검색 시작 로그를 먼저 보냅니다.
+        yield "data: " + json.dumps({'type': 'log', 'msg': f"🔎 '{target_rel or 'Root'}' 폴더 구조를 분석 중입니다. 잠시만 기다려주세요..."}) + "\n\n"
+
         targets = []
         for root, dirs, files in os.walk(abs_root):
             if any(is_comic_file(f) for f in files):
                 targets.append(root.replace(os.sep, '/'))
         targets = sorted(list(set(targets)))
         total = len(targets)
-        msg_init = "🚀 [INIT] Found " + str(total) + " manga items to update."
-        yield "data: " + json.dumps({'type': 'log', 'msg': msg_init, 'icon': '🚀'}) + "\n\n"
-        yield "data: " + json.dumps({'type': 'init', 'total': total}) + "\n\n"
+
+        yield "data: " + json.dumps({'type': 'log', 'msg': f"🚀 {total}개 폴더를 찾았습니다. 메타데이터 업데이트를 시작합니다."}) + "\n\n"
+
         for i, t_path in enumerate(targets):
             try:
                 name = os.path.basename(t_path)
                 scan_folder_sync(t_path, 0)
-                yield "data: " + json.dumps(
-                    {'type': 'progress', 'current': i + 1, 'name': name, 'status': 'success'}) + "\n\n"
-            except:
-                yield "data: " + json.dumps(
-                    {'type': 'progress', 'current': i + 1, 'name': name, 'status': 'fail'}) + "\n\n"
-        yield "data: " + json.dumps({'type': 'log', 'msg': '🏁 [FINISH] Update completed.', 'icon': '🏁'}) + "\n\n"
+                yield "data: " + json.dumps({'type': 'progress', 'current': i + 1, 'total': total, 'name': name}) + "\n\n"
+            except: pass
+        yield "data: " + json.dumps({'type': 'log', 'msg': '🏁 작업이 완료되었습니다! [FINISH]'}) + "\n\n"
 
     return Response(stream_with_context(generate()), mimetype='text/event-stream')
 
@@ -321,12 +414,10 @@ def scan_comics():
     conn = sqlite3.connect(METADATA_DB_PATH);
     conn.row_factory = sqlite3.Row
     if is_flatten_cat and get_depth(rel_path) == 1:
-        # depth = 3인 항목(작품)들만 필터링하여 평탄화된 목록 제공
         rows = conn.execute("SELECT * FROM entries WHERE rel_path LIKE ? AND depth = 3 ORDER BY title LIMIT ? OFFSET ?",
                             (path + '/%' if path else '%', psize, (page - 1) * psize)).fetchall()
         if not rows and page == 1: conn.close(); scan_folder_sync(abs_p, 1); return scan_comics()
     else:
-        # 그 외 카테고리는 계층 구조(폴더 구조) 그대로 탐색
         parent_hash = get_path_hash(abs_p)
         rows = conn.execute("SELECT * FROM entries WHERE parent_hash = ? ORDER BY name LIMIT ? OFFSET ?",
                             (parent_hash, psize, (page - 1) * psize)).fetchall()
@@ -371,9 +462,6 @@ def search_comics():
 
     where_stmt = " OR ".join(where_clauses)
 
-    # [수정] 만화책 권수 하나하나 검색되는 문제를 해결하기 위해 그룹화 로직 적용
-    # 1. 파일이 깊은 곳에 있다면 부모 폴더(시리즈)로 그룹핑
-    # 2. 결과는 고유한 path_hash를 가진 항목들만 반환
     sql = f"""
     SELECT * FROM entries
     WHERE path_hash IN (
@@ -438,30 +526,7 @@ def get_metadata():
         rows = conn.execute(
             "SELECT title, rel_path, poster_url FROM entries WHERE is_dir = 1 AND depth = 3 ORDER BY last_scanned DESC LIMIT 100").fetchall()
         conn.close()
-        html_dashboard = """
-        <html><head><title>Nas Comics Dashboard</title><style>
-            body { font-family: sans-serif; background: #111; color: #eee; padding: 20px; }
-            .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 20px; }
-            .card { background: #222; padding: 15px; border-radius: 8px; text-align: center; }
-            img { width: 100%; height: 240px; object-fit: cover; border-radius: 4px; margin-bottom: 8px; }
-            a, button { color: #fff; text-decoration: none; font-size: 13px; display: block; margin-top: 5px; padding: 5px; border-radius: 4px; }
-            .btn-view { background: #3498db; }
-            .btn-update { background: #e67e22; border: none; width: 100%; cursor: pointer; }
-        </style></head><body>
-            <h1>최근 스캔된 만화 (100개) | <a href="/metadata/admin" style="display:inline; color:lime;">⚙️ 관리자 모드</a></h1>
-            <div class="grid">
-                {% for r in rows %}
-                <div class="card">
-                    <img src="/download?path={{ r.poster_url }}" onerror="this.src='https://via.placeholder.com/180x240?text=No+Image'">
-                    <div><b>{{ r.title }}</b></div>
-                    <a class="btn-view" href="/metadata?path={{ r.rel_path }}">JSON 정보</a>
-                    <button class="btn-update" onclick="location.href='/metadata/admin?path={{ r.rel_path }}'">🔄 재스캔</button>
-                </div>
-                {% endfor %}
-            </div>
-        </body></html>
-        """
-        return render_template_string(html_dashboard, rows=rows)
+        return "Dashboard disabled. Use /metadata/admin"
     path = normalize_nfc(path);
     abs_p = os.path.abspath(os.path.join(BASE_PATH, path)).replace(os.sep, '/')
     phash = get_path_hash(abs_p);
@@ -508,117 +573,57 @@ def download_zip_entry():
         return "Error", 500
 
 
-@app.route('/download')
-def download():
-    p = urllib.parse.unquote(request.args.get('path', ''))
-    if p.startswith("zip_thumb://"):
-        azp = os.path.join(BASE_PATH, p[12:])
-        if os.path.isdir(azp):
-            try:
-                with os.scandir(azp) as it:
-                    for e in it:
-                        if is_comic_file(e.name): azp = e.path; break
-            except:
-                pass
-        try:
-            with zipfile.ZipFile(azp, 'r') as z:
-                imgs = sorted([n for n in z.namelist() if is_image_file(n)])
-                if imgs:
-                    with z.open(imgs[0]) as f: return send_file(io.BytesIO(f.read()), mimetype='image/jpeg')
-        except:
-            pass
-        return "No Image", 404
-    target_path = os.path.join(BASE_PATH, p)
-    return send_from_directory(os.path.dirname(target_path), os.path.basename(target_path))
-
-
 @app.route('/monitor')
 def monitor_metadata():
     cat = request.args.get('category', '완결A')
-    conn = sqlite3.connect(METADATA_DB_PATH)
-    conn.row_factory = sqlite3.Row
-    # depth >= 2로 설정하여 수동 입력한 작품(2)과 스캔된 작품(3) 모두 나오게 합니다.
+    conn = sqlite3.connect(METADATA_DB_PATH); conn.row_factory = sqlite3.Row
     rows = conn.execute("SELECT * FROM entries WHERE rel_path LIKE ? AND depth >= 2 ORDER BY title", (cat + '/%',)).fetchall()
     conn.close()
-
     processed = []
     for r in rows:
-        try:
-            m = json.loads(r['metadata'] or '{}')
-        except:
-            m = {}
-
+        try: m = json.loads(r['metadata'] or '{}')
+        except: m = {}
         processed.append({
-            'title': r['title'] or r['name'],
-            'path': r['rel_path'],
-            'poster': r['poster_url'],
+            'title': r['title'] or r['name'], 'path': r['rel_path'], 'poster': r['poster_url'],
             'writers': ", ".join(m.get('writers', [])) if isinstance(m.get('writers'), list) else m.get('writers', ''),
-            'publisher': m.get('publisher', ''),
-            'status': m.get('status', '')
+            'publisher': m.get('publisher', ''), 'status': m.get('status', '')
         })
-
     html = """
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <meta charset="utf-8">
-        <title>Manga Metadata Monitor</title>
-        <style>
-            body { font-family: 'Segoe UI', sans-serif; background: #121212; color: #ccc; padding: 30px; margin: 0; }
-            .header { background: #1e1e1e; padding: 20px; border-radius: 12px; margin-bottom: 20px; border: 1px solid #333; }
-            .nav { margin-bottom: 25px; padding: 10px; background: #1e1e1e; border-radius: 8px; }
-            .nav a { color: #3498db; text-decoration: none; margin-right: 20px; font-weight: bold; font-size: 15px; }
-            .nav a.active { color: #f1c40f; text-decoration: underline; }
-
-            .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 25px; }
-            .card { background: #1e1e1e; border-radius: 10px; overflow: hidden; border: 1px solid #333; transition: 0.3s; }
-            .card:hover { transform: translateY(-5px); border-color: #555; }
-
-            .poster-box { width: 100%; aspect-ratio: 0.72; background: #000; position: relative; }
-            .poster-img { width: 100%; height: 100%; object-fit: cover; }
-
-            .info { padding: 15px; }
-            .title { font-weight: bold; color: #fff; margin-bottom: 10px; font-size: 14px;
-                     display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; height: 38px; }
-
-            .meta-item { font-size: 12px; margin-bottom: 5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-            .label { color: #f1c40f; font-weight: bold; margin-right: 5px; }
-            .path-text { color: #555; font-size: 10px; margin-top: 10px; word-break: break-all; }
-
-            h1 { margin: 0; color: #fff; font-size: 24px; }
-            .count-badge { background: #e74c3c; color: white; padding: 2px 8px; border-radius: 10px; font-size: 14px; vertical-align: middle; }
-        </style>
-    </head>
-    <body>
-        <div class="header">
-            <h1>📊 만화 메타데이터 모니터링 <span class="count-badge">{{ total }}</span></h1>
-        </div>
-
+    <!DOCTYPE html><html><head><meta charset="utf-8"><title>Manga Metadata Monitor</title><style>
+        body { font-family: 'Segoe UI', sans-serif; background: #121212; color: #ccc; padding: 30px; margin: 0; }
+        .header { background: #1e1e1e; padding: 20px; border-radius: 12px; margin-bottom: 20px; border: 1px solid #333; }
+        .nav { margin-bottom: 25px; padding: 10px; background: #1e1e1e; border-radius: 8px; }
+        .nav a { color: #3498db; text-decoration: none; margin-right: 20px; font-weight: bold; font-size: 15px; }
+        .nav a.active { color: #f1c40f; text-decoration: underline; }
+        .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 25px; }
+        .card { background: #1e1e1e; border-radius: 10px; overflow: hidden; border: 1px solid #333; transition: 0.3s; }
+        .poster-img { width: 100%; aspect-ratio: 0.72; object-fit: cover; background: #000; }
+        .info { padding: 15px; }
+        .title { font-weight: bold; color: #fff; margin-bottom: 10px; font-size: 14px; height: 38px; overflow: hidden; }
+        .meta-item { font-size: 12px; margin-bottom: 5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .label { color: #f1c40f; font-weight: bold; margin-right: 5px; }
+    </style></head><body>
+        <div class="header"><h1>📊 메타데이터 모니터링 <span style="background:#e74c3c; padding:2px 8px; border-radius:10px;">{{ total }}</span></h1></div>
         <div class="nav">
             {% for c in ["완결A", "완결B", "마블", "번역", "연재", "작가"] %}
             <a href="/monitor?category={{ c }}" class="{{ 'active' if c == category else '' }}">{{ c }}</a>
             {% endfor %}
         </div>
-
         <div class="grid">
             {% for item in items %}
             <div class="card">
-                <div class="poster-box">
-                    <img class="poster-img" src="/download?path={{ item.poster }}"
-                         onerror="this.src='https://via.placeholder.com/250x350?text=No+Image'">
-                </div>
+                <img class="poster-img" src="/download?path={{ item.poster }}" onerror="this.src='https://via.placeholder.com/250x350?text=No+Image'">
                 <div class="info">
-                    <div class="title" title="{{ item.title }}">{{ item.title }}</div>
+                    <div class="title">{{ item.title }}</div>
                     <div class="meta-item"><span class="label">작가:</span> {{ item.writers or '-' }}</div>
                     <div class="meta-item"><span class="label">출판:</span> {{ item.publisher or '-' }}</div>
                     <div class="meta-item"><span class="label">상태:</span> {{ item.status or '-' }}</div>
-                    <div class="path-text">{{ item.path }}</div>
+                    <div style="color:#555; font-size:10px; margin-top:10px;">{{ item.path }}</div>
                 </div>
             </div>
             {% endfor %}
         </div>
-    </body>
-    </html>
+    </body></html>
     """
     return render_template_string(html, items=processed, category=cat, total=len(processed))
 
@@ -626,47 +631,15 @@ def monitor_metadata():
 @app.route('/metadata/inject', methods=['GET', 'POST'])
 def manual_inject():
     if request.method == 'POST':
-        cat = request.form.get('category', '완결A')
-        title = request.form.get('title', '테스트 작품')
-        writers = request.form.get('writers', '').split(',')
-        publisher = request.form.get('publisher', '테스트 출판사')
+        cat = request.form.get('category', '완결A'); title = request.form.get('title', '테스트'); writers = request.form.get('writers', '').split(','); publisher = request.form.get('publisher', '테스트')
+        rel_path = f"{cat}/{title}"; abs_path = os.path.join(BASE_PATH, rel_path).replace(os.sep, '/'); p_hash = get_path_hash(abs_path); parent_hash = get_path_hash(os.path.join(BASE_PATH, cat))
+        meta = {"summary": "수동 데이터", "writers": [w.strip() for w in writers if w.strip()], "publisher": publisher, "status": "완결"}
+        item = (p_hash, parent_hash, abs_path, rel_path, title, 1, "", title, 3, time.time(), json.dumps(meta, ensure_ascii=False))
+        conn = sqlite3.connect(METADATA_DB_PATH); conn.execute('INSERT OR REPLACE INTO entries VALUES (?,?,?,?,?,?,?,?,?,?,?)', item); conn.commit(); conn.close()
+        return f"완료. <a href='/monitor?category={cat}'>확인</a>"
+    return '<form method="post">카테고리: <input name="category"><br>제목: <input name="title"><br><button type="submit">주입</button></form>'
 
-        rel_path = f"{cat}/{title}"
-        abs_path = os.path.join(BASE_PATH, rel_path).replace(os.sep, '/')
-        p_hash = get_path_hash(abs_path)
-        parent_hash = get_path_hash(os.path.join(BASE_PATH, cat))
 
-        meta = {
-            "summary": "수동으로 입력한 테스트 데이터입니다.",
-            "writers": [w.strip() for w in writers if w.strip()],
-            "publisher": publisher,
-            "status": "완결"
-        }
-
-        # DB에 강제로 삽입 (테스트를 위해 depth를 2와 3 모두에서 보이게 조절 가능)
-        # /monitor가 현재 depth=3만 보므로, 테스트를 위해 3으로 입력해봅니다.
-        item = (p_hash, parent_hash, abs_path, rel_path, title, 1, "", title, 3, time.time(),
-                json.dumps(meta, ensure_ascii=False))
-
-        conn = sqlite3.connect(METADATA_DB_PATH)
-        conn.execute('INSERT OR REPLACE INTO entries VALUES (?,?,?,?,?,?,?,?,?,?,?)', item)
-        conn.commit()
-        conn.close()
-        return f"입력 완료: {title} (카테고리: {cat}). <a href='/monitor?category={cat}'>모니터 확인</a>"
-
-    return """
-    <form method="post" style="padding:20px; line-height:2;">
-        <h3>🛠️ 메타데이터 수동 주입 (테스트용)</h3>
-        카테고리: <input type="text" name="category" value="완결A"><br>
-        작품제목: <input type="text" name="title" placeholder="예: 나루토"><br>
-        작가(쉼표구분): <input type="text" name="writers" placeholder="예: 작가A, 작가B"><br>
-        출판사: <input type="text" name="publisher" value="테스트출판사"><br>
-        <button type="submit">DB에 강제 입력</button>
-    </form>
-    """
-# --- 기존 /monitor 라우터의 쿼리 수정 (depth 2~3 모두 보이게) ---
-# NasComicsViewerServer.py 내의 monitor_metadata 함수에서 아래 줄을 찾아 수정하세요.
-# rows = conn.execute("SELECT * FROM entries WHERE rel_path LIKE ? AND (depth = 2 OR depth = 3) ORDER BY title", (cat + '/%',)).fetchall()
 @app.route('/metadata/debug_all')
 def debug_db_all():
     conn = sqlite3.connect(METADATA_DB_PATH)
@@ -674,14 +647,14 @@ def debug_db_all():
     conn.close()
     return jsonify([{"path": r[0], "depth": r[1], "is_dir": r[2], "title": r[3]} for r in rows])
 
+
 @app.route('/check_zombie')
 def check_zombie():
-    conn = sqlite3.connect(METADATA_DB_PATH)
-    conn.row_factory = sqlite3.Row
-    # '좀비'가 포함된 모든 데이터를 찾습니다.
+    conn = sqlite3.connect(METADATA_DB_PATH); conn.row_factory = sqlite3.Row
     rows = conn.execute("SELECT title, rel_path, depth, metadata FROM entries WHERE title LIKE '%좀비%' OR name LIKE '%좀비%'").fetchall()
     conn.close()
     return jsonify([dict(r) for r in rows])
+
 
 if __name__ == '__main__':
     init_db()

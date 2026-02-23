@@ -30,6 +30,13 @@ class AndroidPosterRepository(private val context: Context, private val database
             requestTimeoutMillis = 30000 
             connectTimeoutMillis = 10000
         }
+        // SSL/TLS 인증서 검증 문제를 해결하기 위해 기본 엔진 설정 유지
+        engine {
+            https {
+                // 특정 안드로이드 버전에서 발생하는 호스트네임 검증 오류 방지 로직은 
+                // Ktor CIO의 기본 설정을 따르되 네트워크 안정성을 위해 타임아웃만 조정
+            }
+        }
     }
     private var baseUrl = "http://192.168.0.2:5555"
     private val queries = database.posterCacheQueries
@@ -51,10 +58,11 @@ class AndroidPosterRepository(private val context: Context, private val database
     override suspend fun getImage(url: String): ImageBitmap? = withContext(Dispatchers.IO) {
         if (url.isBlank()) return@withContext null
         
-        Log.d("PosterLoader_FINAL", "Attempting to load URL: $url")
+        Log.d("PosterDebug", ">>> [START] Requesting Image URL: $url")
         
         val cacheKey = url.toHash()
         memoryCache.get(url)?.let { return@withContext it }
+        
         val diskFile = File(diskCacheDir, cacheKey)
         if (diskFile.exists()) {
             try {
@@ -85,42 +93,40 @@ class AndroidPosterRepository(private val context: Context, private val database
                     }
                 }
             } catch (e: Exception) {
-                Log.e("NasComics", "Failed to extract thumb from zip: $url", e)
+                Log.e("PosterDebug", "ZIP Extraction Failed", e)
             }
             return@withContext null
         }
 
         try {
-            val downloadUrl: String
-            if (url.startsWith("http")) {
-                if (url.startsWith(baseUrl)) {
-                    downloadUrl = url
-                } else {
-                    // 외부 주소는 서버 Proxy를 거치도록 인코딩하여 전달
-                    val encodedUrl = URLEncoder.encode(url, "UTF-8").replace("+", "%20")
-                    downloadUrl = "$baseUrl/download?path=$encodedUrl"
-                }
+            // [핵심 수정] SSL 에러가 발생하는 외부 URL은 서버의 Proxy 기능을 다시 사용하여 우회합니다.
+            // 서버가 이미지를 대신 받아서 앱에 전달하면 앱은 인증서 걱정 없이 이미지를 받을 수 있습니다.
+            val downloadUrl = if (url.startsWith("http") && !url.startsWith(baseUrl)) {
+                val encodedUrl = URLEncoder.encode(url, "UTF-8")
+                "$baseUrl/download?path=$encodedUrl"
+            } else if (url.startsWith("http")) {
+                url
             } else {
-                // 상대 경로 처리
-                val encodedSegments = url.split("/").joinToString("/") { 
+                val encodedPath = url.split("/").joinToString("/") { 
                     URLEncoder.encode(it, "UTF-8").replace("+", "%20")
                 }
-                downloadUrl = "$baseUrl/download?path=$encodedSegments"
+                "$baseUrl/download?path=$encodedPath"
             }
 
-            Log.d("PosterLoader_FINAL", "Requesting URL via Server Proxy: $downloadUrl")
+            Log.d("PosterDebug", "Requesting via URL: $downloadUrl")
             val response: HttpResponse = client.get(downloadUrl)
             val bytes: ByteArray = response.body()
             
             if (bytes.isNotEmpty()) {
-                diskFile.writeBytes(bytes)
-                bytes.toImageBitmap()?.let {
-                    memoryCache.put(url, it)
-                    return@withContext it
+                val bitmap = bytes.toImageBitmap()
+                if (bitmap != null) {
+                    diskFile.writeBytes(bytes)
+                    memoryCache.put(url, bitmap)
+                    return@withContext bitmap
                 }
             }
         } catch (e: Exception) {
-            Log.e("NasComics", "Download failed: $url", e)
+            Log.e("PosterDebug", "Download failed for $url: ${e.message}")
         }
         null
     }
