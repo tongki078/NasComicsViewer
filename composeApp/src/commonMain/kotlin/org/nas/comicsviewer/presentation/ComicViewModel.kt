@@ -3,6 +3,7 @@ package org.nas.comicsviewer.presentation
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -10,6 +11,13 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import org.nas.comicsviewer.data.*
 import org.nas.comicsviewer.domain.usecase.GetCategoriesUseCase
+
+enum class AppMode(val label: String) {
+    MANGA("만화 모드"),
+    WEBTOON("웹툰 모드"),
+    MAGAZINE("잡지 모드"),
+    PHOTO_BOOK("화보 모드")
+}
 
 data class ComicBrowserUiState(
     val categories: List<NasFile> = emptyList(),
@@ -36,8 +44,12 @@ data class ComicBrowserUiState(
     val recentSearches: List<String> = emptyList(),
     val readingPositions: Map<String, Int> = emptyMap(),
     val isSearchExecuted: Boolean = false,
-    val isWebtoonMode: Boolean = false
-)
+    val appMode: AppMode = AppMode.MANGA
+) {
+    val isWebtoonMode: Boolean get() = appMode == AppMode.WEBTOON
+    val isMagazineMode: Boolean get() = appMode == AppMode.MAGAZINE
+    val isPhotoBookMode: Boolean get() = appMode == AppMode.PHOTO_BOOK
+}
 
 class ComicViewModel(
     private val nasRepository: NasRepository,
@@ -51,6 +63,7 @@ class ComicViewModel(
 
     private var scanJob: Job? = null
     private var searchJob: Job? = null
+    private var detailJob: Job? = null
     private var currentPage = 1
     private var canLoadMore = true
     private val pageSize = 50
@@ -74,28 +87,41 @@ class ComicViewModel(
         viewModelScope.launch {
             _uiState.update { it.copy(isLoading = true, isIntroShowing = true) }
             try {
-                if (_uiState.value.isWebtoonMode) {
-                    _uiState.update { it.copy(categories = emptyList(), isLoading = false, isIntroShowing = false) }
-                    scanBooks("")
-                } else {
-                    val categories = getCategoriesUseCase.execute("")
-                    _uiState.update { it.copy(categories = categories, isLoading = false, isIntroShowing = false) }
-                    if (categories.isNotEmpty()) {
-                        scanBooks(categories[0].path, 0)
+                when (_uiState.value.appMode) {
+                    AppMode.WEBTOON -> {
+                        _uiState.update { it.copy(categories = emptyList(), isLoading = false, isIntroShowing = false) }
+                        scanBooks("")
+                    }
+                    AppMode.MAGAZINE -> {
+                        _uiState.update { it.copy(categories = emptyList(), isLoading = false, isIntroShowing = false) }
+                        scanBooks("잡지")
+                    }
+                    AppMode.PHOTO_BOOK -> {
+                        _uiState.update { it.copy(categories = emptyList(), isLoading = false, isIntroShowing = false) }
+                        scanBooks("화보")
+                    }
+                    AppMode.MANGA -> {
+                        val categories = getCategoriesUseCase.execute("")
+                        _uiState.update { it.copy(categories = categories, isLoading = false, isIntroShowing = false) }
+                        if (categories.isNotEmpty()) {
+                            scanBooks(categories[0].path, 0)
+                        }
                     }
                 }
             } catch (e: Exception) {
-                _uiState.update { it.copy(errorMessage = "서버 연결 실패", isLoading = false) }
+                _uiState.update { it.copy(errorMessage = "서버 연결 실패", isLoading = false, isIntroShowing = false) }
             }
         }
     }
     
-    fun toggleServerMode() {
-        val newMode = !_uiState.value.isWebtoonMode
-        _uiState.update { it.copy(isWebtoonMode = newMode) }
+    fun setAppMode(newMode: AppMode) {
+        if (_uiState.value.appMode == newMode) return
         
-        nasRepository.switchServer(newMode)
-        posterRepository.switchServer(newMode)
+        _uiState.update { it.copy(appMode = newMode) }
+        
+        // Repository switch server logic
+        nasRepository.switchServer(newMode != AppMode.MANGA)
+        posterRepository.switchServer(newMode != AppMode.MANGA)
         
         listCache.clear()
         
@@ -114,6 +140,11 @@ class ComicViewModel(
         }
         
         checkServerAndLoadCategories()
+    }
+
+    fun toggleServerMode() {
+        val newMode = if (_uiState.value.appMode == AppMode.MANGA) AppMode.WEBTOON else AppMode.MANGA
+        setAppMode(newMode)
     }
 
     fun refresh() {
@@ -180,7 +211,7 @@ class ComicViewModel(
                 currentPage++
                 val result = nasRepository.scanComicFolders(uiState.value.currentPath, currentPage, pageSize)
                 val processedFiles = processScanResult(result.items)
-                val newFiles = uiState.value.currentFiles + processedFiles
+                val newFiles = (uiState.value.currentFiles + processedFiles).distinctBy { it.path }
                 canLoadMore = newFiles.size < result.total_items
                 listCache[uiState.value.currentPath] = newFiles
                 _uiState.update { it.copy(currentFiles = newFiles, isLoadingMore = false) }
@@ -191,7 +222,7 @@ class ComicViewModel(
     }
 
     private fun processScanResult(files: List<NasFile>): List<NasFile> {
-        return files.map { file ->
+        return files.distinctBy { it.path }.map { file ->
             val originalName = file.path.substringAfterLast('/')
             val finalName = nameMap[originalName.removeSuffix(".zip").removeSuffix(".cbz")] ?: cleanTitle(originalName)
             file.copy(name = finalName)
@@ -204,6 +235,7 @@ class ComicViewModel(
             loadRecentComics()
         }
 
+        // 이미 상세 페이지 내부이거나 파일인 경우 뷰어 열기
         if (!file.isDirectory || _uiState.value.isSeriesView) {
             val episodes = if (_uiState.value.isSearchMode && _uiState.value.searchResults.isNotEmpty()) _uiState.value.searchResults else if (_uiState.value.isSeriesView) _uiState.value.seriesEpisodes else _uiState.value.currentFiles
             val index = episodes.indexOfFirst { it.path == file.path }
@@ -215,35 +247,46 @@ class ComicViewModel(
             return
         }
         
-        viewModelScope.launch {
-            _uiState.update { it.copy(isLoading = true) }
+        // [최종 해결] 작품 폴더 클릭 시 무조건 상세 페이지로 진입 시도
+        detailJob?.cancel()
+        detailJob = viewModelScope.launch {
+            // 1. 즉시 상태 변경하여 사용자 반응성 확보
+            _uiState.update { it.copy(
+                isSeriesView = true,
+                isLoading = true,
+                selectedMetadata = ComicMetadata(title = file.name, summary = "정보를 불러오는 중..."),
+                seriesEpisodes = emptyList()
+            ) }
+
             try {
-                val wasSearchMode = _uiState.value.isSearchMode
-                if (wasSearchMode) {
+                // 검색 모드 해제
+                if (_uiState.value.isSearchMode) {
                     _uiState.update { it.copy(isSearchMode = false) }
                 }
 
-                val metadata = nasRepository.getMetadata(file.path)
-                val result = nasRepository.scanComicFolders(file.path, 1, 100)
+                // 2. 메타데이터와 에피소드 목록 병렬 로드
+                val metadataDeferred = async { nasRepository.getMetadata(file.path) }
+                val resultDeferred = async { nasRepository.scanComicFolders(file.path, 1, 300) }
+                
+                val metadata = metadataDeferred.await()
+                val result = resultDeferred.await()
+                
                 val processedFiles = processScanResult(result.items)
                 
-                val hasEpisodes = processedFiles.any { !it.isDirectory || it.path.lowercase().let { p -> p.endsWith(".zip") || p.endsWith(".cbz") || p.endsWith(".pdf") } }
-                
-                if (hasEpisodes) {
-                    _uiState.update { it.copy(
-                        isSeriesView = true,
-                        selectedMetadata = metadata ?: ComicMetadata(title = file.name, summary = "정보를 불러올 수 없습니다."),
-                        seriesEpisodes = if (metadata?.chapters?.isNotEmpty() == true) metadata.chapters!! else processedFiles,
-                        isLoading = false,
-                        pathHistory = it.pathHistory + file.path
-                    ) }
-                } else {
-                    scanBooks(file.path)
-                }
+                // 3. 최종 상태 업데이트
+                _uiState.update { it.copy(
+                    selectedMetadata = metadata ?: ComicMetadata(title = file.name, summary = "상세 정보가 없습니다."),
+                    seriesEpisodes = if (metadata?.chapters?.isNotEmpty() == true) processScanResult(metadata.chapters!!) else processedFiles,
+                    pathHistory = it.pathHistory + file.path,
+                    isLoading = false
+                ) }
+
             } catch (e: Exception) {
-                scanBooks(file.path)
-            } finally {
-                _uiState.update { it.copy(isLoading = false) }
+                // 실패 시에도 무한 로딩에 빠지지 않도록 로딩 종료 및 대체 로직
+                _uiState.update { it.copy(
+                    isLoading = false,
+                    selectedMetadata = ComicMetadata(title = file.name, summary = "서버 통신 중 오류가 발생했습니다.")
+                ) }
             }
         }
     }
@@ -268,20 +311,21 @@ class ComicViewModel(
     }
 
     fun onHome() {
-        if (_uiState.value.isWebtoonMode) {
-            scanBooks("")
-        } else if (uiState.value.categories.isNotEmpty()) {
-            scanBooks(uiState.value.categories[0].path, 0)
+        when (_uiState.value.appMode) {
+            AppMode.WEBTOON -> scanBooks("")
+            AppMode.MAGAZINE -> scanBooks("잡지")
+            AppMode.PHOTO_BOOK -> scanBooks("화보")
+            AppMode.MANGA -> {
+                if (uiState.value.categories.isNotEmpty()) {
+                    scanBooks(uiState.value.categories[0].path, 0)
+                }
+            }
         }
     }
 
     fun toggleSearchMode(enabled: Boolean) {
         _uiState.update { it.copy(isSearchMode = enabled, searchQuery = "", searchResults = emptyList(), isSearchExecuted = false) }
         if (enabled) loadRecentSearches()
-    }
-
-    fun toggleWebtoonMode(enabled: Boolean) {
-        _uiState.update { it.copy(isWebtoonMode = enabled) }
     }
 
     fun updateSearchQuery(query: String) {

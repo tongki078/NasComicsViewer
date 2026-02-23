@@ -8,6 +8,7 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.*
 import androidx.compose.foundation.lazy.grid.*
+import androidx.compose.foundation.pager.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
@@ -72,8 +73,8 @@ fun NasComicApp(viewModel: ComicViewModel) {
         viewModel.onBack()
     }
     
-    LaunchedEffect(uiState.isWebtoonMode) {
-        zipManager.switchServer(uiState.isWebtoonMode)
+    LaunchedEffect(uiState.appMode) {
+        zipManager.switchServer(uiState.appMode != AppMode.MANGA)
         mainGridState.scrollToItem(0)
     }
 
@@ -88,16 +89,44 @@ fun NasComicApp(viewModel: ComicViewModel) {
             if (uiState.isIntroShowing) {
                 IntroScreen()
             } else if (uiState.selectedZipPath != null) {
-                 WebtoonViewer(
-                     path = uiState.selectedZipPath!!, 
-                     manager = zipManager, 
-                     posterUrl = uiState.viewerPosterUrl,
-                     repo = viewModel.posterRepository,
-                     onClose = { viewModel.closeViewer() }, 
-                     onError = { viewModel.showError(it) },
-                     uiState = uiState,
-                     viewModel = viewModel
-                 )
+                when (uiState.appMode) {
+                    AppMode.MAGAZINE -> {
+                        MagazineViewer(
+                            path = uiState.selectedZipPath!!,
+                            manager = zipManager,
+                            posterUrl = uiState.viewerPosterUrl,
+                            repo = viewModel.posterRepository,
+                            onClose = { viewModel.closeViewer() },
+                            onError = { viewModel.showError(it) },
+                            uiState = uiState,
+                            viewModel = viewModel
+                        )
+                    }
+                    AppMode.PHOTO_BOOK -> {
+                        PhotoBookViewer(
+                            path = uiState.selectedZipPath!!,
+                            manager = zipManager,
+                            posterUrl = uiState.viewerPosterUrl,
+                            repo = viewModel.posterRepository,
+                            onClose = { viewModel.closeViewer() },
+                            onError = { viewModel.showError(it) },
+                            uiState = uiState,
+                            viewModel = viewModel
+                        )
+                    }
+                    else -> {
+                        WebtoonViewer(
+                            path = uiState.selectedZipPath!!, 
+                            manager = zipManager, 
+                            posterUrl = uiState.viewerPosterUrl,
+                            repo = viewModel.posterRepository,
+                            onClose = { viewModel.closeViewer() }, 
+                            onError = { viewModel.showError(it) },
+                            uiState = uiState,
+                            viewModel = viewModel
+                        )
+                    }
+                }
             } else if (uiState.isSearchMode) {
                 SearchScreen(
                     state = uiState,
@@ -116,7 +145,7 @@ fun NasComicApp(viewModel: ComicViewModel) {
                         uiState = uiState,
                         onHomeClick = { viewModel.onHome() }, 
                         onSearchClick = { viewModel.toggleSearchMode(true) },
-                        onModeToggle = { viewModel.toggleServerMode() },
+                        onModeChange = { viewModel.setAppMode(it) },
                         onRefresh = { viewModel.refresh() }
                     )
                     
@@ -125,10 +154,10 @@ fun NasComicApp(viewModel: ComicViewModel) {
                     }
                     
                     Box(Modifier.weight(1f)) {
-                        val isWriterCategory = !uiState.isWebtoonMode && uiState.categories.getOrNull(uiState.selectedCategoryIndex)?.name == "작가"
+                        val isSpecialCategory = uiState.appMode == AppMode.MANGA && uiState.categories.getOrNull(uiState.selectedCategoryIndex)?.name == "작가"
                         val isAtRoot = uiState.pathHistory.size <= 1
 
-                        if (isWriterCategory && isAtRoot) {
+                        if (isSpecialCategory && isAtRoot) {
                             FolderListView(
                                 files = uiState.currentFiles,
                                 isLoading = uiState.isLoading,
@@ -210,8 +239,7 @@ fun FolderListView(
                     Modifier.fillMaxWidth()
                         .clickable { onFileClick(file) }
                         .padding(horizontal = 20.dp, vertical = 16.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
+                    verticalAlignment = Alignment.CenterVertically) {
                     val icon = if (isWebtoonRoot) Icons.AutoMirrored.Filled.List else Icons.Default.Person
                     Icon(icon, null, tint = TextMuted, modifier = Modifier.size(24.dp))
                     Spacer(Modifier.width(16.dp))
@@ -304,7 +332,7 @@ fun ComicCard(file: NasFile, repo: PosterRepository, showCategoryBadge: Boolean 
                 Image(thumb!!, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
             } else {
                 Box(Modifier.fillMaxSize(), Alignment.Center) { 
-                     Text("MANGA", color = TextMuted, fontSize = 9.sp, fontWeight = FontWeight.Bold, modifier = Modifier.alpha(0.4f)) 
+                     Text("NAS", color = TextMuted, fontSize = 9.sp, fontWeight = FontWeight.Bold, modifier = Modifier.alpha(0.4f)) 
                 }
             }
             
@@ -425,7 +453,7 @@ fun VolumeListItem(file: NasFile, repo: PosterRepository, onClick: () -> Unit) {
                 Spacer(Modifier.height(4.dp))
                 Text("바로 읽기", color = KakaoYellow, fontSize = 11.sp, fontWeight = FontWeight.Medium)
             }
-            Icon(Icons.AutoMirrored.Filled.ArrowBack, null, tint = Color.White.copy(0.2f), modifier = Modifier.size(16.dp))
+            Icon(Icons.AutoMirrored.Filled.ArrowForward, null, tint = Color.White.copy(0.2f), modifier = Modifier.size(16.dp))
         }
     }
 }
@@ -457,10 +485,9 @@ fun FlowRow(mainAxisSpacing: androidx.compose.ui.unit.Dp = 0.dp, crossAxisSpacin
     }
 }
 
-// [최적화] 공격적인 프리페칭을 위한 메모리 캐시 확대
 private val viewerImageCache = mutableMapOf<String, ImageBitmap>()
 private val viewerCacheKeys = mutableListOf<String>()
-private const val MAX_CACHE_SIZE = 30 // 기존 12에서 30으로 대폭 확대
+private const val MAX_CACHE_SIZE = 30
 
 private fun getCachedBitmap(key: String): ImageBitmap? = viewerImageCache[key]
 private fun putCachedBitmap(key: String, bitmap: ImageBitmap) {
@@ -509,12 +536,10 @@ fun WebtoonViewer(
         } catch (e: Exception) { onError("파일을 열 수 없습니다: ${e.message}"); onClose() }
     }
 
-    // [최적화] 드래그 속도에 맞춘 공격적인 프리페칭 (다음 6장까지 미리 로드)
     LaunchedEffect(listState.firstVisibleItemIndex) {
         if (isListLoaded) {
             viewModel.saveReadingPosition(path, listState.firstVisibleItemIndex)
             val currentIndex = listState.firstVisibleItemIndex
-            // 다음 6장까지 동시에 병렬로 로드
             for (i in 1..6) {
                 val nextIndex = currentIndex + i
                 if (nextIndex < imageNames.size) {
@@ -641,6 +666,166 @@ fun WebtoonViewer(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+fun MagazineViewer(
+    path: String,
+    manager: ZipManager,
+    posterUrl: String?,
+    repo: PosterRepository,
+    onClose: () -> Unit,
+    onError: (String) -> Unit,
+    uiState: ComicBrowserUiState,
+    viewModel: ComicViewModel
+) {
+    val imageNames = remember { mutableStateListOf<String>() }
+    var isListLoaded by remember { mutableStateOf(false) }
+    var showControls by remember { mutableStateOf(true) }
+    var posterBitmap by remember { mutableStateOf<ImageBitmap?>(null) }
+    val scope = rememberCoroutineScope()
+    
+    val pagerState = rememberPagerState { 
+        if (imageNames.isEmpty()) 0 else (imageNames.size + 1) / 2
+    }
+
+    LaunchedEffect(posterUrl) { posterUrl?.let { posterBitmap = repo.getImage(it) } }
+
+    LaunchedEffect(path) {
+        isListLoaded = false; imageNames.clear(); viewerImageCache.clear(); viewerCacheKeys.clear()
+        try {
+            val names = manager.listImagesInZip(path)
+            if (names.isNotEmpty()) {
+                imageNames.addAll(names); isListLoaded = true
+                val lastPos = uiState.readingPositions[path] ?: 0
+                scope.launch { pagerState.scrollToPage(lastPos / 2) }
+            } else { onError("이미지 목록을 가져올 수 없습니다."); onClose() }
+        } catch (e: Exception) { onError("파일을 열 수 없습니다: ${e.message}"); onClose() }
+    }
+
+    LaunchedEffect(pagerState.currentPage) {
+        if (isListLoaded) {
+            viewModel.saveReadingPosition(path, pagerState.currentPage * 2)
+        }
+    }
+
+    Box(Modifier.fillMaxSize().background(Color.Black)) {
+        if (isListLoaded) {
+            HorizontalPager(
+                state = pagerState,
+                modifier = Modifier.fillMaxSize().clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) { showControls = !showControls }
+            ) { page ->
+                Row(Modifier.fillMaxSize(), verticalAlignment = Alignment.CenterVertically) {
+                    val leftIdx = page * 2
+                    val rightIdx = page * 2 + 1
+                    
+                    Box(Modifier.weight(1f).fillMaxHeight(), contentAlignment = Alignment.Center) {
+                        if (leftIdx < imageNames.size) {
+                            MagazinePage(path, imageNames[leftIdx], manager)
+                        }
+                    }
+                    Box(Modifier.weight(1f).fillMaxHeight(), contentAlignment = Alignment.Center) {
+                        if (rightIdx < imageNames.size) {
+                            MagazinePage(path, imageNames[rightIdx], manager)
+                        }
+                    }
+                }
+            }
+        }
+
+        if (showControls) {
+            Box(Modifier.fillMaxWidth().height(60.dp).background(BgBlack.copy(0.8f)).align(Alignment.TopCenter).padding(horizontal = 12.dp)) {
+                IconButton(onClick = onClose, modifier = Modifier.align(Alignment.CenterStart).size(36.dp)) { Icon(Icons.Default.Close, null, tint = TextPureWhite, modifier = Modifier.size(20.dp)) }
+                Text("${pagerState.currentPage + 1} / ${pagerState.pageCount}", Modifier.align(Alignment.Center), color = TextPureWhite, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+fun PhotoBookViewer(
+    path: String,
+    manager: ZipManager,
+    posterUrl: String?,
+    repo: PosterRepository,
+    onClose: () -> Unit,
+    onError: (String) -> Unit,
+    uiState: ComicBrowserUiState,
+    viewModel: ComicViewModel
+) {
+    val imageNames = remember { mutableStateListOf<String>() }
+    var isListLoaded by remember { mutableStateOf(false) }
+    var showControls by remember { mutableStateOf(true) }
+    var posterBitmap by remember { mutableStateOf<ImageBitmap?>(null) }
+    val scope = rememberCoroutineScope()
+    
+    val pagerState = rememberPagerState { imageNames.size }
+
+    LaunchedEffect(posterUrl) { posterUrl?.let { posterBitmap = repo.getImage(it) } }
+
+    LaunchedEffect(path) {
+        isListLoaded = false; imageNames.clear(); viewerImageCache.clear(); viewerCacheKeys.clear()
+        try {
+            val names = manager.listImagesInZip(path)
+            if (names.isNotEmpty()) {
+                imageNames.addAll(names); isListLoaded = true
+                val lastPos = uiState.readingPositions[path] ?: 0
+                scope.launch { pagerState.scrollToPage(lastPos) }
+            } else { onError("이미지 목록을 가져올 수 없습니다."); onClose() }
+        } catch (e: Exception) { onError("파일을 열 수 없습니다: ${e.message}"); onClose() }
+    }
+
+    LaunchedEffect(pagerState.currentPage) {
+        if (isListLoaded) {
+            viewModel.saveReadingPosition(path, pagerState.currentPage)
+        }
+    }
+
+    Box(Modifier.fillMaxSize().background(Color.Black)) {
+        if (isListLoaded) {
+            HorizontalPager(
+                state = pagerState,
+                modifier = Modifier.fillMaxSize().clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) { showControls = !showControls },
+                pageSpacing = 16.dp
+            ) { page ->
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    MagazinePage(path, imageNames[page], manager) 
+                }
+            }
+        }
+
+        if (showControls) {
+            Box(Modifier.fillMaxWidth().height(60.dp).background(BgBlack.copy(0.8f)).align(Alignment.TopCenter).padding(horizontal = 12.dp)) {
+                IconButton(onClick = onClose, modifier = Modifier.align(Alignment.CenterStart).size(36.dp)) { Icon(Icons.Default.Close, null, tint = TextPureWhite, modifier = Modifier.size(20.dp)) }
+                Text("${pagerState.currentPage + 1} / ${imageNames.size}", Modifier.align(Alignment.Center), color = TextPureWhite, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+            }
+        }
+    }
+}
+
+@Composable
+fun MagazinePage(zipPath: String, imageName: String, manager: ZipManager) {
+    var pageBitmap by remember(imageName) { mutableStateOf(getCachedBitmap(imageName)) }
+    val scope = rememberCoroutineScope()
+    
+    LaunchedEffect(imageName) {
+        if (pageBitmap == null) {
+            scope.launch(Dispatchers.Default) {
+                manager.extractImage(zipPath, imageName)?.toImageBitmap()?.let {
+                    withContext(Dispatchers.Main) {
+                        pageBitmap = it
+                        putCachedBitmap(imageName, it)
+                    }
+                }
+            }
+        }
+    }
+    
+    if (pageBitmap != null) {
+        Image(bitmap = pageBitmap!!, contentDescription = null, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Fit)
+    }
+}
+
 @Composable
 fun WebtoonPage(zipPath: String, imageName: String, manager: ZipManager, isSepia: Boolean, isGray: Boolean) {
     var pageBitmap by remember(imageName) { mutableStateOf(getCachedBitmap(imageName)) }
@@ -739,12 +924,19 @@ fun SearchScreen(state: ComicBrowserUiState, onQueryChange: (String) -> Unit, on
 }
 
 @Composable
-fun TopBar(uiState: ComicBrowserUiState, onHomeClick: () -> Unit, onSearchClick: () -> Unit, onModeToggle: () -> Unit, onRefresh: () -> Unit) {
+fun TopBar(uiState: ComicBrowserUiState, onHomeClick: () -> Unit, onSearchClick: () -> Unit, onModeChange: (AppMode) -> Unit, onRefresh: () -> Unit) {
+    var showModeMenu by remember { mutableStateOf(false) }
+
     Row(Modifier.fillMaxWidth().statusBarsPadding().padding(horizontal = 20.dp, vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) {
         Icon(Icons.Default.Home, null, tint = TextPureWhite, modifier = Modifier.size(28.dp).clickable(onClick = onHomeClick))
         Spacer(Modifier.width(16.dp))
         
-        val titleText = if (uiState.isWebtoonMode) "NAS WEBTOON" else "NAS MANGA"
+        val titleText = when(uiState.appMode) {
+            AppMode.MANGA -> "NAS MANGA"
+            AppMode.WEBTOON -> "NAS WEBTOON"
+            AppMode.MAGAZINE -> "NAS MAGAZINE"
+            AppMode.PHOTO_BOOK -> "NAS PHOTO"
+        }
         Text(titleText, style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Black, letterSpacing = (-0.5).sp), color = TextPureWhite)
         
         Spacer(Modifier.weight(1f))
@@ -755,28 +947,61 @@ fun TopBar(uiState: ComicBrowserUiState, onHomeClick: () -> Unit, onSearchClick:
         
         Spacer(Modifier.width(12.dp))
         
-        Surface(
-            modifier = Modifier.clickable(onClick = onModeToggle),
-            color = if (uiState.isWebtoonMode) Color(0xFFE91E63) else KakaoYellow,
-            shape = RoundedCornerShape(12.dp)
-        ) {
-            Row(
-                Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-                verticalAlignment = Alignment.CenterVertically
+        Box {
+            Surface(
+                modifier = Modifier.clickable { showModeMenu = true },
+                color = when(uiState.appMode) {
+                    AppMode.WEBTOON -> Color(0xFFE91E63)
+                    AppMode.MAGAZINE -> Color(0xFF2196F3)
+                    AppMode.PHOTO_BOOK -> Color(0xFF9C27B0)
+                    AppMode.MANGA -> KakaoYellow
+                },
+                shape = RoundedCornerShape(12.dp)
             ) {
-                Icon(
-                    imageVector = Icons.Default.Menu,
-                    contentDescription = "Switch Mode",
-                    tint = if (uiState.isWebtoonMode) Color.White else Color.Black,
-                    modifier = Modifier.size(16.dp)
-                )
-                Spacer(Modifier.width(4.dp))
-                Text(
-                    text = if (uiState.isWebtoonMode) "웹툰 모드" else "만화 모드",
-                    color = if (uiState.isWebtoonMode) Color.White else Color.Black,
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 11.sp
-                )
+                Row(
+                    Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Menu,
+                        contentDescription = "Switch Mode",
+                        tint = if (uiState.appMode == AppMode.MANGA) Color.Black else Color.White,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(Modifier.width(4.dp))
+                    Text(
+                        text = uiState.appMode.label,
+                        color = if (uiState.appMode == AppMode.MANGA) Color.Black else Color.White,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 11.sp
+                    )
+                    Icon(Icons.Default.ArrowDropDown, null, tint = if (uiState.appMode == AppMode.MANGA) Color.Black else Color.White)
+                }
+            }
+            
+            DropdownMenu(
+                expanded = showModeMenu,
+                onDismissRequest = { showModeMenu = false },
+                modifier = Modifier.background(SurfaceGrey).border(0.5.dp, Color.White.copy(0.1f))
+            ) {
+                AppMode.entries.forEach { mode ->
+                    DropdownMenuItem(
+                        text = { Text(mode.label, color = Color.White) },
+                        onClick = {
+                            onModeChange(mode)
+                            showModeMenu = false
+                        },
+                        leadingIcon = {
+                            val icon = when(mode) {
+                                AppMode.MANGA -> Icons.Default.Menu
+                                AppMode.WEBTOON -> Icons.AutoMirrored.Filled.List
+                                AppMode.MAGAZINE -> Icons.Default.Info
+                                AppMode.PHOTO_BOOK -> Icons.Default.AccountCircle
+                            }
+                            Icon(icon, null, tint = if (uiState.appMode == mode) KakaoYellow else Color.Gray)
+                        }
+                    )
+                }
             }
         }
         
