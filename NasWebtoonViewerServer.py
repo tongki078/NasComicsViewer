@@ -118,7 +118,6 @@ def get_comic_info(abs_path, rel_path):
     meta_dict = {"summary": "줄거리 정보가 없습니다.", "writers": [], "genres": [], "status": "Unknown", "publisher": ""}
 
     if os.path.isdir(abs_path):
-        # 1. Kavita (yaml) 또는 Series.json 탐색
         kavita_path = os.path.join(abs_path, "kavita.yaml")
         json_path = os.path.join(abs_path, "series.json")
 
@@ -160,11 +159,17 @@ def get_comic_info(abs_path, rel_path):
             if os.path.exists(cover_path): poster = os.path.join(rel_path, "cover.png").replace(os.sep, '/')
 
         if not poster: poster = find_first_image_recursive(abs_path)
-        meta_dict['poster_url'] = poster
     else:
         poster = "zip_thumb://" + rel_path
         title = os.path.splitext(title)[0]
 
+    if poster and not poster.startswith("http"):
+        if poster.startswith("zip_thumb://"):
+            poster = "zip_thumb://" + urllib.parse.quote(poster[12:])
+        else:
+            poster = urllib.parse.quote(poster)
+
+    meta_dict['poster_url'] = poster
     return title, poster, json.dumps(meta_dict, ensure_ascii=False)
 
 def scan_task(abs_path, series_depth):
@@ -200,8 +205,13 @@ def scan_task(abs_path, series_depth):
                     if (is_comic_file(e.name) or e.is_dir()) and not is_excluded(e.name):
                         e_rel = os.path.relpath(e.path, BASE_PATH).replace(os.sep, '/')
                         e_title = os.path.splitext(e.name)[0]
-                        if is_comic_file(e.name): e_poster = "zip_thumb://" + e_rel
-                        elif e.is_dir(): e_poster = find_first_image_recursive(e.path) or poster
+                        if is_comic_file(e.name): e_poster = "zip_thumb://" + urllib.parse.quote(e_rel)
+                        elif e.is_dir():
+                            found_img = find_first_image_recursive(e.path)
+                            if found_img:
+                                e_poster = urllib.parse.quote(found_img)
+                            else:
+                                e_poster = poster
                         else: e_poster = poster
                         ep_items.append((get_path_hash(e.path), get_path_hash(abs_path), e.path, e_rel, e.name, 1 if e.is_dir() else 0, e_poster, normalize_nfc(e_title), depth + 1, time.time(), "{}"))
             if ep_items: db_queue.put(ep_items)
@@ -244,7 +254,6 @@ def start_full_scan(target_type):
             with os.scandir(photobook_root) as it:
                 for entry in it:
                     if entry.is_dir() and not is_excluded(entry.name):
-                        # 화보/카테고리(개인, 화보A 등) -> depth 2는 카테고리, depth 3은 인물명(Series)
                         scan_status["total"] += 1
                         scanning_pool.submit(scan_task, entry.path, 3)
 
@@ -322,26 +331,58 @@ def stream_logs():
             yield f"data: {json.dumps(data)}\n\n"
     return Response(stream_with_context(generate()), mimetype='text/event-stream')
 
+@app.route('/files')
+def list_files_api():
+    path = request.args.get('path', '')
+    if not path:
+        target_root = os.path.join(BASE_PATH, "웹툰")
+    else:
+        target_root = os.path.join(BASE_PATH, path)
+
+    phash = get_path_hash(target_root)
+    conn = sqlite3.connect(METADATA_DB_PATH)
+    conn.row_factory = sqlite3.Row
+
+    placeholders = ','.join(['?'] * len(EXCLUDED_FOLDERS))
+    query = f"SELECT * FROM entries WHERE parent_hash = ? AND name NOT IN ({placeholders}) ORDER BY name"
+    rows = conn.execute(query, [phash] + EXCLUDED_FOLDERS).fetchall()
+
+    items = []
+    for r in rows:
+        items.append({
+            'name': r['name'],
+            'isDirectory': bool(r['is_dir']),
+            'path': r['rel_path']
+        })
+    conn.close()
+    return jsonify(items)
+
 @app.route('/scan')
 def scan_comics():
     path = request.args.get('path', '')
     page = request.args.get('page', 1, type=int); psize = request.args.get('page_size', 50, type=int)
     conn = sqlite3.connect(METADATA_DB_PATH); conn.row_factory = sqlite3.Row
 
-    if not path: # 기본은 웹툰 루트
-        target_root = os.path.join(BASE_PATH, "웹툰")
+    placeholders = ','.join(['?'] * len(EXCLUDED_FOLDERS))
+
+    # 웹툰 모드 등에서 빈 경로로 진입 시 리스트에 초성(가,나,다...)이 나오는 것을 방지
+    if not path or path == "웹툰":
+        query = f"SELECT * FROM entries WHERE depth = 3 AND abs_path LIKE '%/웹툰/%' AND name NOT IN ({placeholders}) ORDER BY title LIMIT ? OFFSET ?"
+        params = EXCLUDED_FOLDERS + [psize, (page-1)*psize]
+        rows = conn.execute(query, params).fetchall()
+
+        count_query = f"SELECT COUNT(*) FROM entries WHERE depth = 3 AND abs_path LIKE '%/웹툰/%' AND name NOT IN ({placeholders})"
+        total = conn.execute(count_query, EXCLUDED_FOLDERS).fetchone()[0]
     else:
         target_root = os.path.join(BASE_PATH, path)
+        phash = get_path_hash(target_root)
 
-    phash = get_path_hash(target_root)
+        query = f"SELECT * FROM entries WHERE parent_hash = ? AND name NOT IN ({placeholders}) ORDER BY name LIMIT ? OFFSET ?"
+        params = [phash] + EXCLUDED_FOLDERS + [psize, (page-1)*psize]
 
-    placeholders = ','.join(['?'] * len(EXCLUDED_FOLDERS))
-    query = f"SELECT * FROM entries WHERE parent_hash = ? AND name NOT IN ({placeholders}) ORDER BY name LIMIT ? OFFSET ?"
-    params = [phash] + EXCLUDED_FOLDERS + [psize, (page-1)*psize]
-
-    rows = conn.execute(query, params).fetchall()
-    count_query = f"SELECT COUNT(*) FROM entries WHERE parent_hash = ? AND name NOT IN ({placeholders})"
-    total = conn.execute(count_query, [phash] + EXCLUDED_FOLDERS).fetchone()[0]
+        rows = conn.execute(query, params).fetchall()
+        count_query = f"SELECT COUNT(*) FROM entries WHERE parent_hash = ? AND name NOT IN ({placeholders})"
+        total = conn.execute(count_query, [phash] + EXCLUDED_FOLDERS).fetchone()[0]
 
     items = []
     for r in rows:
@@ -353,13 +394,27 @@ def scan_comics():
 @app.route('/download')
 def download():
     p = request.args.get('path', '')
+    # [수정됨] urllib.parse.unquote 를 적용하여 앞서 전달된 URL을 확실하게 디코딩
+    p = urllib.parse.unquote(p)
+
     if not p: return "Path required", 400
+
+    # 1. 외부 URL (카카오/네이버 등) 프록시 처리
     if p.startswith("http"):
         try:
-            req = urllib.request.Request(p, headers={'User-Agent': 'Mozilla/5.0'})
+            # 카카오/네이버 등 외부 접속 차단을 막기 위해 Referer와 User-Agent 우회
+            headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+            if 'kakao' in p: headers['Referer'] = 'https://webtoon.kakao.com/'
+            elif 'naver' in p: headers['Referer'] = 'https://comic.naver.com/'
+
+            req = urllib.request.Request(p, headers=headers)
             with urllib.request.urlopen(req, timeout=10) as response:
-                return Response(response.read(), content_type=response.headers.get('Content-Type'))
-        except: return "Image Failed", 500
+                return send_file(io.BytesIO(response.read()), mimetype=response.headers.get_content_type() or 'image/jpeg')
+        except Exception as e:
+            logger.error(f"Proxy Download Failed: {p}, Error: {e}")
+            return "Image Load Failed", 500
+
+    # 2. 압축 파일 썸네일 캐싱 처리
     if p.startswith("zip_thumb://"):
         rel_path = p[12:]; cache_key = hashlib.md5(normalize_nfc(rel_path).encode('utf-8')).hexdigest() + ".jpg"
         cache_path = os.path.join(THUMB_CACHE_DIR, cache_key)
@@ -382,8 +437,45 @@ def download():
                         return send_file(io.BytesIO(img_data), mimetype='image/jpeg')
         except: pass
         return "No Image", 404
+
+    # 3. 로컬 파일 처리
     target_path = os.path.join(BASE_PATH, p)
     return send_from_directory(os.path.dirname(target_path), os.path.basename(target_path))
+
+@app.route('/zip_entries')
+def zip_entries():
+    path = urllib.parse.unquote(request.args.get('path', ''))
+    abs_p = os.path.join(BASE_PATH, path)
+    if os.path.isdir(abs_p):
+        try:
+            with os.scandir(abs_p) as it: return jsonify(sorted([e.name for e in it if is_image_file(e.name)]))
+        except: return jsonify([])
+    try:
+        with zipfile.ZipFile(abs_p, 'r') as z: return jsonify(sorted([n for n in z.namelist() if is_image_file(n)]))
+    except: return jsonify([])
+
+@app.route('/download_zip_entry')
+def download_zip_entry():
+    path = urllib.parse.unquote(request.args.get('path', ''))
+    entry = urllib.parse.unquote(request.args.get('entry', ''))
+
+    # [수정됨] 만약 zip_entry 자체가 외부 HTTP URL이라면 프록시 처리
+    if entry.startswith("http"):
+        try:
+            headers = {'User-Agent': 'Mozilla/5.0'}
+            if 'kakao' in entry: headers['Referer'] = 'https://webtoon.kakao.com/'
+            elif 'naver' in entry: headers['Referer'] = 'https://comic.naver.com/'
+            req = urllib.request.Request(entry, headers=headers)
+            with urllib.request.urlopen(req, timeout=10) as response:
+                return send_file(io.BytesIO(response.read()), mimetype=response.headers.get_content_type() or 'image/jpeg')
+        except: return "Image Proxy Failed", 500
+
+    abs_p = os.path.join(BASE_PATH, path)
+    if os.path.isdir(abs_p): return send_from_directory(abs_p, entry)
+    try:
+        with zipfile.ZipFile(abs_p, 'r') as z:
+            with z.open(entry) as f: return send_file(io.BytesIO(f.read()), mimetype='image/jpeg')
+    except: return "Error", 500
 
 @app.route('/metadata')
 def get_metadata():
