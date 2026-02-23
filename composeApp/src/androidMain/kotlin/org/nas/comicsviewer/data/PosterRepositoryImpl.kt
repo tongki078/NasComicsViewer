@@ -91,29 +91,27 @@ class AndroidPosterRepository(private val context: Context, private val database
         }
 
         try {
-            val response: HttpResponse
-            
-            // 명확한 분기: 외부 URL (서버 주소로 시작하지 않는 http/https)는 앱이 직접 요청
-            if (url.startsWith("http") && !(url.startsWith("http://192.168.0.2:") || url.startsWith("https://192.168.0.2:"))) {
-                Log.d("PosterLoader_FINAL", "Requesting EXTERNAL URL directly: $url")
-                response = client.get(url)
-            } else {
-                // 2. 서버 내부 URL 또는 상대 경로 요청 (서버 프록시를 통함)
-                val downloadUrl: String
-                if (url.startsWith("http")) { // 서버 내부 URL (baseUrl로 시작하는 경우)
-                    val encodedPath = URLEncoder.encode(url.removePrefix("$baseUrl/download?path="), "UTF-8").replace("+", "%20")
-                    downloadUrl = "$baseUrl/download?path=$encodedPath"
-                } else { // DB에 저장된 상대 경로
-                    val encodedSegments = url.split("/").joinToString("/") { 
-                        URLEncoder.encode(it, "UTF-8").replace("+", "%20")
-                    }
-                    downloadUrl = "$baseUrl/download?path=$encodedSegments"
+            val downloadUrl: String
+            if (url.startsWith("http")) {
+                if (url.startsWith(baseUrl)) {
+                    downloadUrl = url
+                } else {
+                    // 외부 주소는 서버 Proxy를 거치도록 인코딩하여 전달
+                    val encodedUrl = URLEncoder.encode(url, "UTF-8").replace("+", "%20")
+                    downloadUrl = "$baseUrl/download?path=$encodedUrl"
                 }
-                Log.d("PosterLoader_FINAL", "Requesting download URL via server: $downloadUrl")
-                response = client.get(downloadUrl)
+            } else {
+                // 상대 경로 처리
+                val encodedSegments = url.split("/").joinToString("/") { 
+                    URLEncoder.encode(it, "UTF-8").replace("+", "%20")
+                }
+                downloadUrl = "$baseUrl/download?path=$encodedSegments"
             }
-            
+
+            Log.d("PosterLoader_FINAL", "Requesting URL via Server Proxy: $downloadUrl")
+            val response: HttpResponse = client.get(downloadUrl)
             val bytes: ByteArray = response.body()
+            
             if (bytes.isNotEmpty()) {
                 diskFile.writeBytes(bytes)
                 bytes.toImageBitmap()?.let {
@@ -143,7 +141,7 @@ class AndroidPosterRepository(private val context: Context, private val database
         queries.insertRecentComic(
             path = file.path,
             name = file.name,
-            poster_url = file.metadata?.posterUrl, // metadata를 통해 접근
+            poster_url = file.metadata?.posterUrl,
             is_directory = file.isDirectory,
             last_read_at = System.currentTimeMillis()
         )
@@ -155,7 +153,7 @@ class AndroidPosterRepository(private val context: Context, private val database
                 name = dbRow.name,
                 path = dbRow.path,
                 isDirectory = dbRow.is_directory,
-                metadata = ComicMetadata(posterUrl = dbRow.poster_url) // DB에서 가져온 값으로 ComicMetadata 생성
+                metadata = ComicMetadata(posterUrl = dbRow.poster_url)
             )
         }
     }

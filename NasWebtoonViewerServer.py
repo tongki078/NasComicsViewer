@@ -1,5 +1,5 @@
 from flask import Flask, jsonify, send_from_directory, request, send_file, Response, render_template_string, stream_with_context, redirect
-import os, urllib.parse, unicodedata, logging, time, zipfile, io, sys, sqlite3, json, threading, hashlib, queue
+import os, urllib.parse, unicodedata, logging, time, zipfile, io, sys, sqlite3, json, threading, hashlib, queue, urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
 # [로그 설정]
@@ -111,67 +111,56 @@ def get_comic_info(abs_path, rel_path):
     if os.path.isdir(abs_path):
         json_path = os.path.join(abs_path, "series.json")
         poster_found_source = "None"
-        json_read_successful = False
 
         if os.path.exists(json_path):
             try:
                 with open(json_path, 'r', encoding='utf-8') as f:
                     data = json.load(f)
-                    json_read_successful = True
                     if data:
-                        # ** 결정적 수정: 외부 URL과 로컬 파일을 구분하여 처리 **
+                        # [우선순위 1] series.json 내 backgroundImage -> image 순서로 확인
+                        for key in ['backgroundImage', 'image', 'thumbnail', 'cover', 'poster']:
+                            if key in data and data[key]:
+                                val = data[key].strip()
+                                if val.startswith(('http://', 'https://')):
+                                    poster = val
+                                    poster_found_source = f"series.json URL: {key}"
+                                    break
+                                check_path = os.path.join(abs_path, val)
+                                if os.path.exists(check_path):
+                                    poster = os.path.join(rel_path, val).replace(os.sep, '/')
+                                    poster_found_source = f"series.json file: {key}"
+                                    break
 
-                        # 1. content 객체 확인
-                        content_data = data.get('content', {})
+                        # 'web' 객체 내부 확인
+                        if not poster and 'web' in data and data['web']:
+                            for key in ['main_img', 'share_img']:
+                                if data['web'].get(key):
+                                    poster = data['web'][key]
+                                    poster_found_source = f"series.json key: web.{key}"
+                                    break
 
-                        # 2. web 객체 확인
-                        web_data = data.get('web', {})
-
-                        # 3. 최상위 객체 확인
-                        top_level_data = data
-
-                        # 포스터 우선순위: web.main_img -> web.share_img -> content.backgroundImage -> 최상위 image/cover 등
-                        search_order = [
-                            (web_data, ['main_img', 'share_img']),
-                            (content_data, ['backgroundImage', 'featuredCharacterImageA', 'featuredCharacterImageB', 'titleImageA', 'titleImageB']),
-                            (top_level_data, ['image', 'thumbnail', 'cover', 'poster'])
-                        ]
-
-                        for source_obj, keys in search_order:
-                            for key in keys:
-                                if key in source_obj and source_obj[key]:
-                                    poster_candidate = source_obj[key].strip()
-                                    if poster_candidate.startswith('http'):
-                                        poster = poster_candidate
-                                        poster_found_source = f"series.json key: {key} (Absolute URL)"
-                                    else:
-                                        poster = os.path.join(rel_path, poster_candidate).replace(os.sep, '/')
-                                        poster_found_source = f"series.json key: {key} (Local File)"
-                                    break # 키를 찾으면 루프 종료
-                            if poster: break # 포스터를 찾았으면 전체 루프 종료
-
-                        # 메타데이터 채우기
-                        if 'title' in content_data: title = normalize_nfc(content_data['title'])
-                        meta_dict['summary'] = content_data.get('synopsis', meta_dict['summary'])
-                        if 'authors' in content_data:
-                            meta_dict['writers'] = [author['name'] for author in content_data['authors'] if author.get('type') == 'AUTHOR']
-                            publishers = [author['name'] for author in content_data['authors'] if author.get('type') == 'PUBLISHER']
-                            if publishers: meta_dict['publisher'] = publishers[0]
-                        meta_dict['genres'] = content_data.get('seoKeywords', [])
-                        meta_dict['status'] = content_data.get('status', 'Unknown')
-
+                        if 'title' in data: title = normalize_nfc(data['title'])
+                        meta_dict['summary'] = data.get('description', data.get('summary', meta_dict['summary']))
+                        authors = data.get('author', data.get('writers', []))
+                        meta_dict['writers'] = [authors] if isinstance(authors, str) else authors
+                        genres = data.get('genre', data.get('genres', []))
+                        meta_dict['genres'] = [genres] if isinstance(genres, str) else genres
+                        meta_dict['status'] = data.get('status', 'Unknown')
+                        meta_dict['publisher'] = data.get('publisher', '')
             except Exception as e:
                 logger.error(f"Error reading series.json in {rel_path}: {e}")
-                add_web_log(f"[ERROR] JSON Read Failed for {rel_path}: {e}", "ERROR")
 
+        # [우선순위 2] JSON에서 못 찾았을 경우 폴더 내 cover.png 직접 확인
         if not poster:
-            if json_read_successful:
-                 poster_found_source = "JSON Read OK, but no valid poster file found/set"
+            cover_path = os.path.join(abs_path, "cover.png")
+            if os.path.exists(cover_path):
+                poster = os.path.join(rel_path, "cover.png").replace(os.sep, '/')
+                poster_found_source = "Local cover.png"
+
+        # [최종 Fallback] 기존의 재귀 이미지 검색
+        if not poster:
             poster = find_first_image_recursive(abs_path)
-            if poster:
-                 poster_found_source = "find_first_image_recursive"
-            else:
-                 poster_found_source = "None (Fallback to Zip)"
+            poster_found_source = "find_first_image_recursive" if poster else "None"
 
         add_web_log(f"[{rel_path}] Poster Source: {poster_found_source}. Final Poster: {poster}", "DEBUG")
 
@@ -258,6 +247,95 @@ def start_full_scan():
 
     for t in targets:
         scanning_pool.submit(scan_task, t)
+
+@app.route('/view_posters')
+def view_posters():
+    conn = sqlite3.connect(METADATA_DB_PATH)
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute("SELECT title, rel_path, poster_url FROM entries WHERE depth = 2 ORDER BY title").fetchall()
+    conn.close()
+
+    total = len(rows)
+    http_count = 0
+    zip_count = 0
+    file_count = 0
+    none_count = 0
+
+    for r in rows:
+        url = r['poster_url']
+        if not url: none_count += 1
+        elif url.startswith('http'): http_count += 1
+        elif url.startswith('zip_thumb://'): zip_count += 1
+        else: file_count += 1
+
+    html = """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>NasWebtoon - 포스터 모니터링</title>
+        <style>
+            body { font-family: 'Segoe UI', sans-serif; background: #121212; color: #eee; padding: 30px; margin: 0; }
+            .header { background: #1e1e1e; padding: 20px; border-radius: 12px; margin-bottom: 30px; border: 1px solid #333; }
+            .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 15px; margin-top: 15px; }
+            .stat-card { background: #252525; padding: 15px; border-radius: 8px; text-align: center; border: 1px solid #444; }
+            .stat-val { font-size: 24px; font-weight: bold; display: block; margin-top: 5px; }
+            .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 20px; }
+            .card { background: #1e1e1e; padding: 10px; border-radius: 8px; text-align: center; font-size: 12px; border: 1px solid #333; transition: 0.2s; }
+            .card:hover { transform: translateY(-5px); border-color: #555; }
+            .poster-box { width: 100%; aspect-ratio: 0.7; background: #000; border-radius: 4px; overflow: hidden; margin-bottom: 8px; position: relative; display: flex; align-items: center; justify-content: center; }
+            img { width: 100%; height: 100%; object-fit: cover; }
+            .title { font-weight: bold; margin-bottom: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #fff; }
+            .url { color: #888; font-size: 10px; word-break: break-all; height: 24px; overflow: hidden; }
+            .badge { position: absolute; top: 5px; right: 5px; padding: 2px 6px; border-radius: 4px; font-size: 10px; font-weight: bold; text-transform: uppercase; }
+            .external { background: #E91E63; color: white; }
+            .local { background: #2196F3; color: white; }
+            .fallback { background: #FF9800; color: white; }
+            .none { background: #f44336; color: white; }
+            h1 { margin: 0; font-size: 22px; color: #fff; }
+        </style>
+    </head>
+    <body>
+        <div class="header">
+            <h1>🖼️ 웹툰 포스터 매칭 통계</h1>
+            <div class="stats-grid">
+                <div class="stat-card">전체 작품<span class="stat-val">{{ total }}</span></div>
+                <div class="stat-card" style="border-bottom: 3px solid #E91E63;">HTTP URL<span class="stat-val" style="color:#E91E63;">{{ http_count }}</span></div>
+                <div class="stat-card" style="border-bottom: 3px solid #2196F3;">로컬 파일<span class="stat-val" style="color:#2196F3;">{{ file_count }}</span></div>
+                <div class="stat-card" style="border-bottom: 3px solid #FF9800;">ZIP 썸네일<span class="stat-val" style="color:#FF9800;">{{ zip_count }}</span></div>
+                <div class="stat-card" style="border-bottom: 3px solid #f44336;">미매칭<span class="stat-val" style="color:#f44336;">{{ none_count }}</span></div>
+            </div>
+        </div>
+
+        <div class="grid">
+            {% for r in rows %}
+            <div class="card">
+                <div class="poster-box">
+                    {% set p_url = r['poster_url'] %}
+                    {% if p_url %}
+                        <img src="/download?path={{ p_url | urlencode }}" loading="lazy" onerror="this.parentElement.innerHTML='<span style=\'color:#f44336\'>LOAD ERROR</span>'">
+                        {% if p_url.startswith('http') %}
+                            <span class="badge external">HTTP</span>
+                        {% elif p_url.startswith('zip_thumb://') %}
+                            <span class="badge fallback">ZIP</span>
+                        {% else %}
+                            <span class="badge local">FILE</span>
+                        {% endif %}
+                    {% else %}
+                        <span style="color:#555;">NO IMAGE</span>
+                        <span class="badge none">NONE</span>
+                    {% endif %}
+                </div>
+                <div class="title">{{ r['title'] }}</div>
+                <div class="url">{{ r['poster_url'] if r['poster_url'] else '-' }}</div>
+            </div>
+            {% endfor %}
+        </div>
+    </body>
+    </html>
+    """
+    return render_template_string(html, rows=rows, total=total,
+                                 http_count=http_count, file_count=file_count,
+                                 zip_count=zip_count, none_count=none_count)
 
 # --- Web UI ---
 @app.route('/')
@@ -408,7 +486,16 @@ def scan_comics():
 def download():
     p = request.args.get('path', '')
     if not p: return "Path required", 400
-    if p.startswith("http"): return redirect(p)
+
+    # 외부 URL 이미지 Proxy 처리 (requests 대신 urllib 사용)
+    if p.startswith("http"):
+        try:
+            req = urllib.request.Request(p, headers={'User-Agent': 'Mozilla/5.0'})
+            with urllib.request.urlopen(req, timeout=10) as response:
+                return Response(response.read(), content_type=response.headers.get('Content-Type'))
+        except Exception as e:
+            logger.error(f"Proxy Download Failed: {p}, Error: {e}")
+            return "Image Load Failed", 500
 
     if p.startswith("zip_thumb://"):
         azp = os.path.join(BASE_PATH, p[12:])
@@ -427,6 +514,7 @@ def download():
         except: pass
         return "No Image in Zip", 404
 
+    # p에는 앱에서 인코딩하여 보낸 경로가 오므로, 디코딩하지 않고 바로 사용
     target_path = os.path.join(BASE_PATH, p)
     if os.path.exists(target_path):
         return send_from_directory(os.path.dirname(target_path), os.path.basename(target_path))
