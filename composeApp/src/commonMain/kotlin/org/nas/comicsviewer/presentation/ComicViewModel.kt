@@ -235,6 +235,23 @@ class ComicViewModel(
             loadRecentComics()
         }
 
+        // 화보 모드에서는 바로 뷰어 열기
+        if (_uiState.value.isPhotoBookMode && !file.isDirectory) {
+            val episodes = if (_uiState.value.isSearchMode && _uiState.value.searchResults.isNotEmpty()) _uiState.value.searchResults else _uiState.value.currentFiles
+            val index = episodes.indexOfFirst { it.path == file.path }
+            _uiState.update { it.copy(
+                selectedZipPath = file.path, 
+                viewerPosterUrl = file.metadata?.posterUrl ?: it.selectedMetadata?.posterUrl,
+                currentChapterIndex = index
+            ) }
+            return
+        }
+
+        if (file.isDirectory && _uiState.value.isPhotoBookMode) {
+             scanBooks(file.path)
+             return
+        }
+
         // 이미 상세 페이지 내부이거나 파일인 경우 뷰어 열기
         if (!file.isDirectory || _uiState.value.isSeriesView) {
             val episodes = if (_uiState.value.isSearchMode && _uiState.value.searchResults.isNotEmpty()) _uiState.value.searchResults else if (_uiState.value.isSeriesView) _uiState.value.seriesEpisodes else _uiState.value.currentFiles

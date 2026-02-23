@@ -137,25 +137,26 @@ fun NasComicApp(viewModel: ComicViewModel) {
                     onClearHistory = { viewModel.clearRecentSearches() },
                     viewModel = viewModel
                 )
-            } else if (uiState.isSeriesView) {
+            } else if (uiState.isSeriesView && !uiState.isPhotoBookMode) {
                 SeriesDetailScreen(uiState, { viewModel.onFileClick(it) }, { viewModel.onBack() }, viewModel.posterRepository)
             } else {
                 Column(Modifier.fillMaxSize()) {
                     TopBar(
                         uiState = uiState,
                         onHomeClick = { viewModel.onHome() }, 
+                        onBackClick = { viewModel.onBack() },
                         onSearchClick = { viewModel.toggleSearchMode(true) },
                         onModeChange = { viewModel.setAppMode(it) },
                         onRefresh = { viewModel.refresh() }
                     )
                     
-                    if (uiState.categories.isNotEmpty()) {
+                    if (uiState.categories.isNotEmpty() && !uiState.isSeriesView) {
                         CategoryTabs(uiState) { path, index -> viewModel.scanBooks(path, index) }
                     }
                     
                     Box(Modifier.weight(1f)) {
                         val isSpecialCategory = uiState.appMode == AppMode.MANGA && uiState.categories.getOrNull(uiState.selectedCategoryIndex)?.name == "작가"
-                        val isAtRoot = uiState.pathHistory.size <= 1
+                        val isAtRoot = uiState.pathHistory.size <= 1 && !uiState.isSeriesView
 
                         if (isSpecialCategory && isAtRoot) {
                             FolderListView(
@@ -164,9 +165,10 @@ fun NasComicApp(viewModel: ComicViewModel) {
                                 onFileClick = { viewModel.onFileClick(it) }
                             )
                         } else {
+                            val filesToShow = if (uiState.isSeriesView) uiState.seriesEpisodes else uiState.currentFiles
                             FolderGridView(
-                                files = uiState.currentFiles,
-                                recentComics = uiState.recentComics,
+                                files = filesToShow,
+                                recentComics = if (uiState.isSeriesView) emptyList() else uiState.recentComics,
                                 isLoading = uiState.isLoading,
                                 isLoadingMore = uiState.isLoadingMore,
                                 isRefreshing = uiState.isRefreshing,
@@ -924,22 +926,26 @@ fun SearchScreen(state: ComicBrowserUiState, onQueryChange: (String) -> Unit, on
 }
 
 @Composable
-fun TopBar(uiState: ComicBrowserUiState, onHomeClick: () -> Unit, onSearchClick: () -> Unit, onModeChange: (AppMode) -> Unit, onRefresh: () -> Unit) {
+fun TopBar(uiState: ComicBrowserUiState, onHomeClick: () -> Unit, onBackClick: () -> Unit, onSearchClick: () -> Unit, onModeChange: (AppMode) -> Unit, onRefresh: () -> Unit) {
     var showModeMenu by remember { mutableStateOf(false) }
+    val showBack = uiState.pathHistory.size > 1 || uiState.isSeriesView
 
     Row(Modifier.fillMaxWidth().statusBarsPadding().padding(horizontal = 20.dp, vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) {
-        Icon(Icons.Default.Home, null, tint = TextPureWhite, modifier = Modifier.size(28.dp).clickable(onClick = onHomeClick))
+        val navIcon = if (showBack) Icons.AutoMirrored.Filled.ArrowBack else Icons.Default.Home
+        Icon(navIcon, null, tint = TextPureWhite, modifier = Modifier.size(28.dp).clickable(onClick = if (showBack) onBackClick else onHomeClick))
         Spacer(Modifier.width(16.dp))
         
-        val titleText = when(uiState.appMode) {
-            AppMode.MANGA -> "NAS MANGA"
-            AppMode.WEBTOON -> "NAS WEBTOON"
-            AppMode.MAGAZINE -> "NAS MAGAZINE"
-            AppMode.PHOTO_BOOK -> "NAS PHOTO"
+        val titleText = if (uiState.isSeriesView && uiState.selectedMetadata != null) {
+            uiState.selectedMetadata.title ?: "NAS VIEWER"
+        } else {
+            when(uiState.appMode) {
+                AppMode.MANGA -> "NAS MANGA"
+                AppMode.WEBTOON -> "NAS WEBTOON"
+                AppMode.MAGAZINE -> "NAS MAGAZINE"
+                AppMode.PHOTO_BOOK -> "NAS PHOTO"
+            }
         }
-        Text(titleText, style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Black, letterSpacing = (-0.5).sp), color = TextPureWhite)
-        
-        Spacer(Modifier.weight(1f))
+        Text(titleText, style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Black, letterSpacing = (-0.5).sp), color = TextPureWhite, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
         
         IconButton(onClick = onRefresh, modifier = Modifier.size(28.dp)) {
             Icon(Icons.Default.Refresh, "Refresh", tint = TextPureWhite)
