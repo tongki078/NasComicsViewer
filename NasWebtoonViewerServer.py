@@ -12,6 +12,8 @@ app = Flask(__name__)
 BASE_PATH = "/volume2/video/GDS3/GDRIVE/READING/웹툰"
 METADATA_DB_PATH = '/volume2/video/NasWebtoonViewer.db'
 ALLOWED_CATEGORIES = ["가", "나", "다", "라", "마", "바", "사", "아", "자", "차", "카", "타", "파", "하", "기타", "0Z", "A-Z"]
+THUMB_CACHE_DIR = os.path.join(os.path.dirname(METADATA_DB_PATH), "webtoon_cache")
+if not os.path.exists(THUMB_CACHE_DIR): os.makedirs(THUMB_CACHE_DIR)
 
 # --- 전역 상태 관리 ---
 scan_status = {
@@ -162,6 +164,8 @@ def get_comic_info(abs_path, rel_path):
             poster = find_first_image_recursive(abs_path)
             poster_found_source = "find_first_image_recursive" if poster else "None"
 
+        # 상세 페이지 상단 배경 등을 위해 meta_dict에도 poster_url 주입
+        meta_dict['poster_url'] = poster
         add_web_log(f"[{rel_path}] Poster Source: {poster_found_source}. Final Poster: {poster}", "DEBUG")
 
     else:
@@ -199,11 +203,12 @@ def scan_task(abs_path):
             ep_items = []
             with os.scandir(abs_path) as it:
                 for e in it:
-                    if is_comic_file(e.name):
+                    if is_comic_file(e.name) or e.is_dir():
                         e_rel = os.path.relpath(e.path, BASE_PATH).replace(os.sep, '/')
                         e_title = os.path.splitext(e.name)[0]
-                        e_poster = "zip_thumb://" + e_rel
-                        ep_items.append((get_path_hash(e.path), get_path_hash(abs_path), e.path, e_rel, e.name, 0, e_poster, normalize_nfc(e_title), depth + 1, time.time(), "{}"))
+                        # 에피소드 썸네일로 zip_thumb를 시도하되, 기본값으로 시리즈 대표 포스터(poster)를 사용
+                        e_poster = "zip_thumb://" + e_rel if is_comic_file(e.name) else poster
+                        ep_items.append((get_path_hash(e.path), get_path_hash(abs_path), e.path, e_rel, e.name, 1 if e.is_dir() else 0, e_poster or poster, normalize_nfc(e_title), depth + 1, time.time(), "{}"))
             if ep_items:
                 db_queue.put(ep_items)
 
@@ -487,7 +492,7 @@ def download():
     p = request.args.get('path', '')
     if not p: return "Path required", 400
 
-    # 외부 URL 이미지 Proxy 처리 (requests 대신 urllib 사용)
+    # 1. 외부 URL 이미지 Proxy 처리
     if p.startswith("http"):
         try:
             req = urllib.request.Request(p, headers={'User-Agent': 'Mozilla/5.0'})
@@ -497,8 +502,16 @@ def download():
             logger.error(f"Proxy Download Failed: {p}, Error: {e}")
             return "Image Load Failed", 500
 
+    # 2. 압축 파일 썸네일 캐싱 처리
     if p.startswith("zip_thumb://"):
-        azp = os.path.join(BASE_PATH, p[12:])
+        rel_path = p[12:]
+        cache_key = hashlib.md5(normalize_nfc(rel_path).encode('utf-8')).hexdigest() + ".jpg"
+        cache_path = os.path.join(THUMB_CACHE_DIR, cache_key)
+
+        if os.path.exists(cache_path):
+            return send_from_directory(THUMB_CACHE_DIR, cache_key)
+
+        azp = os.path.join(BASE_PATH, rel_path)
         if os.path.isdir(azp):
             try:
                 with os.scandir(azp) as it:
@@ -510,16 +523,29 @@ def download():
             with zipfile.ZipFile(azp, 'r') as z:
                 imgs = sorted([n for n in z.namelist() if is_image_file(n)])
                 if imgs:
-                    with z.open(imgs[0]) as f: return send_file(io.BytesIO(f.read()), mimetype='image/jpeg')
+                    # [개선된 로직] 의미 있는 작화 페이지 찾기
+                    # 3번째 이미지부터 최대 10번째 이미지까지 후보군 선정 (앞부분 노이즈 제거)
+                    candidates = imgs[2:10] if len(imgs) > 10 else imgs
+                    best_img = imgs[0]
+                    max_size = -1
+                    for c in candidates:
+                        info = z.getinfo(c)
+                        if info.file_size > max_size:
+                            max_size = info.file_size
+                            best_img = c
+
+                    with z.open(best_img) as f:
+                        img_data = f.read()
+                        with open(cache_path, 'wb') as cf: cf.write(img_data)
+                        return send_file(io.BytesIO(img_data), mimetype='image/jpeg')
         except: pass
         return "No Image in Zip", 404
 
-    # p에는 앱에서 인코딩하여 보낸 경로가 오므로, 디코딩하지 않고 바로 사용
+    # 3. 로컬 파일 처리
     target_path = os.path.join(BASE_PATH, p)
     if os.path.exists(target_path):
         return send_from_directory(os.path.dirname(target_path), os.path.basename(target_path))
 
-    logger.error(f"File Not Found for Path: {p}") # 파일이 없을 경우 서버 로그 남김
     return "File Not Found", 404
 
 @app.route('/zip_entries')
@@ -567,6 +593,36 @@ def search_comics():
         })
     conn.close()
     return jsonify({'total_items': total, 'page': page, 'page_size': psize, 'items': items})
+
+@app.route('/metadata')
+def get_metadata():
+    path = request.args.get('path', '')
+    if not path: return jsonify({})
+    abs_p = os.path.abspath(os.path.join(BASE_PATH, path)).replace(os.sep, '/')
+    phash = get_path_hash(abs_p)
+    conn = sqlite3.connect(METADATA_DB_PATH); conn.row_factory = sqlite3.Row
+    row = conn.execute("SELECT * FROM entries WHERE path_hash = ?", (phash,)).fetchone()
+    if not row:
+        conn.close()
+        return jsonify({})
+    meta = json.loads(row['metadata'] or '{}')
+    meta['poster_url'] = row['poster_url']
+    meta['title'] = row['title'] or row['name']
+
+    ep_rows = conn.execute("SELECT * FROM entries WHERE parent_hash = ? ORDER BY name", (phash,)).fetchall()
+    chapters = []
+    for ep in ep_rows:
+        ep_meta = json.loads(ep['metadata'] or '{}')
+        ep_meta['poster_url'] = ep['poster_url'] or row['poster_url']
+        chapters.append({
+            'name': ep['title'] or ep['name'],
+            'isDirectory': bool(ep['is_dir']),
+            'path': ep['rel_path'],
+            'metadata': ep_meta
+        })
+    meta['chapters'] = chapters
+    conn.close()
+    return jsonify(meta)
 
 if __name__ == '__main__':
     init_db()
