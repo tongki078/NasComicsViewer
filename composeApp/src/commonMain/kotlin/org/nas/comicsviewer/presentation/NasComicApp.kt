@@ -253,7 +253,7 @@ fun FolderGridView(
             columns = GridCells.Fixed(3),
             contentPadding = PaddingValues(16.dp),
             horizontalArrangement = Arrangement.spacedBy(10.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp)
+            verticalArrangement = Arrangement.spacedBy(28.dp)
         ) {
             if (recentComics.isNotEmpty()) {
                 item(span = { GridItemSpan(maxLineSpan) }) {
@@ -291,9 +291,12 @@ fun FolderGridView(
 @Composable
 fun ComicCard(file: NasFile, repo: PosterRepository, showCategoryBadge: Boolean = false, onClick: () -> Unit) {
     var thumb by remember { mutableStateOf<ImageBitmap?>(null) }
-    LaunchedEffect(file.metadata?.posterUrl) {
-        file.metadata?.posterUrl?.let { thumb = repo.getImage(it) }
+    val metadata = file.metadata
+    
+    LaunchedEffect(metadata?.posterUrl) {
+        metadata?.posterUrl?.let { thumb = repo.getImage(it) }
     }
+
     Column(Modifier.fillMaxWidth().clickable(interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = onClick)) {
         Box(Modifier.aspectRatio(0.72f).fillMaxWidth().clip(RoundedCornerShape(4.dp)).background(SurfaceGrey)) {
             if (thumb != null) {
@@ -305,7 +308,7 @@ fun ComicCard(file: NasFile, repo: PosterRepository, showCategoryBadge: Boolean 
             }
             
             if (showCategoryBadge) {
-                val cat = file.metadata?.category ?: file.path.substringBefore("/")
+                val cat = metadata?.category ?: file.path.substringBefore("/")
                 if (cat.isNotEmpty()) {
                     Surface(
                         color = KakaoYellow.copy(alpha = 0.85f),
@@ -329,8 +332,42 @@ fun ComicCard(file: NasFile, repo: PosterRepository, showCategoryBadge: Boolean 
                 }
             }
         }
-        Spacer(Modifier.height(6.dp))
-        Text(file.name, style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold, fontSize = 11.sp), maxLines = 2, overflow = TextOverflow.Ellipsis, color = TextPureWhite)
+        
+        Spacer(Modifier.height(10.dp))
+        
+        // 제목 표시 (metadata.title이 있으면 우선 사용)
+        val displayTitle = if (!metadata?.title.isNullOrEmpty()) metadata?.title!! else file.name
+        Text(
+            text = displayTitle, 
+            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold, fontSize = 12.sp), 
+            maxLines = 1, 
+            overflow = TextOverflow.Ellipsis, 
+            color = TextPureWhite
+        )
+        
+        // 작가 정보 (writers)
+        val writers = metadata?.writers?.joinToString(", ")
+        if (!writers.isNullOrEmpty()) {
+            Text(
+                text = writers,
+                style = MaterialTheme.typography.bodySmall.copy(fontSize = 10.sp, color = KakaoYellow),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.padding(top = 2.dp)
+            )
+        }
+        
+        // 출판사 정보 (publisher)
+        val publisher = metadata?.publisher
+        if (!publisher.isNullOrEmpty()) {
+            Text(
+                text = publisher,
+                style = MaterialTheme.typography.bodySmall.copy(fontSize = 9.sp, color = TextMuted),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.padding(top = 1.dp)
+            )
+        }
     }
 }
 

@@ -92,13 +92,16 @@ def find_first_image_recursive(path, depth_limit=3):
     try:
         with os.scandir(path) as it:
             ents = sorted(list(it), key=lambda x: x.name)
+            # 1. 현재 폴더에서 이미지 파일 먼저 찾기
             for e in ents:
                 if is_image_file(e.name):
                     return os.path.relpath(e.path, BASE_PATH).replace(os.sep, '/')
+            # 2. 하위 폴더 재귀 탐색
             for e in ents:
                 if e.is_dir():
                     res = find_first_image_recursive(e.path, depth_limit - 1)
                     if res: return res
+            # 3. 폴더에 이미지가 없으면 압축 파일이라도 확인
             for e in ents:
                 if is_comic_file(e.name):
                     return "zip_thumb://" + os.path.relpath(e.path, BASE_PATH).replace(os.sep, '/')
@@ -206,9 +209,24 @@ def scan_task(abs_path):
                     if is_comic_file(e.name) or e.is_dir():
                         e_rel = os.path.relpath(e.path, BASE_PATH).replace(os.sep, '/')
                         e_title = os.path.splitext(e.name)[0]
-                        # 에피소드 썸네일로 zip_thumb를 시도하되, 기본값으로 시리즈 대표 포스터(poster)를 사용
-                        e_poster = "zip_thumb://" + e_rel if is_comic_file(e.name) else poster
-                        ep_items.append((get_path_hash(e.path), get_path_hash(abs_path), e.path, e_rel, e.name, 1 if e.is_dir() else 0, e_poster or poster, normalize_nfc(e_title), depth + 1, time.time(), "{}"))
+
+                        # 에피소드 썸네일 결정:
+                        # 1. ZIP 파일이면 zip_thumb 사용
+                        # 2. 폴더면 내부의 첫 이미지 검색
+                        # 3. 위 둘 다 아니면 시리즈 포스터 상속
+                        if is_comic_file(e.name):
+                            e_poster = "zip_thumb://" + e_rel
+                        elif e.is_dir():
+                            e_poster = find_first_image_recursive(e.path) or poster
+                        else:
+                            e_poster = poster
+
+                        ep_items.append((
+                            get_path_hash(e.path), get_path_hash(abs_path),
+                            e.path, e_rel, e.name, 1 if e.is_dir() else 0,
+                            e_poster, normalize_nfc(e_title), depth + 1,
+                            time.time(), "{}"
+                        ))
             if ep_items:
                 db_queue.put(ep_items)
 
