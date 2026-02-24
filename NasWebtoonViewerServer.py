@@ -399,8 +399,7 @@ def list_files_api():
         target_root = os.path.join(BASE_PATH, path)
 
     phash = get_path_hash(target_root)
-    conn = sqlite3.connect(METADATA_DB_PATH)
-    conn.row_factory = sqlite3.Row
+    conn = sqlite3.connect(METADATA_DB_PATH); conn.row_factory = sqlite3.Row
 
     placeholders = ','.join(['?'] * len(EXCLUDED_FOLDERS))
     query = f"SELECT * FROM entries WHERE parent_hash = ? AND name NOT IN ({placeholders}) ORDER BY name"
@@ -418,8 +417,7 @@ def list_files_api():
 
 @app.route('/scan')
 def scan_comics():
-    path = request.args.get('path', '')
-    page = request.args.get('page', 1, type=int); psize = request.args.get('page_size', 50, type=int)
+    path = request.args.get('path', ''); page = request.args.get('page', 1, type=int); psize = request.args.get('page_size', 50, type=int)
     conn = sqlite3.connect(METADATA_DB_PATH); conn.row_factory = sqlite3.Row
 
     placeholders = ','.join(['?'] * len(EXCLUDED_FOLDERS))
@@ -436,7 +434,7 @@ def scan_comics():
         target_root = os.path.join(BASE_PATH, path)
         phash = get_path_hash(target_root)
 
-        query = f"SELECT * FROM entries WHERE parent_hash = ? AND name NOT IN ({placeholders}) ORDER BY is_dir DESC, title LIMIT ? OFFSET ?"
+        query = f"SELECT * FROM entries WHERE parent_hash = ? AND name NOT IN ({placeholders}) ORDER BY is_dir DESC, depth, title LIMIT ? OFFSET ?"
         params = [phash] + EXCLUDED_FOLDERS + [psize, (page-1)*psize]
 
         rows = conn.execute(query, params).fetchall()
@@ -521,10 +519,7 @@ def download():
 def zip_entries():
     path = urllib.parse.unquote(request.args.get('path', ''))
     abs_p = os.path.join(BASE_PATH, path)
-    if os.path.isdir(abs_p):
-        try:
-            with os.scandir(abs_p) as it: return jsonify(sorted([e.name for e in it if is_image_file(e.name)]))
-        except: return jsonify([])
+    if os.path.isdir(abs_p): return jsonify(sorted([e.name for e in os.scandir(abs_p) if is_image_file(e.name)]))
     try:
         with zipfile.ZipFile(abs_p, 'r') as z: return jsonify(sorted([n for n in z.namelist() if is_image_file(n)]))
     except: return jsonify([])
