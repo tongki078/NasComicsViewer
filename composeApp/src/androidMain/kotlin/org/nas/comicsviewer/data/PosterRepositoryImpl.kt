@@ -69,11 +69,16 @@ class AndroidPosterRepository(private val context: Context, private val database
 
         try {
             val downloadUrl = if (url.startsWith("http") && !url.startsWith(baseUrl)) {
+                // 외부 URL 프록시
                 val encodedUrl = URLEncoder.encode(url, "UTF-8")
                 "$baseUrl/download?path=$encodedUrl"
             } else if (url.startsWith("http")) {
                 url
+            } else if (url.startsWith("zip_thumb://")) {
+                // 서버가 이미 인코딩해서 준 zip_thumb 주소는 그대로 사용
+                "$baseUrl/download?path=$url"
             } else {
+                // 로컬 상대 경로만 인코딩
                 val encodedPath = url.split("/").joinToString("/") { 
                     URLEncoder.encode(it, "UTF-8").replace("+", "%20")
                 }

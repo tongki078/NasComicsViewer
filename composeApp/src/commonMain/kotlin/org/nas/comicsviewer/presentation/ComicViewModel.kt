@@ -43,6 +43,8 @@ data class ComicBrowserUiState(
     val searchResults: List<NasFile> = emptyList(),
     val recentSearches: List<String> = emptyList(),
     val readingPositions: Map<String, Int> = emptyMap(),
+    val listScrollPositions: Map<String, Int> = emptyMap(), // 경로별 스크롤 인덱스 저장
+    val scrollRequestIndex: Int? = null, // UI에 스크롤 복구 요청을 위한 필드
     val isSearchExecuted: Boolean = false,
     val appMode: AppMode = AppMode.MANGA
 ) {
@@ -135,7 +137,8 @@ class ComicViewModel(
                 isSeriesView = false,
                 selectedMetadata = null,
                 seriesEpisodes = emptyList(),
-                selectedZipPath = null
+                selectedZipPath = null,
+                listScrollPositions = emptyMap()
             )
         }
         
@@ -164,7 +167,8 @@ class ComicViewModel(
                     isSeriesView = false,
                     selectedMetadata = null,
                     isLoading = false,
-                    isRefreshing = false
+                    isRefreshing = false,
+                    scrollRequestIndex = state.listScrollPositions[path] ?: 0
                 )
             }
             return
@@ -186,7 +190,8 @@ class ComicViewModel(
                 isSeriesView = false,
                 selectedMetadata = null,
                 seriesEpisodes = emptyList(),
-                selectedZipPath = null
+                selectedZipPath = null,
+                scrollRequestIndex = if (isBack) state.listScrollPositions[path] ?: 0 else 0
             )
         }
 
@@ -229,13 +234,25 @@ class ComicViewModel(
         }
     }
 
+    // 리스트 스크롤 위치 저장
+    fun saveListScrollPosition(path: String, index: Int) {
+        _uiState.update { it.copy(listScrollPositions = it.listScrollPositions + (path to index)) }
+    }
+
+    // 스크롤 복구 완료 알림 (한 번만 실행되도록)
+    fun onScrollRestored() {
+        _uiState.update { it.copy(scrollRequestIndex = null) }
+    }
+
     fun onFileClick(file: NasFile) {
+        // 상세 이동 전 현재 경로의 스크롤 위치 저장 로직은 UI에서 호출해주거나 여기서 처리 가능
+        // (UI에서 LazyGridState의 firstVisibleItemIndex를 넘겨받는 방식이 정확함)
+
         viewModelScope.launch {
             posterRepository.addToRecent(file)
             loadRecentComics()
         }
 
-        // 화보 모드에서는 바로 뷰어 열기
         if (_uiState.value.isPhotoBookMode && !file.isDirectory) {
             val episodes = if (_uiState.value.isSearchMode && _uiState.value.searchResults.isNotEmpty()) _uiState.value.searchResults else _uiState.value.currentFiles
             val index = episodes.indexOfFirst { it.path == file.path }
@@ -252,7 +269,6 @@ class ComicViewModel(
              return
         }
 
-        // 이미 상세 페이지 내부이거나 파일인 경우 뷰어 열기
         if (!file.isDirectory || _uiState.value.isSeriesView) {
             val episodes = if (_uiState.value.isSearchMode && _uiState.value.searchResults.isNotEmpty()) _uiState.value.searchResults else if (_uiState.value.isSeriesView) _uiState.value.seriesEpisodes else _uiState.value.currentFiles
             val index = episodes.indexOfFirst { it.path == file.path }
@@ -264,10 +280,8 @@ class ComicViewModel(
             return
         }
         
-        // [최종 해결] 작품 폴더 클릭 시 무조건 상세 페이지로 진입 시도
         detailJob?.cancel()
         detailJob = viewModelScope.launch {
-            // 1. 즉시 상태 변경하여 사용자 반응성 확보
             _uiState.update { it.copy(
                 isSeriesView = true,
                 isLoading = true,
@@ -276,12 +290,10 @@ class ComicViewModel(
             ) }
 
             try {
-                // 검색 모드 해제
                 if (_uiState.value.isSearchMode) {
                     _uiState.update { it.copy(isSearchMode = false) }
                 }
 
-                // 2. 메타데이터와 에피소드 목록 병렬 로드
                 val metadataDeferred = async { nasRepository.getMetadata(file.path) }
                 val resultDeferred = async { nasRepository.scanComicFolders(file.path, 1, 300) }
                 
@@ -290,7 +302,6 @@ class ComicViewModel(
                 
                 val processedFiles = processScanResult(result.items)
                 
-                // 3. 최종 상태 업데이트
                 _uiState.update { it.copy(
                     selectedMetadata = metadata ?: ComicMetadata(title = file.name, summary = "상세 정보가 없습니다."),
                     seriesEpisodes = if (metadata?.chapters?.isNotEmpty() == true) processScanResult(metadata.chapters!!) else processedFiles,
@@ -299,7 +310,6 @@ class ComicViewModel(
                 ) }
 
             } catch (e: Exception) {
-                // 실패 시에도 무한 로딩에 빠지지 않도록 로딩 종료 및 대체 로직
                 _uiState.update { it.copy(
                     isLoading = false,
                     selectedMetadata = ComicMetadata(title = file.name, summary = "서버 통신 중 오류가 발생했습니다.")
@@ -420,7 +430,8 @@ class ComicViewModel(
                         selectedMetadata = null,
                         currentPath = parentPath,
                         pathHistory = history.dropLast(1),
-                        currentFiles = listCache[parentPath] ?: emptyList()
+                        currentFiles = listCache[parentPath] ?: emptyList(),
+                        scrollRequestIndex = it.listScrollPositions[parentPath] ?: 0
                     ) }
                     return
                 }

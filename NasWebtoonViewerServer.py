@@ -19,13 +19,13 @@ EXCLUDED_FOLDERS = ["INCOMING", "Incoming", "incoming"]
 THUMB_CACHE_DIR = os.path.join(os.path.dirname(METADATA_DB_PATH), "webtoon_cache")
 if not os.path.exists(THUMB_CACHE_DIR): os.makedirs(THUMB_CACHE_DIR)
 
-# PDF 처리를 위한 라이브러리 체크
+# PDF/EPUB 처리를 위한 라이브러리 체크
 try:
     import fitz  # PyMuPDF
     HAS_FITZ = True
 except ImportError:
     HAS_FITZ = False
-    logger.warning("PyMuPDF (fitz) not found. PDF thumbnails will not be generated. Install with: pip install pymupdf")
+    logger.warning("PyMuPDF (fitz) not found. PDF/EPUB thumbnails will not be generated. Install with: pip install pymupdf")
 
 # --- 전역 상태 관리 ---
 scan_status = {
@@ -97,25 +97,26 @@ def init_db():
 
 # --- 정보 추출 엔진 ---
 def is_comic_file(name):
-    return name.lower().endswith(('.zip', '.cbz', '.rar', '.cbr', '.pdf'))
+    return name.lower().endswith(('.zip', '.cbz', '.rar', '.cbr', '.pdf', '.epub'))
 
 def is_image_file(name):
     return name.lower().endswith(('.jpg', '.jpeg', '.png', '.webp', '.gif'))
 
-def generate_pdf_thumbnail(pdf_path, cache_path):
-    if not HAS_FITZ: return False
+def generate_file_thumbnail(file_path, cache_path):
+    if not HAS_FITZ:
+        logger.error("PyMuPDF not installed. Cannot generate thumbnail.")
+        return False
     try:
-        doc = fitz.open(pdf_path)
+        doc = fitz.open(file_path)
         if doc.page_count > 0:
             page = doc.load_page(0)
-            # 썸네일 해상도 조절 (기본 72dpi -> 1.5배)
             pix = page.get_pixmap(matrix=fitz.Matrix(1.5, 1.5))
             pix.save(cache_path)
             doc.close()
             return True
         doc.close()
     except Exception as e:
-        logger.error(f"PDF Thumb Error: {e}")
+        logger.error(f"Thumbnail generation error for {file_path}: {e}")
     return False
 
 def find_first_image_recursive(path, depth_limit=3):
@@ -123,13 +124,16 @@ def find_first_image_recursive(path, depth_limit=3):
     try:
         with os.scandir(path) as it:
             ents = sorted(list(it), key=lambda x: x.name)
+            # 1. 이미지 파일 우선 찾기
             for e in ents:
                 if is_image_file(e.name):
                     return os.path.relpath(e.path, BASE_PATH).replace(os.sep, '/')
+            # 2. 하위 폴더 재귀 탐색
             for e in ents:
                 if e.is_dir() and not is_excluded(e.name):
                     res = find_first_image_recursive(e.path, depth_limit - 1)
                     if res: return res
+            # 3. 만화/PDF 파일 찾기
             for e in ents:
                 if is_comic_file(e.name):
                     return "zip_thumb://" + os.path.relpath(e.path, BASE_PATH).replace(os.sep, '/')
@@ -187,6 +191,7 @@ def get_comic_info(abs_path, rel_path):
         poster = "zip_thumb://" + rel_path
         title = os.path.splitext(title)[0]
 
+    # 포스터 주소 인코딩 (zip_thumb:// 접두어 유지)
     if poster and not poster.startswith("http"):
         if poster.startswith("zip_thumb://"):
             poster = "zip_thumb://" + urllib.parse.quote(poster[12:])
@@ -229,14 +234,19 @@ def scan_task(abs_path, series_depth):
                     if (is_comic_file(e.name) or e.is_dir()) and not is_excluded(e.name):
                         e_rel = os.path.relpath(e.path, BASE_PATH).replace(os.sep, '/')
                         e_title = os.path.splitext(e.name)[0]
-                        if is_comic_file(e.name): e_poster = "zip_thumb://" + urllib.parse.quote(e_rel)
+                        e_poster = None
+                        if is_comic_file(e.name):
+                            e_poster = "zip_thumb://" + urllib.parse.quote(e_rel)
                         elif e.is_dir():
-                            found_img = find_first_image_recursive(e.path)
-                            if found_img:
-                                e_poster = urllib.parse.quote(found_img)
-                            else:
-                                e_poster = poster
+                            found = find_first_image_recursive(e.path)
+                            if found:
+                                if found.startswith("zip_thumb://"):
+                                    e_poster = "zip_thumb://" + urllib.parse.quote(found[12:])
+                                else:
+                                    e_poster = urllib.parse.quote(found)
+                            else: e_poster = poster
                         else: e_poster = poster
+
                         ep_items.append((get_path_hash(e.path), get_path_hash(abs_path), e.path, e_rel, e.name, 1 if e.is_dir() else 0, e_poster, normalize_nfc(e_title), depth + 1, time.time(), "{}"))
             if ep_items: db_queue.put(ep_items)
     except Exception as e:
@@ -418,7 +428,6 @@ def scan_comics():
 @app.route('/download')
 def download():
     p = request.args.get('path', '')
-    # [수정됨] urllib.parse.unquote 를 적용하여 앞서 전달된 URL을 확실하게 디코딩
     p = urllib.parse.unquote(p)
 
     if not p: return "Path required", 400
@@ -426,7 +435,6 @@ def download():
     # 1. 외부 URL (카카오/네이버 등) 프록시 처리
     if p.startswith("http"):
         try:
-            # 카카오/네이버 등 외부 접속 차단을 막기 위해 Referer와 User-Agent 우회
             headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
             if 'kakao' in p: headers['Referer'] = 'https://webtoon.kakao.com/'
             elif 'naver' in p: headers['Referer'] = 'https://comic.naver.com/'
@@ -438,26 +446,35 @@ def download():
             logger.error(f"Proxy Download Failed: {p}, Error: {e}")
             return "Image Load Failed", 500
 
-    # 2. 압축 파일 썸네일 캐싱 처리
+    # 2. 압축 파일/PDF 썸네일 캐싱 처리
     if p.startswith("zip_thumb://"):
-        rel_path = p[12:]; cache_key = hashlib.md5(normalize_nfc(rel_path).encode('utf-8')).hexdigest() + ".jpg"
+        rel_path = p[12:]
+        # 캐시 키 생성 (NFC 정규화된 상대 경로 기반)
+        cache_key = hashlib.md5(normalize_nfc(rel_path).encode('utf-8')).hexdigest() + ".jpg"
         cache_path = os.path.join(THUMB_CACHE_DIR, cache_key)
+
         if os.path.exists(cache_path): return send_from_directory(THUMB_CACHE_DIR, cache_key)
+
         azp = os.path.join(BASE_PATH, rel_path)
 
-        # PDF 파일 처리
-        if azp.lower().endswith('.pdf'):
-            if generate_pdf_thumbnail(azp, cache_path):
-                return send_from_directory(THUMB_CACHE_DIR, cache_key)
-            return "PDF Thumb Failed", 500
-
+        # 만약 azp가 폴더라면 그 안에서 만화 파일을 찾음
         if os.path.isdir(azp):
             try:
                 with os.scandir(azp) as it:
                     for e in it:
-                        if is_comic_file(e.name): azp = e.path; break
-                        if is_image_file(e.name): return send_from_directory(azp, e.name)
+                        if is_comic_file(e.name):
+                            azp = e.path
+                            break
+                        if is_image_file(e.name):
+                            return send_from_directory(azp, e.name)
             except: pass
+
+        # 최종 azp에 대해 PDF/EPUB 또는 ZIP 처리
+        if azp.lower().endswith(('.pdf', '.epub')):
+            if generate_file_thumbnail(azp, cache_path):
+                return send_from_directory(THUMB_CACHE_DIR, cache_key)
+            return "File Thumb Failed", 500
+
         try:
             with zipfile.ZipFile(azp, 'r') as z:
                 imgs = sorted([n for n in z.namelist() if is_image_file(n)])
@@ -466,7 +483,9 @@ def download():
                         img_data = f.read()
                         with open(cache_path, 'wb') as cf: cf.write(img_data)
                         return send_file(io.BytesIO(img_data), mimetype='image/jpeg')
-        except: pass
+        except Exception as e:
+            logger.error(f"ZIP Error for {azp}: {e}")
+
         return "No Image", 404
 
     # 3. 로컬 파일 처리
@@ -490,7 +509,6 @@ def download_zip_entry():
     path = urllib.parse.unquote(request.args.get('path', ''))
     entry = urllib.parse.unquote(request.args.get('entry', ''))
 
-    # [수정됨] 만약 zip_entry 자체가 외부 HTTP URL이라면 프록시 처리
     if entry.startswith("http"):
         try:
             headers = {'User-Agent': 'Mozilla/5.0'}
