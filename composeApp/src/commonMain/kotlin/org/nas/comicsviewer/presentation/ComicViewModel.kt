@@ -292,7 +292,7 @@ class ComicViewModel(
             _uiState.update { it.copy(
                 isSeriesView = true,
                 isLoading = true,
-                selectedMetadata = ComicMetadata(title = file.name, summary = "정보를 불러오는 중..."),
+                selectedMetadata = file.metadata ?: ComicMetadata(title = file.name, summary = "정보를 불러오는 중..."),
                 seriesEpisodes = emptyList()
             ) }
 

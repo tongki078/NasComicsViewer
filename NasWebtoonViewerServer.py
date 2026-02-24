@@ -554,7 +554,12 @@ def get_metadata():
     conn = sqlite3.connect(METADATA_DB_PATH); conn.row_factory = sqlite3.Row
     row = conn.execute("SELECT * FROM entries WHERE path_hash = ?", (phash,)).fetchone()
     if not row: conn.close(); return jsonify({})
-    meta = json.loads(row['metadata'] or '{}'); meta['poster_url'] = row['poster_url']; meta['title'] = row['title'] or row['name']
+
+    title_val = row['title'] if row['title'] else row['name']
+
+    meta = json.loads(row['metadata'] or '{}');
+    meta['poster_url'] = row['poster_url']
+    meta['title'] = normalize_nfc(title_val)
 
     placeholders = ','.join(['?'] * len(EXCLUDED_FOLDERS))
     query = f"SELECT * FROM entries WHERE parent_hash = ? AND name NOT IN ({placeholders}) ORDER BY name"
