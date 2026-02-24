@@ -210,6 +210,20 @@ def scan_task(abs_path, series_depth):
         depth = get_depth(rel)
         scan_status["current_item"] = os.path.basename(abs_path)
 
+        # 도서 모드처럼 깊이가 깊은 경우, 하위에 만화/도서 파일이 직접 있는지 확인
+        has_comic_files = False
+        if os.path.isdir(abs_path):
+            try:
+                with os.scandir(abs_path) as it:
+                    for e in it:
+                        if is_comic_file(e.name):
+                            has_comic_files = True
+                            break
+            except: pass
+
+        # 핵심 수정: 만화/도서 파일(epub, pdf 등)이 있다면 무조건 시리즈 레벨로 판단하여 파일(에피소드)을 등록하게 함
+        is_series_level = (depth >= series_depth) or has_comic_files
+
         title, poster, meta = get_comic_info(abs_path, rel)
         p_hash = get_path_hash(os.path.dirname(abs_path))
         item = (get_path_hash(abs_path), p_hash, abs_path, rel, os.path.basename(abs_path), 1 if os.path.isdir(abs_path) else 0, poster, title, depth, time.time(), meta)
@@ -218,37 +232,40 @@ def scan_task(abs_path, series_depth):
         scan_status["processed"] += 1
         scan_status["success"] += 1
 
-        if depth == series_depth:
+        if is_series_level:
             add_web_log(f"'{title}' updated", "UPDATE")
 
-        if os.path.isdir(abs_path) and depth < series_depth:
-            with os.scandir(abs_path) as it:
-                for e in it:
-                    if e.is_dir() and not is_excluded(e.name):
-                        scan_status["total"] += 1
-                        scanning_pool.submit(scan_task, e.path, series_depth)
-        elif os.path.isdir(abs_path) and depth == series_depth:
-            ep_items = []
-            with os.scandir(abs_path) as it:
-                for e in it:
-                    if (is_comic_file(e.name) or e.is_dir()) and not is_excluded(e.name):
-                        e_rel = os.path.relpath(e.path, BASE_PATH).replace(os.sep, '/')
-                        e_title = os.path.splitext(e.name)[0]
-                        e_poster = None
-                        if is_comic_file(e.name):
-                            e_poster = "zip_thumb://" + urllib.parse.quote(e_rel)
-                        elif e.is_dir():
-                            found = find_first_image_recursive(e.path)
-                            if found:
-                                if found.startswith("zip_thumb://"):
-                                    e_poster = "zip_thumb://" + urllib.parse.quote(found[12:])
-                                else:
-                                    e_poster = urllib.parse.quote(found)
+        if os.path.isdir(abs_path):
+            if not is_series_level:
+                # 시리즈 깊이에 도달할 때까지 하위 폴더 계속 탐색
+                with os.scandir(abs_path) as it:
+                    for e in it:
+                        if e.is_dir() and not is_excluded(e.name):
+                            scan_status["total"] += 1
+                            scanning_pool.submit(scan_task, e.path, series_depth)
+            else:
+                # 시리즈 레벨이면 내부 파일들을 에피소드로 등록 (여기서 epub, pdf 등이 에피소드 리스트로 저장됨)
+                ep_items = []
+                with os.scandir(abs_path) as it:
+                    for e in it:
+                        if (is_comic_file(e.name) or e.is_dir()) and not is_excluded(e.name):
+                            e_rel = os.path.relpath(e.path, BASE_PATH).replace(os.sep, '/')
+                            e_title = os.path.splitext(e.name)[0]
+                            e_poster = None
+                            if is_comic_file(e.name):
+                                e_poster = "zip_thumb://" + urllib.parse.quote(e_rel)
+                            elif e.is_dir():
+                                found = find_first_image_recursive(e.path)
+                                if found:
+                                    if found.startswith("zip_thumb://"):
+                                        e_poster = "zip_thumb://" + urllib.parse.quote(found[12:])
+                                    else:
+                                        e_poster = urllib.parse.quote(found)
+                                else: e_poster = poster
                             else: e_poster = poster
-                        else: e_poster = poster
 
-                        ep_items.append((get_path_hash(e.path), get_path_hash(abs_path), e.path, e_rel, e.name, 1 if e.is_dir() else 0, e_poster, normalize_nfc(e_title), depth + 1, time.time(), "{}"))
-            if ep_items: db_queue.put(ep_items)
+                            ep_items.append((get_path_hash(e.path), get_path_hash(abs_path), e.path, e_rel, e.name, 1 if e.is_dir() else 0, e_poster, normalize_nfc(e_title), depth + 1, time.time(), "{}"))
+                if ep_items: db_queue.put(ep_items)
     except Exception as e:
         scan_status["failed"] += 1
         add_web_log(f"Error scanning {abs_path}: {e}", "ERROR")
@@ -290,6 +307,13 @@ def start_full_scan(target_type):
                     if entry.is_dir() and not is_excluded(entry.name):
                         scan_status["total"] += 1
                         scanning_pool.submit(scan_task, entry.path, 3)
+    elif target_type == "BOOK":
+        book_root = os.path.join(BASE_PATH, "책")
+        if os.path.exists(book_root):
+            add_web_log("Initializing Book Scan...", "INIT")
+            scan_status["total"] += 1
+            # 책 -> 일반 -> 가 -> 제목 -> 도서파일. 즉 깊이 4를 시리즈 뎁스로 지정
+            scanning_pool.submit(scan_task, book_root, 4)
 
 @app.route('/')
 def index():
@@ -300,7 +324,7 @@ def index():
         .container { max-width: 1000px; margin: 0 auto; background: #1e1e1e; padding: 30px; border-radius: 12px; }
         .grid-buttons { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 20px; margin-bottom: 30px; }
         .btn { padding: 20px; border-radius: 8px; border: none; font-size: 16px; font-weight: bold; cursor: pointer; transition: 0.3s; color: white; }
-        .btn-webtoon { background: #E91E63; } .btn-magazine { background: #2196F3; } .btn-photobook { background: #9C27B0; }
+        .btn-webtoon { background: #E91E63; } .btn-magazine { background: #2196F3; } .btn-photobook { background: #9C27B0; } .btn-book { background: #4CAF50; }
         .btn:hover { opacity: 0.8; transform: translateY(-2px); }
         .status-box { background: #252525; padding: 20px; border-radius: 8px; margin-bottom: 20px; border: 1px solid #333; }
         .log-window { background: #000; color: #0f0; padding: 15px; border-radius: 4px; height: 400px; overflow-y: auto; font-family: 'Consolas', monospace; font-size: 13px; }
@@ -313,6 +337,7 @@ def index():
                 <button class="btn btn-webtoon" onclick="startScan('WEBTOON')">웹툰 메타데이터 갱신</button>
                 <button class="btn btn-magazine" onclick="startScan('MAGAZINE')">잡지 메타데이터 갱신</button>
                 <button class="btn btn-photobook" onclick="startScan('PHOTO_BOOK')">화보 메타데이터 갱신</button>
+                <button class="btn btn-book" onclick="startScan('BOOK')">도서 메타데이터 갱신</button>
             </div>
             <div class="status-box">
                 <div id="statusLabel">상태: 대기 중</div>
@@ -399,7 +424,7 @@ def scan_comics():
 
     placeholders = ','.join(['?'] * len(EXCLUDED_FOLDERS))
 
-    # 웹툰 모드 등에서 빈 경로로 진입 시 리스트에 초성(가,나,다...)이 나오는 것을 방지
+    # 웹툰 루트 진입 시 처리
     if not path or path == "웹툰":
         query = f"SELECT * FROM entries WHERE depth = 3 AND abs_path LIKE '%/웹툰/%' AND name NOT IN ({placeholders}) ORDER BY title LIMIT ? OFFSET ?"
         params = EXCLUDED_FOLDERS + [psize, (page-1)*psize]
@@ -411,7 +436,7 @@ def scan_comics():
         target_root = os.path.join(BASE_PATH, path)
         phash = get_path_hash(target_root)
 
-        query = f"SELECT * FROM entries WHERE parent_hash = ? AND name NOT IN ({placeholders}) ORDER BY name LIMIT ? OFFSET ?"
+        query = f"SELECT * FROM entries WHERE parent_hash = ? AND name NOT IN ({placeholders}) ORDER BY is_dir DESC, title LIMIT ? OFFSET ?"
         params = [phash] + EXCLUDED_FOLDERS + [psize, (page-1)*psize]
 
         rows = conn.execute(query, params).fetchall()
@@ -446,7 +471,7 @@ def download():
             logger.error(f"Proxy Download Failed: {p}, Error: {e}")
             return "Image Load Failed", 500
 
-    # 2. 압축 파일/PDF 썸네일 캐싱 처리
+    # 2. 압축 파일/PDF/EPUB 썸네일 캐싱 처리
     if p.startswith("zip_thumb://"):
         rel_path = p[12:]
         # 캐시 키 생성 (NFC 정규화된 상대 경로 기반)

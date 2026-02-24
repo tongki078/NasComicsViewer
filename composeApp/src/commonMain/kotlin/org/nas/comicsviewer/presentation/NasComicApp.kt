@@ -83,6 +83,14 @@ fun NasComicApp(viewModel: ComicViewModel) {
             mainGridState.scrollToItem(0)
         }
     }
+    
+    // 스크롤 위치 복구 로직
+    LaunchedEffect(uiState.scrollRequestIndex) {
+        uiState.scrollRequestIndex?.let { index ->
+            mainGridState.scrollToItem(index)
+            viewModel.onScrollRestored()
+        }
+    }
 
     MaterialTheme(colorScheme = darkColorScheme(background = BgBlack, surface = BgBlack, primary = TextPureWhite)) {
         Box(Modifier.fillMaxSize().background(BgBlack)) {
@@ -104,6 +112,18 @@ fun NasComicApp(viewModel: ComicViewModel) {
                     }
                     AppMode.PHOTO_BOOK -> {
                         PhotoBookViewer(
+                            path = uiState.selectedZipPath!!,
+                            manager = zipManager,
+                            posterUrl = uiState.viewerPosterUrl,
+                            repo = viewModel.posterRepository,
+                            onClose = { viewModel.closeViewer() },
+                            onError = { viewModel.showError(it) },
+                            uiState = uiState,
+                            viewModel = viewModel
+                        )
+                    }
+                    AppMode.BOOK -> {
+                        BookViewer(
                             path = uiState.selectedZipPath!!,
                             manager = zipManager,
                             posterUrl = uiState.viewerPosterUrl,
@@ -137,7 +157,7 @@ fun NasComicApp(viewModel: ComicViewModel) {
                     onClearHistory = { viewModel.clearRecentSearches() },
                     viewModel = viewModel
                 )
-            } else if (uiState.isSeriesView && !uiState.isPhotoBookMode) {
+            } else if (uiState.isSeriesView) {
                 SeriesDetailScreen(uiState, { viewModel.onFileClick(it) }, { viewModel.onBack() }, viewModel.posterRepository)
             } else {
                 Column(Modifier.fillMaxSize()) {
@@ -166,6 +186,11 @@ fun NasComicApp(viewModel: ComicViewModel) {
                             )
                         } else {
                             val filesToShow = if (uiState.isSeriesView) uiState.seriesEpisodes else uiState.currentFiles
+                            val gridCols = when {
+                                uiState.isBookMode && isAtRoot -> 2
+                                uiState.isBookMode -> 4
+                                else -> 3
+                            }
                             FolderGridView(
                                 files = filesToShow,
                                 recentComics = if (uiState.isSeriesView) emptyList() else uiState.recentComics,
@@ -176,7 +201,10 @@ fun NasComicApp(viewModel: ComicViewModel) {
                                 onLoadMore = { viewModel.loadMoreBooks() },
                                 posterRepository = viewModel.posterRepository,
                                 gridState = mainGridState,
-                                showCategoryBadge = false
+                                showCategoryBadge = false,
+                                isBookMode = uiState.isBookMode,
+                                gridColumns = gridCols,
+                                onScrollPositionChanged = { viewModel.saveListScrollPosition(uiState.currentPath, it) }
                             )
                         }
                     }
@@ -265,7 +293,10 @@ fun FolderGridView(
     onLoadMore: () -> Unit,
     posterRepository: PosterRepository,
     gridState: LazyGridState,
-    showCategoryBadge: Boolean = false
+    showCategoryBadge: Boolean = false,
+    isBookMode: Boolean = false,
+    gridColumns: Int = if (isBookMode) 4 else 3,
+    onScrollPositionChanged: (Int) -> Unit = {}
 ) {
     val shouldLoadMore by remember(files.size, isLoading, isLoadingMore) {
         derivedStateOf {
@@ -277,14 +308,18 @@ fun FolderGridView(
     LaunchedEffect(shouldLoadMore) {
         if (shouldLoadMore) onLoadMore()
     }
+    
+    LaunchedEffect(gridState.firstVisibleItemIndex) {
+        onScrollPositionChanged(gridState.firstVisibleItemIndex)
+    }
 
     Box(Modifier.fillMaxSize()) {
         LazyVerticalGrid(
             state = gridState,
-            columns = GridCells.Fixed(3),
+            columns = GridCells.Fixed(gridColumns),
             contentPadding = PaddingValues(16.dp),
             horizontalArrangement = Arrangement.spacedBy(10.dp),
-            verticalArrangement = Arrangement.spacedBy(28.dp)
+            verticalArrangement = Arrangement.spacedBy(if (isBookMode) 16.dp else 28.dp)
         ) {
             if (recentComics.isNotEmpty()) {
                 item(span = { GridItemSpan(maxLineSpan) }) {
@@ -293,12 +328,12 @@ fun FolderGridView(
             }
 
             if (isLoading && files.isEmpty()) {
-                items(12) { 
-                    Box(Modifier.aspectRatio(0.72f).fillMaxWidth().clip(RoundedCornerShape(8.dp)).background(SurfaceGrey))
+                items(16) { 
+                    Box(Modifier.aspectRatio(0.72f).fillMaxWidth().clip(RoundedCornerShape(4.dp)).background(SurfaceGrey))
                 }
             } else {
                 items(files, key = { it.path }) { file ->
-                    ComicCard(file, posterRepository, showCategoryBadge) { onFileClick(file) }
+                    ComicCard(file, posterRepository, showCategoryBadge, isBookMode = isBookMode) { onFileClick(file) }
                 }
                 
                 if (isLoadingMore) {
@@ -320,7 +355,7 @@ fun FolderGridView(
 }
 
 @Composable
-fun ComicCard(file: NasFile, repo: PosterRepository, showCategoryBadge: Boolean = false, onClick: () -> Unit) {
+fun ComicCard(file: NasFile, repo: PosterRepository, showCategoryBadge: Boolean = false, isBookMode: Boolean = false, onClick: () -> Unit) {
     var thumb by remember { mutableStateOf<ImageBitmap?>(null) }
     val metadata = file.metadata
     
@@ -334,7 +369,7 @@ fun ComicCard(file: NasFile, repo: PosterRepository, showCategoryBadge: Boolean 
                 Image(thumb!!, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
             } else {
                 Box(Modifier.fillMaxSize(), Alignment.Center) { 
-                     Text("NAS", color = TextMuted, fontSize = 9.sp, fontWeight = FontWeight.Bold, modifier = Modifier.alpha(0.4f)) 
+                     Text("NAS", color = TextMuted, fontSize = if(isBookMode) 10.sp else 9.sp, fontWeight = FontWeight.Bold, modifier = Modifier.alpha(0.4f))
                 }
             }
             
@@ -349,9 +384,9 @@ fun ComicCard(file: NasFile, repo: PosterRepository, showCategoryBadge: Boolean 
                         Text(
                             text = cat,
                             color = Color.Black,
-                            fontSize = 9.sp,
+                            fontSize = 8.sp,
                             fontWeight = FontWeight.Black,
-                            modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp)
+                            modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
                         )
                     }
                 }
@@ -359,24 +394,30 @@ fun ComicCard(file: NasFile, repo: PosterRepository, showCategoryBadge: Boolean 
 
             if (file.isDirectory) {
                 Box(Modifier.align(Alignment.BottomStart).padding(4.dp).background(Color.Black.copy(0.6f), RoundedCornerShape(2.dp)).padding(horizontal = 4.dp, vertical = 1.dp)) {
-                    Text("SERIES", color = KakaoYellow, fontSize = 7.sp, fontWeight = FontWeight.Black)
+                    Text("SERIES", color = KakaoYellow, fontSize = if(isBookMode) 7.sp else 7.sp, fontWeight = FontWeight.Black)
                 }
             }
         }
         
-        Spacer(Modifier.height(10.dp))
-        
-        val displayTitle = if (!metadata?.title.isNullOrEmpty()) metadata?.title!! else file.name
-        Text(text = displayTitle, style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold, fontSize = 12.sp), maxLines = 1, overflow = TextOverflow.Ellipsis, color = TextPureWhite)
-        
-        val writers = metadata?.writers?.joinToString(", ")
-        if (!writers.isNullOrEmpty()) {
-            Text(text = writers, style = MaterialTheme.typography.bodySmall.copy(fontSize = 10.sp, color = KakaoYellow), maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 2.dp))
-        }
-        
-        val publisher = metadata?.publisher
-        if (!publisher.isNullOrEmpty()) {
-            Text(text = publisher, style = MaterialTheme.typography.bodySmall.copy(fontSize = 9.sp, color = TextMuted), maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 1.dp))
+        if (!isBookMode) {
+            Spacer(Modifier.height(10.dp))
+            
+            val displayTitle = if (!metadata?.title.isNullOrEmpty()) metadata?.title!! else file.name
+            Text(text = displayTitle, style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold, fontSize = 12.sp), maxLines = 1, overflow = TextOverflow.Ellipsis, color = TextPureWhite)
+            
+            val writers = metadata?.writers?.joinToString(", ")
+            if (!writers.isNullOrEmpty()) {
+                Text(text = writers, style = MaterialTheme.typography.bodySmall.copy(fontSize = 10.sp, color = KakaoYellow), maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 2.dp))
+            }
+            
+            val publisher = metadata?.publisher
+            if (!publisher.isNullOrEmpty()) {
+                Text(text = publisher, style = MaterialTheme.typography.bodySmall.copy(fontSize = 9.sp, color = TextMuted), maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 1.dp))
+            }
+        } else {
+            Spacer(Modifier.height(4.dp))
+            val displayTitle = if (!metadata?.title.isNullOrEmpty()) metadata?.title!! else file.name
+            Text(text = displayTitle, color = TextPureWhite, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth())
         }
     }
 }
@@ -745,6 +786,68 @@ fun MagazineViewer(
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
+fun BookViewer(
+    path: String,
+    manager: ZipManager,
+    posterUrl: String?,
+    repo: PosterRepository,
+    onClose: () -> Unit,
+    onError: (String) -> Unit,
+    uiState: ComicBrowserUiState,
+    viewModel: ComicViewModel
+) {
+    val imageNames = remember { mutableStateListOf<String>() }
+    var isListLoaded by remember { mutableStateOf(false) }
+    var showControls by remember { mutableStateOf(true) }
+    var posterBitmap by remember { mutableStateOf<ImageBitmap?>(null) }
+    val scope = rememberCoroutineScope()
+    
+    val pagerState = rememberPagerState { imageNames.size }
+
+    LaunchedEffect(posterUrl) { posterUrl?.let { posterBitmap = repo.getImage(it) } }
+
+    LaunchedEffect(path) {
+        isListLoaded = false; imageNames.clear(); viewerImageCache.clear(); viewerCacheKeys.clear()
+        try {
+            val names = manager.listImagesInZip(path)
+            if (names.isNotEmpty()) {
+                imageNames.addAll(names); isListLoaded = true
+                val lastPos = uiState.readingPositions[path] ?: 0
+                scope.launch { pagerState.scrollToPage(lastPos) }
+            } else { onError("이미지 목록을 가져올 수 없습니다."); onClose() }
+        } catch (e: Exception) { onError("파일을 열 수 없습니다: ${e.message}"); onClose() }
+    }
+
+    LaunchedEffect(pagerState.currentPage) {
+        if (isListLoaded) {
+            viewModel.saveReadingPosition(path, pagerState.currentPage)
+        }
+    }
+
+    Box(Modifier.fillMaxSize().background(Color.Black)) {
+        if (isListLoaded) {
+            HorizontalPager(
+                state = pagerState,
+                modifier = Modifier.fillMaxSize().clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) { showControls = !showControls },
+                pageSpacing = 16.dp
+            ) { page ->
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    MagazinePage(path, imageNames[page], manager) 
+                }
+            }
+        }
+
+        if (showControls) {
+            Box(Modifier.fillMaxWidth().height(60.dp).background(BgBlack.copy(0.8f)).align(Alignment.TopCenter).padding(horizontal = 12.dp)) {
+                IconButton(onClick = onClose, modifier = Modifier.align(Alignment.CenterStart).size(36.dp)) { Icon(Icons.Default.Close, null, tint = TextPureWhite, modifier = Modifier.size(20.dp)) }
+                Text("${pagerState.currentPage + 1} / ${imageNames.size}", Modifier.align(Alignment.Center), color = TextPureWhite, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
 fun PhotoBookViewer(
     path: String,
     manager: ZipManager,
@@ -943,6 +1046,7 @@ fun TopBar(uiState: ComicBrowserUiState, onHomeClick: () -> Unit, onBackClick: (
                 AppMode.WEBTOON -> "NAS WEBTOON"
                 AppMode.MAGAZINE -> "NAS MAGAZINE"
                 AppMode.PHOTO_BOOK -> "NAS PHOTO"
+                AppMode.BOOK -> "NAS BOOK"
             }
         }
         Text(titleText, style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Black, letterSpacing = (-0.5).sp), color = TextPureWhite, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
@@ -960,6 +1064,7 @@ fun TopBar(uiState: ComicBrowserUiState, onHomeClick: () -> Unit, onBackClick: (
                     AppMode.WEBTOON -> Color(0xFFE91E63)
                     AppMode.MAGAZINE -> Color(0xFF2196F3)
                     AppMode.PHOTO_BOOK -> Color(0xFF9C27B0)
+                    AppMode.BOOK -> Color(0xFF4CAF50)
                     AppMode.MANGA -> KakaoYellow
                 },
                 shape = RoundedCornerShape(12.dp)
@@ -1003,6 +1108,7 @@ fun TopBar(uiState: ComicBrowserUiState, onHomeClick: () -> Unit, onBackClick: (
                                 AppMode.WEBTOON -> Icons.AutoMirrored.Filled.List
                                 AppMode.MAGAZINE -> Icons.Default.Info
                                 AppMode.PHOTO_BOOK -> Icons.Default.AccountCircle
+                                AppMode.BOOK -> Icons.Default.Info
                             }
                             Icon(icon, null, tint = if (uiState.appMode == mode) KakaoYellow else Color.Gray)
                         }
