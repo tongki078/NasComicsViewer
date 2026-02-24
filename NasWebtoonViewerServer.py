@@ -19,6 +19,14 @@ EXCLUDED_FOLDERS = ["INCOMING", "Incoming", "incoming"]
 THUMB_CACHE_DIR = os.path.join(os.path.dirname(METADATA_DB_PATH), "webtoon_cache")
 if not os.path.exists(THUMB_CACHE_DIR): os.makedirs(THUMB_CACHE_DIR)
 
+# PDF 처리를 위한 라이브러리 체크
+try:
+    import fitz  # PyMuPDF
+    HAS_FITZ = True
+except ImportError:
+    HAS_FITZ = False
+    logger.warning("PyMuPDF (fitz) not found. PDF thumbnails will not be generated. Install with: pip install pymupdf")
+
 # --- 전역 상태 관리 ---
 scan_status = {
     "is_running": False,
@@ -93,6 +101,22 @@ def is_comic_file(name):
 
 def is_image_file(name):
     return name.lower().endswith(('.jpg', '.jpeg', '.png', '.webp', '.gif'))
+
+def generate_pdf_thumbnail(pdf_path, cache_path):
+    if not HAS_FITZ: return False
+    try:
+        doc = fitz.open(pdf_path)
+        if doc.page_count > 0:
+            page = doc.load_page(0)
+            # 썸네일 해상도 조절 (기본 72dpi -> 1.5배)
+            pix = page.get_pixmap(matrix=fitz.Matrix(1.5, 1.5))
+            pix.save(cache_path)
+            doc.close()
+            return True
+        doc.close()
+    except Exception as e:
+        logger.error(f"PDF Thumb Error: {e}")
+    return False
 
 def find_first_image_recursive(path, depth_limit=3):
     if depth_limit <= 0: return None
@@ -420,6 +444,13 @@ def download():
         cache_path = os.path.join(THUMB_CACHE_DIR, cache_key)
         if os.path.exists(cache_path): return send_from_directory(THUMB_CACHE_DIR, cache_key)
         azp = os.path.join(BASE_PATH, rel_path)
+
+        # PDF 파일 처리
+        if azp.lower().endswith('.pdf'):
+            if generate_pdf_thumbnail(azp, cache_path):
+                return send_from_directory(THUMB_CACHE_DIR, cache_key)
+            return "PDF Thumb Failed", 500
+
         if os.path.isdir(azp):
             try:
                 with os.scandir(azp) as it:

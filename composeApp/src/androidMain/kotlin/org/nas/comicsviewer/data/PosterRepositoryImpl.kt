@@ -30,13 +30,6 @@ class AndroidPosterRepository(private val context: Context, private val database
             requestTimeoutMillis = 30000 
             connectTimeoutMillis = 10000
         }
-        // SSL/TLS 인증서 검증 문제를 해결하기 위해 기본 엔진 설정 유지
-        engine {
-            https {
-                // 특정 안드로이드 버전에서 발생하는 호스트네임 검증 오류 방지 로직은 
-                // Ktor CIO의 기본 설정을 따르되 네트워크 안정성을 위해 타임아웃만 조정
-            }
-        }
     }
     private var baseUrl = "http://192.168.0.2:5555"
     private val queries = database.posterCacheQueries
@@ -58,8 +51,6 @@ class AndroidPosterRepository(private val context: Context, private val database
     override suspend fun getImage(url: String): ImageBitmap? = withContext(Dispatchers.IO) {
         if (url.isBlank()) return@withContext null
         
-        Log.d("PosterDebug", ">>> [START] Requesting Image URL: $url")
-        
         val cacheKey = url.toHash()
         memoryCache.get(url)?.let { return@withContext it }
         
@@ -76,31 +67,7 @@ class AndroidPosterRepository(private val context: Context, private val database
             }
         }
 
-        if (url.startsWith("zip_thumb://")) {
-            try {
-                val zipPath = url.removePrefix("zip_thumb://")
-                val zipManager = provideZipManager()
-                val imagesInZip = zipManager.listImagesInZip(zipPath)
-                if (imagesInZip.isNotEmpty()) {
-                    val coverImage = imagesInZip.first()
-                    val bytes = zipManager.extractImage(zipPath, coverImage)
-                    if (bytes != null && bytes.isNotEmpty()) {
-                        diskFile.writeBytes(bytes)
-                        bytes.toImageBitmap()?.let {
-                            memoryCache.put(url, it)
-                            return@withContext it
-                        }
-                    }
-                }
-            } catch (e: Exception) {
-                Log.e("PosterDebug", "ZIP Extraction Failed", e)
-            }
-            return@withContext null
-        }
-
         try {
-            // [핵심 수정] SSL 에러가 발생하는 외부 URL은 서버의 Proxy 기능을 다시 사용하여 우회합니다.
-            // 서버가 이미지를 대신 받아서 앱에 전달하면 앱은 인증서 걱정 없이 이미지를 받을 수 있습니다.
             val downloadUrl = if (url.startsWith("http") && !url.startsWith(baseUrl)) {
                 val encodedUrl = URLEncoder.encode(url, "UTF-8")
                 "$baseUrl/download?path=$encodedUrl"
@@ -113,7 +80,6 @@ class AndroidPosterRepository(private val context: Context, private val database
                 "$baseUrl/download?path=$encodedPath"
             }
 
-            Log.d("PosterDebug", "Requesting via URL: $downloadUrl")
             val response: HttpResponse = client.get(downloadUrl)
             val bytes: ByteArray = response.body()
             
