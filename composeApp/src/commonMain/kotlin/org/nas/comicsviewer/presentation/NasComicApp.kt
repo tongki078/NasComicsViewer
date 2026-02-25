@@ -430,89 +430,93 @@ fun SeriesDetailScreen(state: ComicBrowserUiState, onVolumeClick: (NasFile) -> U
         metadata?.posterUrl?.let { url -> posterBitmap = repo.getImage(url) }
     }
     
-    // 포스터가 없고 상세 정보도 없을 경우 레이아웃을 간소화 (만화모드 등)
     val isSimpleMode = posterBitmap == null && (metadata?.summary == "상세 정보가 없습니다." || metadata?.summary == "정보를 불러오는 중...")
 
-    Column(Modifier.fillMaxSize().background(BgBlack).verticalScroll(rememberScrollState())) {
-        if (!isSimpleMode) {
-            Box(Modifier.fillMaxWidth().height(420.dp)) {
-                if (posterBitmap != null) {
-                    Image(posterBitmap!!, null, Modifier.fillMaxSize().blur(30.dp).alpha(0.3f), contentScale = ContentScale.Crop)
-                    Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color.Transparent, BgBlack.copy(alpha = 0.5f), BgBlack))))
-                    
-                    Row(
-                        Modifier.align(Alignment.BottomStart).padding(horizontal = 24.dp, vertical = 24.dp),
-                        verticalAlignment = Alignment.Bottom
-                    ) {
-                        Image(
-                            posterBitmap!!, 
-                            null, 
-                            Modifier.width(140.dp).aspectRatio(0.72f).clip(RoundedCornerShape(8.dp)).border(0.5.dp, Color.White.copy(0.2f), RoundedCornerShape(8.dp)), 
-                            contentScale = ContentScale.Crop
-                        )
-                        Spacer(Modifier.width(20.dp))
-                        Column(Modifier.padding(bottom = 8.dp)) {
+    LazyColumn(Modifier.fillMaxSize().background(BgBlack)) {
+        item {
+            if (!isSimpleMode) {
+                Box(Modifier.fillMaxWidth().height(420.dp)) {
+                    if (posterBitmap != null) {
+                        Image(posterBitmap!!, null, Modifier.fillMaxSize().blur(30.dp).alpha(0.3f), contentScale = ContentScale.Crop)
+                        Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color.Transparent, BgBlack.copy(alpha = 0.5f), BgBlack))))
+                        
+                        Row(
+                            Modifier.align(Alignment.BottomStart).padding(horizontal = 24.dp, vertical = 24.dp),
+                            verticalAlignment = Alignment.Bottom
+                        ) {
+                            Image(
+                                posterBitmap!!, 
+                                null, 
+                                Modifier.width(140.dp).aspectRatio(0.72f).clip(RoundedCornerShape(8.dp)).border(0.5.dp, Color.White.copy(0.2f), RoundedCornerShape(8.dp)), 
+                                contentScale = ContentScale.Crop
+                            )
+                            Spacer(Modifier.width(20.dp))
+                            Column(Modifier.padding(bottom = 8.dp)) {
+                                Text(text = metadata?.title ?: "제목 없음", style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Black), color = TextPureWhite)
+                                Spacer(Modifier.height(8.dp))
+                                val writers = if (!metadata?.writers.isNullOrEmpty()) metadata?.writers?.joinToString(", ") ?: "" else "작가 미상"
+                                Text(text = writers, color = KakaoYellow, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                                Spacer(Modifier.height(8.dp))
+                                Surface(color = Color(0xFF222222), shape = RoundedCornerShape(4.dp)) {
+                                    Text(text = metadata?.status ?: "Unknown", modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp), color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                                }
+                            }
+                        }
+                    } else {
+                        Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color.Transparent, BgBlack.copy(alpha = 0.5f), BgBlack))))
+                        Column(Modifier.align(Alignment.BottomStart).padding(horizontal = 24.dp, vertical = 24.dp)) {
                             Text(text = metadata?.title ?: "제목 없음", style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Black), color = TextPureWhite)
                             Spacer(Modifier.height(8.dp))
                             val writers = if (!metadata?.writers.isNullOrEmpty()) metadata?.writers?.joinToString(", ") ?: "" else "작가 미상"
                             Text(text = writers, color = KakaoYellow, fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                            Spacer(Modifier.height(8.dp))
-                            Surface(color = Color(0xFF222222), shape = RoundedCornerShape(4.dp)) {
-                                Text(text = metadata?.status ?: "Unknown", modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp), color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.Bold)
-                            }
                         }
                     }
-                } else {
-                    Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color.Transparent, BgBlack.copy(alpha = 0.5f), BgBlack))))
-                    Column(Modifier.align(Alignment.BottomStart).padding(horizontal = 24.dp, vertical = 24.dp)) {
-                        Text(text = metadata?.title ?: "제목 없음", style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Black), color = TextPureWhite)
-                        Spacer(Modifier.height(8.dp))
-                        val writers = if (!metadata?.writers.isNullOrEmpty()) metadata?.writers?.joinToString(", ") ?: "" else "작가 미상"
-                        Text(text = writers, color = KakaoYellow, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                    
+                    IconButton(onClick = onBack, modifier = Modifier.statusBarsPadding().padding(8.dp).background(Color.Black.copy(0.3f), CircleShape)) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, null, tint = Color.White)
                     }
                 }
                 
-                IconButton(onClick = onBack, modifier = Modifier.statusBarsPadding().padding(8.dp).background(Color.Black.copy(0.3f), CircleShape)) {
-                    Icon(Icons.AutoMirrored.Filled.ArrowBack, null, tint = Color.White)
-                }
-            }
-            
-            Column(Modifier.padding(horizontal = 24.dp)) {
-                if (!metadata?.genres.isNullOrEmpty()) {
-                    FlowRow(mainAxisSpacing = 8.dp, crossAxisSpacing = 8.dp) {
-                        metadata?.genres?.forEach { genre ->
-                            Surface(color = SurfaceGrey, shape = CircleShape, border = BorderStroke(0.5.dp, Color.White.copy(0.1f))) {
-                                Text(genre, modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp), color = TextMuted, fontSize = 11.sp)
+                Column(Modifier.padding(horizontal = 24.dp)) {
+                    if (!metadata?.genres.isNullOrEmpty()) {
+                        FlowRow(mainAxisSpacing = 8.dp, crossAxisSpacing = 8.dp) {
+                            metadata?.genres?.forEach { genre ->
+                                Surface(color = SurfaceGrey, shape = CircleShape, border = BorderStroke(0.5.dp, Color.White.copy(0.1f))) {
+                                    Text(genre, modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp), color = TextMuted, fontSize = 11.sp)
+                                }
                             }
                         }
+                        Spacer(Modifier.height(24.dp))
                     }
-                    Spacer(Modifier.height(24.dp))
+                    Text(text = metadata?.summary ?: "등록된 줄거리가 없습니다.", color = TextMuted, fontSize = 14.sp, lineHeight = 22.sp)
+                    Spacer(Modifier.height(40.dp))
+                    Text("에피소드 (${state.seriesEpisodes.size})", color = TextPureWhite, fontWeight = FontWeight.Black, fontSize = 18.sp)
+                    Spacer(Modifier.height(16.dp))
                 }
-                Text(text = metadata?.summary ?: "등록된 줄거리가 없습니다.", color = TextMuted, fontSize = 14.sp, lineHeight = 22.sp)
-                Spacer(Modifier.height(40.dp))
-                Text("에피소드 (${state.seriesEpisodes.size})", color = TextPureWhite, fontWeight = FontWeight.Black, fontSize = 18.sp)
+            } else {
+                Row(Modifier.fillMaxWidth().statusBarsPadding().padding(horizontal = 16.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                    IconButton(onClick = onBack, modifier = Modifier.background(Color.Black.copy(0.3f), CircleShape)) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, null, tint = Color.White)
+                    }
+                    Spacer(Modifier.width(16.dp))
+                    Text(text = metadata?.title ?: "폴더 항목", style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Black), color = TextPureWhite, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+                HorizontalDivider(color = SurfaceGrey, thickness = 0.5.dp)
+                Spacer(Modifier.height(16.dp))
+                Text("항목 (${state.seriesEpisodes.size})", modifier = Modifier.padding(horizontal = 24.dp), color = TextPureWhite, fontWeight = FontWeight.Black, fontSize = 16.sp)
                 Spacer(Modifier.height(16.dp))
             }
-        } else {
-            // 심플 모드 (만화 모드 등 메타데이터가 없는 폴더를 클릭했을 때 헤더 축소)
-            Row(Modifier.fillMaxWidth().statusBarsPadding().padding(horizontal = 16.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-                IconButton(onClick = onBack, modifier = Modifier.background(Color.Black.copy(0.3f), CircleShape)) {
-                    Icon(Icons.AutoMirrored.Filled.ArrowBack, null, tint = Color.White)
-                }
-                Spacer(Modifier.width(16.dp))
-                Text(text = metadata?.title ?: "폴더 항목", style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Black), color = TextPureWhite, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            }
-            HorizontalDivider(color = SurfaceGrey, thickness = 0.5.dp)
-            Spacer(Modifier.height(16.dp))
-            Text("항목 (${state.seriesEpisodes.size})", modifier = Modifier.padding(horizontal = 24.dp), color = TextPureWhite, fontWeight = FontWeight.Black, fontSize = 16.sp)
-            Spacer(Modifier.height(16.dp))
         }
 
-        Column(Modifier.padding(horizontal = 20.dp).padding(bottom = 60.dp)) {
-            state.seriesEpisodes.forEach { file ->
+        items(state.seriesEpisodes) { file ->
+            Box(Modifier.padding(horizontal = 20.dp)) {
                 VolumeListItem(file, repo) { onVolumeClick(file) }
-                Spacer(Modifier.height(12.dp))
             }
+            Spacer(Modifier.height(12.dp))
+        }
+
+        item {
+            Spacer(Modifier.height(60.dp))
         }
     }
 }
