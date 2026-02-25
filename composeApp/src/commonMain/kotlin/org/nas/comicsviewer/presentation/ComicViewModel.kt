@@ -254,28 +254,39 @@ class ComicViewModel(
     }
 
     fun onFileClick(file: NasFile) {
-        // 1. 도서/화보 등 단순 카테고리(초성) 네비게이션용 폴더인지 판단하여 뷰어/상세화면 대신 목록 스캔 호출
         val slashCount = file.path.count { it == '/' }
         val shouldNavigate = file.isDirectory && !_uiState.value.isSeriesView && when (_uiState.value.appMode) {
-            AppMode.BOOK -> slashCount < 3 // 예: "책/일반/가" (슬래시 2개)는 네비게이션. "책/일반/가/제목" (3개)는 상세화면.
+            AppMode.BOOK -> slashCount < 3 
             AppMode.PHOTO_BOOK -> slashCount < 2 
             AppMode.MAGAZINE -> slashCount < 1 
-            AppMode.WEBTOON, AppMode.MANGA -> slashCount < 3 
+            AppMode.WEBTOON -> slashCount < 3 
+            AppMode.MANGA -> {
+                if (file.path.startsWith("ㅈㄱ/") || file.path.startsWith("작가/")) slashCount < 2 else slashCount < 1
+            }
         }
 
+        // 1. 단순 네비게이션 폴더 클릭 (초성, 작가명 등)
         if (shouldNavigate) {
             scanBooks(file.path)
             return
         }
 
-        // 2. 실제 열람 가능한 작품이나 에피소드인 경우에만 최근 본 작품에 추가
-        viewModelScope.launch {
-            posterRepository.addToRecent(file)
-            loadRecentComics()
+        // 2. 이미 상세 페이지인데 클릭한 항목이 "폴더"인 경우 (Manga 모드에서 에피소드 대신 하위 폴더들이 있는 케이스)
+        if (file.isDirectory && _uiState.value.isSeriesView) {
+            scanBooks(file.path)
+            return
         }
 
-        // 3. 이미 상세 페이지 내부에 있거나 폴더가 아닌 단일 파일인 경우 뷰어 바로 열기
-        if (!file.isDirectory || _uiState.value.isSeriesView) {
+        // 3. 실제 열람 가능한 작품이나 에피소드인 경우에만 최근 본 작품에 추가
+        if (!file.isDirectory) {
+            viewModelScope.launch {
+                posterRepository.addToRecent(file)
+                loadRecentComics()
+            }
+        }
+
+        // 4. 폴더가 아닌 단일 파일인 경우 뷰어 바로 열기
+        if (!file.isDirectory) {
             val episodes = if (_uiState.value.isSearchMode && _uiState.value.searchResults.isNotEmpty()) _uiState.value.searchResults else if (_uiState.value.isSeriesView) _uiState.value.seriesEpisodes else _uiState.value.currentFiles
             val index = episodes.indexOfFirst { it.path == file.path }
             _uiState.update { it.copy(
@@ -286,7 +297,7 @@ class ComicViewModel(
             return
         }
         
-        // 4. 작품명 폴더(책 제목 등) 클릭 시 상세 페이지로 진입하여 메타데이터 및 에피소드 스캔
+        // 5. 작품명 폴더 클릭 시 상세 페이지로 진입하여 메타데이터 및 에피소드 스캔
         detailJob?.cancel()
         detailJob = viewModelScope.launch {
             _uiState.update { it.copy(
