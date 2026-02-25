@@ -438,25 +438,46 @@ fun SeriesDetailScreen(state: ComicBrowserUiState, onVolumeClick: (NasFile) -> U
             Box(Modifier.fillMaxWidth().height(420.dp)) {
                 if (posterBitmap != null) {
                     Image(posterBitmap!!, null, Modifier.fillMaxSize().blur(30.dp).alpha(0.3f), contentScale = ContentScale.Crop)
-                    Image(posterBitmap!!, null, Modifier.align(Alignment.BottomCenter).width(200.dp).height(280.dp).padding(bottom = 20.dp).clip(RoundedCornerShape(8.dp)).border(0.5.dp, Color.White.copy(0.2f), RoundedCornerShape(8.dp)), contentScale = ContentScale.Crop)
+                    Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color.Transparent, BgBlack.copy(alpha = 0.5f), BgBlack))))
+                    
+                    Row(
+                        Modifier.align(Alignment.BottomStart).padding(horizontal = 24.dp, vertical = 24.dp),
+                        verticalAlignment = Alignment.Bottom
+                    ) {
+                        Image(
+                            posterBitmap!!, 
+                            null, 
+                            Modifier.width(140.dp).aspectRatio(0.72f).clip(RoundedCornerShape(8.dp)).border(0.5.dp, Color.White.copy(0.2f), RoundedCornerShape(8.dp)), 
+                            contentScale = ContentScale.Crop
+                        )
+                        Spacer(Modifier.width(20.dp))
+                        Column(Modifier.padding(bottom = 8.dp)) {
+                            Text(text = metadata?.title ?: "제목 없음", style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Black), color = TextPureWhite)
+                            Spacer(Modifier.height(8.dp))
+                            val writers = if (!metadata?.writers.isNullOrEmpty()) metadata?.writers?.joinToString(", ") ?: "" else "작가 미상"
+                            Text(text = writers, color = KakaoYellow, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                            Spacer(Modifier.height(8.dp))
+                            Surface(color = Color(0xFF222222), shape = RoundedCornerShape(4.dp)) {
+                                Text(text = metadata?.status ?: "Unknown", modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp), color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                            }
+                        }
+                    }
+                } else {
+                    Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color.Transparent, BgBlack.copy(alpha = 0.5f), BgBlack))))
+                    Column(Modifier.align(Alignment.BottomStart).padding(horizontal = 24.dp, vertical = 24.dp)) {
+                        Text(text = metadata?.title ?: "제목 없음", style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Black), color = TextPureWhite)
+                        Spacer(Modifier.height(8.dp))
+                        val writers = if (!metadata?.writers.isNullOrEmpty()) metadata?.writers?.joinToString(", ") ?: "" else "작가 미상"
+                        Text(text = writers, color = KakaoYellow, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                    }
                 }
-                Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color.Transparent, BgBlack.copy(alpha = 0.5f), BgBlack))))
+                
                 IconButton(onClick = onBack, modifier = Modifier.statusBarsPadding().padding(8.dp).background(Color.Black.copy(0.3f), CircleShape)) {
                     Icon(Icons.AutoMirrored.Filled.ArrowBack, null, tint = Color.White)
                 }
             }
+            
             Column(Modifier.padding(horizontal = 24.dp)) {
-                Text(text = metadata?.title ?: "제목 없음", style = MaterialTheme.typography.headlineMedium.copy(fontWeight = FontWeight.Black), color = TextPureWhite)
-                Spacer(Modifier.height(12.dp))
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    val writers = if (!metadata?.writers.isNullOrEmpty()) metadata?.writers?.joinToString(", ") ?: "" else "작가 미상"
-                    Text(text = writers, color = KakaoYellow, fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                    Spacer(Modifier.width(12.dp))
-                    Surface(color = Color(0xFF222222), shape = RoundedCornerShape(4.dp)) {
-                        Text(text = metadata?.status ?: "Unknown", modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp), color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.Bold)
-                    }
-                }
-                Spacer(Modifier.height(16.dp))
                 if (!metadata?.genres.isNullOrEmpty()) {
                     FlowRow(mainAxisSpacing = 8.dp, crossAxisSpacing = 8.dp) {
                         metadata?.genres?.forEach { genre ->

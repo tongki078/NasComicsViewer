@@ -259,7 +259,7 @@ class ComicViewModel(
             AppMode.BOOK -> slashCount < 3 
             AppMode.PHOTO_BOOK -> slashCount < 2 
             AppMode.MAGAZINE -> slashCount < 1 
-            AppMode.WEBTOON -> slashCount < 3 
+            AppMode.WEBTOON -> slashCount < 1
             AppMode.MANGA -> {
                 if (file.path.startsWith("ㅈㄱ/") || file.path.startsWith("작가/")) slashCount < 2 else slashCount < 1
             }
