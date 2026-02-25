@@ -73,7 +73,12 @@ def db_writer_worker():
         items = db_queue.get()
         if items is None: break
         try:
-            conn.executemany('INSERT OR REPLACE INTO entries VALUES (?,?,?,?,?,?,?,?,?,?,?)', items)
+            # 컬럼명을 명시적으로 지정하여 12개 컬럼 에러 방지
+            conn.executemany('''
+                INSERT OR REPLACE INTO entries
+                (path_hash, parent_hash, abs_path, rel_path, name, is_dir, poster_url, title, depth, last_scanned, metadata)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?)
+            ''', items)
             conn.commit()
         except Exception as e:
             logger.error("DB Write Error: " + str(e))
@@ -91,6 +96,17 @@ def init_db():
             poster_url TEXT, title TEXT, depth INTEGER, last_scanned REAL,
             metadata TEXT
         )''')
+
+        # db migration: check if is_dir column exists
+        cursor = conn.execute("PRAGMA table_info(entries)")
+        columns = [info[1] for info in cursor.fetchall()]
+        if 'is_dir' not in columns:
+            try:
+                conn.execute('ALTER TABLE entries ADD COLUMN is_dir INTEGER DEFAULT 0')
+                logger.info("Successfully added 'is_dir' column to existing DB.")
+            except Exception as e:
+                logger.error(f"Failed to add 'is_dir' column: {e}")
+
         conn.execute('CREATE INDEX IF NOT EXISTS idx_parent ON entries(parent_hash)')
         conn.execute('CREATE INDEX IF NOT EXISTS idx_title ON entries(title)')
     conn.close()
@@ -203,14 +219,16 @@ def get_comic_info(abs_path, rel_path):
 
 def scan_task(abs_path, series_depth):
     try:
+        abs_path = normalize_nfc(abs_path)
         if is_excluded(os.path.basename(abs_path)): return
 
-        rel = os.path.relpath(abs_path, BASE_PATH).replace(os.sep, '/')
+        rel = normalize_nfc(os.path.relpath(abs_path, BASE_PATH).replace(os.sep, '/'))
         if rel == ".": rel = ""
         depth = get_depth(rel)
+
         scan_status["current_item"] = os.path.basename(abs_path)
 
-        # 도서 모드처럼 깊이가 깊은 경우, 하위에 만화/도서 파일이 직접 있는지 확인
+        # 만화 파일이 직접 들어있는지 확인
         has_comic_files = False
         if os.path.isdir(abs_path):
             try:
@@ -219,37 +237,33 @@ def scan_task(abs_path, series_depth):
                         if is_comic_file(e.name):
                             has_comic_files = True
                             break
-            except: pass
+            except:
+                pass
 
-        # 핵심 수정: 만화/도서 파일(epub, pdf 등)이 있다면 무조건 시리즈 레벨로 판단하여 파일(에피소드)을 등록하게 함
+        # 시리즈 레벨 판단: 설정된 깊이(3)에 도달했거나, 내부에 만화 파일이 있는 경우
         is_series_level = (depth >= series_depth) or has_comic_files
 
         title, poster, meta = get_comic_info(abs_path, rel)
         p_hash = get_path_hash(os.path.dirname(abs_path))
-        item = (get_path_hash(abs_path), p_hash, abs_path, rel, os.path.basename(abs_path), 1 if os.path.isdir(abs_path) else 0, poster, title, depth, time.time(), meta)
+
+        # 현재 항목(폴더 또는 파일) DB 등록
+        item = (get_path_hash(abs_path), p_hash, abs_path, rel, normalize_nfc(os.path.basename(abs_path)),
+                1 if os.path.isdir(abs_path) else 0, poster, title, depth, time.time(), meta)
         db_queue.put([item])
 
         scan_status["processed"] += 1
         scan_status["success"] += 1
 
-        if is_series_level:
-            add_web_log(f"'{title}' updated", "UPDATE")
-
         if os.path.isdir(abs_path):
-            if not is_series_level:
-                # 시리즈 깊이에 도달할 때까지 하위 폴더 계속 탐색
-                with os.scandir(abs_path) as it:
-                    for e in it:
-                        if e.is_dir() and not is_excluded(e.name):
-                            scan_status["total"] += 1
-                            scanning_pool.submit(scan_task, e.path, series_depth)
-            else:
-                # 시리즈 레벨이면 내부 파일들을 에피소드로 등록 (여기서 epub, pdf 등이 에피소드 리스트로 저장됨)
+            if is_series_level:
+                # 1. 시리즈 레벨이면: 내부 파일들을 에피소드로 등록
+                add_web_log(f"'{title}' updated", "UPDATE")
                 ep_items = []
                 with os.scandir(abs_path) as it:
                     for e in it:
                         if (is_comic_file(e.name) or e.is_dir()) and not is_excluded(e.name):
-                            e_rel = os.path.relpath(e.path, BASE_PATH).replace(os.sep, '/')
+                            e_abs = normalize_nfc(e.path)
+                            e_rel = normalize_nfc(os.path.relpath(e_abs, BASE_PATH).replace(os.sep, '/'))
                             e_title = os.path.splitext(e.name)[0]
                             e_poster = None
                             if is_comic_file(e.name):
@@ -261,11 +275,24 @@ def scan_task(abs_path, series_depth):
                                         e_poster = "zip_thumb://" + urllib.parse.quote(found[12:])
                                     else:
                                         e_poster = urllib.parse.quote(found)
-                                else: e_poster = poster
-                            else: e_poster = poster
+                                else:
+                                    e_poster = poster
+                            else:
+                                e_poster = poster
 
-                            ep_items.append((get_path_hash(e.path), get_path_hash(abs_path), e.path, e_rel, e.name, 1 if e.is_dir() else 0, e_poster, normalize_nfc(e_title), depth + 1, time.time(), "{}"))
+                            ep_items.append(
+                                (get_path_hash(e.path), get_path_hash(abs_path), e_abs, e_rel, normalize_nfc(e.name),
+                                 1 if e.is_dir() else 0, e_poster, normalize_nfc(e_title), depth + 1, time.time(),
+                                 "{}"))
                 if ep_items: db_queue.put(ep_items)
+            else:
+                # 2. 시리즈 레벨이 아니면(예: '가' 폴더): 하위 폴더들을 재귀적으로 스캔 리스트에 추가
+                with os.scandir(abs_path) as it:
+                    for e in it:
+                        if e.is_dir() and not is_excluded(e.name):
+                            scan_status["total"] += 1
+                            scanning_pool.submit(scan_task, e.path, series_depth)
+
     except Exception as e:
         scan_status["failed"] += 1
         add_web_log(f"Error scanning {abs_path}: {e}", "ERROR")
@@ -302,11 +329,9 @@ def start_full_scan(target_type):
         photobook_root = os.path.join(BASE_PATH, "화보")
         if os.path.exists(photobook_root):
             add_web_log("Initializing Photo Book Scan...", "INIT")
-            with os.scandir(photobook_root) as it:
-                for entry in it:
-                    if entry.is_dir() and not is_excluded(entry.name):
-                        scan_status["total"] += 1
-                        scanning_pool.submit(scan_task, entry.path, 3)
+            # 화보 루트에서부터 재귀적으로 탐색하도록 변경 (깊이 4를 시리즈 뎁스로 지정)
+            scan_status["total"] += 1
+            scanning_pool.submit(scan_task, photobook_root, 4)
     elif target_type == "BOOK":
         book_root = os.path.join(BASE_PATH, "책")
         if os.path.exists(book_root):
@@ -330,7 +355,8 @@ def index():
         .log-window { background: #000; color: #0f0; padding: 15px; border-radius: 4px; height: 400px; overflow-y: auto; font-family: 'Consolas', monospace; font-size: 13px; }
         .progress-container { background: #333; height: 10px; border-radius: 5px; margin-top: 10px; overflow: hidden; }
         .progress-bar { background: #4caf50; height: 100%; width: 0%; transition: 0.3s; }
-    </style></head><body>
+    </style>
+    </head><body>
         <div class="container">
             <h1>🛠️ Nas 통합 콘텐츠 관리</h1>
             <div class="grid-buttons">
@@ -347,25 +373,44 @@ def index():
                     <span id="percentText">0%</span>
                 </div>
             </div>
-            <div class="log-window" id="logWindow"></div>
+            <div class="log-window" id="logConsole"></div>
         </div>
         <script>
             function startScan(type) {
-                fetch('/start_scan?type=' + type).then(r => r.json());
-                document.getElementById('logWindow').innerHTML = '<div>[' + type + '] 스캔 시작 중...</div>';
+                var url = '/start_scan?type=' + type;
+                fetch(url).then(function(response) {
+                    return response.json();
+                });
+                var console = document.getElementById('logConsole');
+                console.innerHTML = '<div>[' + type + '] 스캔 시작 중...</div>';
             }
-            const evtSource = new EventSource("/stream_logs");
+
+            var evtSource = new EventSource("/stream_logs");
             evtSource.onmessage = function(event) {
-                const data = JSON.parse(event.data);
-                document.getElementById('statusLabel').innerText = "상태: " + (data.is_running ? data.current_type + " 처리 중..." : "대기 중") + " (" + data.current_item + ")";
-                document.getElementById('progressText').innerText = data.processed + " / " + data.total;
-                const percent = data.total > 0 ? Math.round((data.processed / data.total) * 100) : 0;
-                document.getElementById('percentText').innerText = percent + "%";
-                document.getElementById('progressBar').style.width = percent + "%";
+                var data = JSON.parse(event.data);
+                var statusLabel = document.getElementById('statusLabel');
+                var progressText = document.getElementById('progressText');
+                var percentText = document.getElementById('percentText');
+                var progressBar = document.getElementById('progressBar');
+                var logConsole = document.getElementById('logConsole');
+
+                var runningMsg = data.is_running ? data.current_type + " 처리 중..." : "대기 중";
+                statusLabel.innerText = "상태: " + runningMsg + " (" + data.current_item + ")";
+                progressText.innerText = data.processed + " / " + data.total;
+
+                var percent = 0;
+                if (data.total > 0) {
+                    percent = Math.round((data.processed / data.total) * 100);
+                }
+
+                percentText.innerText = percent + "%";
+                progressBar.style.width = percent + "%";
+
                 if (data.new_log) {
-                    const div = document.createElement('div'); div.innerText = data.new_log;
-                    const logWin = document.getElementById('logWindow'); logWin.appendChild(div);
-                    logWin.scrollTop = logWin.scrollHeight;
+                    var div = document.createElement('div');
+                    div.innerText = data.new_log;
+                    logConsole.appendChild(div);
+                    logConsole.scrollTop = logConsole.scrollHeight;
                 }
             };
         </script>
@@ -409,7 +454,7 @@ def list_files_api():
     for r in rows:
         items.append({
             'name': r['name'],
-            'isDirectory': bool(r['is_dir']),
+            'isDirectory': bool(r['is_dir']) if 'is_dir' in r.keys() else False,
             'path': r['rel_path']
         })
     conn.close()
@@ -417,24 +462,34 @@ def list_files_api():
 
 @app.route('/scan')
 def scan_comics():
-    path = request.args.get('path', ''); page = request.args.get('page', 1, type=int); psize = request.args.get('page_size', 50, type=int)
-    conn = sqlite3.connect(METADATA_DB_PATH); conn.row_factory = sqlite3.Row
+    # 입력 파라미터 정규화
+    path = normalize_nfc(request.args.get('path', ''))
+    page = request.args.get('page', 1, type=int)
+    psize = request.args.get('page_size', 50, type=int)
 
+    conn = sqlite3.connect(METADATA_DB_PATH);
+    conn.row_factory = sqlite3.Row
     placeholders = ','.join(['?'] * len(EXCLUDED_FOLDERS))
+
+    # Check if is_dir exists to avoid OperationalError during SELECT
+    cursor = conn.execute("PRAGMA table_info(entries)")
+    columns = [info[1] for info in cursor.fetchall()]
+    order_by_clause = "ORDER BY is_dir DESC, depth, title" if 'is_dir' in columns else "ORDER BY depth, title"
 
     # 웹툰 루트 진입 시 처리
     if not path or path == "웹툰":
-        query = f"SELECT * FROM entries WHERE depth = 3 AND abs_path LIKE '%/웹툰/%' AND name NOT IN ({placeholders}) ORDER BY title LIMIT ? OFFSET ?"
-        params = EXCLUDED_FOLDERS + [psize, (page-1)*psize]
+        # LIKE 조건을 더 안전하게 변경하고 depth를 3으로 특정
+        query = f"SELECT * FROM entries WHERE depth = 3 AND rel_path LIKE '웹툰/%' AND name NOT IN ({placeholders}) ORDER BY title LIMIT ? OFFSET ?"
+        params = EXCLUDED_FOLDERS + [psize, (page - 1) * psize]
         rows = conn.execute(query, params).fetchall()
 
-        count_query = f"SELECT COUNT(*) FROM entries WHERE depth = 3 AND abs_path LIKE '%/웹툰/%' AND name NOT IN ({placeholders})"
+        count_query = f"SELECT COUNT(*) FROM entries WHERE depth = 3 AND rel_path LIKE '웹툰/%' AND name NOT IN ({placeholders})"
         total = conn.execute(count_query, EXCLUDED_FOLDERS).fetchone()[0]
     else:
         target_root = os.path.join(BASE_PATH, path)
         phash = get_path_hash(target_root)
 
-        query = f"SELECT * FROM entries WHERE parent_hash = ? AND name NOT IN ({placeholders}) ORDER BY is_dir DESC, depth, title LIMIT ? OFFSET ?"
+        query = f"SELECT * FROM entries WHERE parent_hash = ? AND name NOT IN ({placeholders}) {order_by_clause} LIMIT ? OFFSET ?"
         params = [phash] + EXCLUDED_FOLDERS + [psize, (page-1)*psize]
 
         rows = conn.execute(query, params).fetchall()
@@ -444,7 +499,7 @@ def scan_comics():
     items = []
     for r in rows:
         meta = json.loads(r['metadata'] or '{}'); meta['poster_url'] = r['poster_url']
-        items.append({'name': r['title'] or r['name'], 'isDirectory': bool(r['is_dir']), 'path': r['rel_path'], 'metadata': meta})
+        items.append({'name': r['title'] or r['name'], 'isDirectory': bool(r['is_dir']) if 'is_dir' in r.keys() else False, 'path': r['rel_path'], 'metadata': meta})
     conn.close()
     return jsonify({'total_items': total, 'page': page, 'page_size': psize, 'items': items})
 
@@ -565,7 +620,7 @@ def get_metadata():
     query = f"SELECT * FROM entries WHERE parent_hash = ? AND name NOT IN ({placeholders}) ORDER BY name"
     ep_rows = conn.execute(query, [phash] + EXCLUDED_FOLDERS).fetchall()
 
-    meta['chapters'] = [{'name': ep['title'] or ep['name'], 'isDirectory': bool(ep['is_dir']), 'path': ep['rel_path'], 'metadata': {'poster_url': ep['poster_url'] or row['poster_url']}} for ep in ep_rows]
+    meta['chapters'] = [{'name': ep['title'] or ep['name'], 'isDirectory': bool(ep['is_dir']) if 'is_dir' in ep.keys() else False, 'path': ep['rel_path'], 'metadata': {'poster_url': ep['poster_url'] or row['poster_url']}} for ep in ep_rows]
     conn.close()
     return jsonify(meta)
 
@@ -587,7 +642,7 @@ def search_comics():
     items = []
     for r in rows:
         meta = json.loads(r['metadata'] or '{}'); meta['poster_url'] = r['poster_url']
-        items.append({'name': r['title'] or r['name'], 'isDirectory': bool(r['is_dir']), 'path': r['rel_path'], 'metadata': meta})
+        items.append({'name': r['title'] or r['name'], 'isDirectory': bool(r['is_dir']) if 'is_dir' in r.keys() else False, 'path': r['rel_path'], 'metadata': meta})
     conn.close()
     return jsonify({'total_items': total, 'page': page, 'page_size': psize, 'items': items})
 

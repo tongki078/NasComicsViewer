@@ -259,7 +259,7 @@ class ComicViewModel(
             AppMode.BOOK -> slashCount < 3 
             AppMode.PHOTO_BOOK -> slashCount < 2 
             AppMode.MAGAZINE -> slashCount < 1 
-            AppMode.WEBTOON -> slashCount < 1
+            AppMode.WEBTOON -> slashCount < 1 // 유저의 최신 커밋 상태 복원
             AppMode.MANGA -> {
                 if (file.path.startsWith("ㅈㄱ/") || file.path.startsWith("작가/")) slashCount < 2 else slashCount < 1
             }
@@ -271,22 +271,36 @@ class ComicViewModel(
             return
         }
 
-        // 2. 이미 상세 페이지인데 클릭한 항목이 "폴더"인 경우 (Manga 모드에서 에피소드 대신 하위 폴더들이 있는 케이스)
-        if (file.isDirectory && _uiState.value.isSeriesView) {
+        val isViewerItem = if (_uiState.value.isSeriesView) {
+            when (_uiState.value.appMode) {
+                AppMode.MANGA, AppMode.BOOK -> !file.isDirectory
+                else -> true // 웹툰, 잡지, 화보 모드에서는 상세페이지 내부 항목은 모두 에피소드
+            }
+        } else if (_uiState.value.isSearchMode && file.isDirectory) {
+            when (_uiState.value.appMode) {
+                AppMode.MAGAZINE -> slashCount >= 2
+                AppMode.WEBTOON -> slashCount >= 3
+                AppMode.PHOTO_BOOK -> slashCount >= 3
+                else -> false
+            }
+        } else {
+            !file.isDirectory
+        }
+
+        // 2. 이미 상세 페이지인데 클릭한 항목이 "폴더"인 경우 (Manga/Book 모드에서 에피소드 대신 하위 폴더들이 있는 케이스)
+        if (file.isDirectory && _uiState.value.isSeriesView && !isViewerItem) {
             scanBooks(file.path)
             return
         }
 
         // 3. 실제 열람 가능한 작품이나 에피소드인 경우에만 최근 본 작품에 추가
-        if (!file.isDirectory) {
+        if (isViewerItem) {
             viewModelScope.launch {
                 posterRepository.addToRecent(file)
                 loadRecentComics()
             }
-        }
-
-        // 4. 폴더가 아닌 단일 파일인 경우 뷰어 바로 열기
-        if (!file.isDirectory) {
+            
+            // 4. 단일 파일이거나 에피소드 폴더인 경우 뷰어 바로 열기
             val episodes = if (_uiState.value.isSearchMode && _uiState.value.searchResults.isNotEmpty()) _uiState.value.searchResults else if (_uiState.value.isSeriesView) _uiState.value.seriesEpisodes else _uiState.value.currentFiles
             val index = episodes.indexOfFirst { it.path == file.path }
             _uiState.update { it.copy(
