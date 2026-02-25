@@ -494,14 +494,34 @@ fun SeriesDetailScreen(state: ComicBrowserUiState, onVolumeClick: (NasFile) -> U
                     Spacer(Modifier.height(16.dp))
                 }
             } else {
-                Row(Modifier.fillMaxWidth().statusBarsPadding().padding(horizontal = 16.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-                    IconButton(onClick = onBack, modifier = Modifier.background(Color.Black.copy(0.3f), CircleShape)) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, null, tint = Color.White)
+                // 심플 모드 헤더 (네비게이션 포함)
+                Column(Modifier.fillMaxWidth().statusBarsPadding().background(BgBlack)) {
+                    Row(Modifier.padding(horizontal = 16.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                        IconButton(onClick = onBack, modifier = Modifier.background(SurfaceGrey, CircleShape)) {
+                            Icon(Icons.AutoMirrored.Filled.ArrowBack, null, tint = Color.White, modifier = Modifier.size(20.dp))
+                        }
+                        Spacer(Modifier.width(12.dp))
+                        Column {
+                            // 네비게이션 텍스트 표시
+                            Text(
+                                text = state.currentPath.replace("/", " > "),
+                                color = KakaoYellow,
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            Text(
+                                text = metadata?.title ?: "폴더 항목",
+                                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Black),
+                                color = TextPureWhite,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
                     }
-                    Spacer(Modifier.width(16.dp))
-                    Text(text = metadata?.title ?: "폴더 항목", style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Black), color = TextPureWhite, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    HorizontalDivider(color = SurfaceGrey, thickness = 0.5.dp)
                 }
-                HorizontalDivider(color = SurfaceGrey, thickness = 0.5.dp)
                 Spacer(Modifier.height(16.dp))
                 Text("항목 (${state.seriesEpisodes.size})", modifier = Modifier.padding(horizontal = 24.dp), color = TextPureWhite, fontWeight = FontWeight.Black, fontSize = 16.sp)
                 Spacer(Modifier.height(16.dp))

@@ -40,7 +40,7 @@ scan_status = {
 }
 log_queue = queue.Queue()
 db_queue = queue.Queue()
-scanning_pool = ThreadPoolExecutor(max_workers=15)
+scanning_pool = ThreadPoolExecutor(max_workers=10)
 
 def add_web_log(msg, type="INFO"):
     prefix = "✅ [SUCCESS]" if type=="SUCCESS" else "❌ [FAILED]" if type=="ERROR" else "🚢 [INIT]" if type=="INIT" else "📝 [UPDATE]"
@@ -73,7 +73,6 @@ def db_writer_worker():
         items = db_queue.get()
         if items is None: break
         try:
-            # 컬럼명을 명시적으로 지정하여 12개 컬럼 에러 방지
             conn.executemany('''
                 INSERT OR REPLACE INTO entries
                 (path_hash, parent_hash, abs_path, rel_path, name, is_dir, poster_url, title, depth, last_scanned, metadata)
@@ -96,19 +95,6 @@ def init_db():
             poster_url TEXT, title TEXT, depth INTEGER, last_scanned REAL,
             metadata TEXT
         )''')
-
-        # db migration: check if is_dir column exists
-        cursor = conn.execute("PRAGMA table_info(entries)")
-        columns = [info[1] for info in cursor.fetchall()]
-        if 'is_dir' not in columns:
-            try:
-                conn.execute('ALTER TABLE entries ADD COLUMN is_dir INTEGER DEFAULT 0')
-                logger.info("Successfully added 'is_dir' column to existing DB.")
-            except Exception as e:
-                logger.error(f"Failed to add 'is_dir' column: {e}")
-
-        conn.execute('CREATE INDEX IF NOT EXISTS idx_parent ON entries(parent_hash)')
-        conn.execute('CREATE INDEX IF NOT EXISTS idx_title ON entries(title)')
     conn.close()
 
 # --- 정보 추출 엔진 ---
@@ -119,14 +105,13 @@ def is_image_file(name):
     return name.lower().endswith(('.jpg', '.jpeg', '.png', '.webp', '.gif'))
 
 def generate_file_thumbnail(file_path, cache_path):
-    if not HAS_FITZ:
-        logger.error("PyMuPDF not installed. Cannot generate thumbnail.")
-        return False
+    if not HAS_FITZ: return False
+    if os.path.exists(cache_path): return True
     try:
         doc = fitz.open(file_path)
         if doc.page_count > 0:
             page = doc.load_page(0)
-            pix = page.get_pixmap(matrix=fitz.Matrix(1.5, 1.5))
+            pix = page.get_pixmap(matrix=fitz.Matrix(1.2, 1.2))
             pix.save(cache_path)
             doc.close()
             return True
@@ -135,21 +120,32 @@ def generate_file_thumbnail(file_path, cache_path):
         logger.error(f"Thumbnail generation error for {file_path}: {e}")
     return False
 
+def generate_zip_thumbnail(zip_path, cache_path):
+    if os.path.exists(cache_path): return True
+    try:
+        with zipfile.ZipFile(zip_path, 'r') as z:
+            imgs = sorted([n for n in z.namelist() if is_image_file(n)])
+            if imgs:
+                target = imgs[min(2, len(imgs)-1)]
+                with z.open(target) as f:
+                    img_data = f.read()
+                    with open(cache_path, 'wb') as cf: cf.write(img_data)
+                    return True
+    except: pass
+    return False
+
 def find_first_image_recursive(path, depth_limit=3):
     if depth_limit <= 0: return None
     try:
         with os.scandir(path) as it:
             ents = sorted(list(it), key=lambda x: x.name)
-            # 1. 이미지 파일 우선 찾기
             for e in ents:
                 if is_image_file(e.name):
                     return os.path.relpath(e.path, BASE_PATH).replace(os.sep, '/')
-            # 2. 하위 폴더 재귀 탐색
             for e in ents:
                 if e.is_dir() and not is_excluded(e.name):
                     res = find_first_image_recursive(e.path, depth_limit - 1)
                     if res: return res
-            # 3. 만화/PDF 파일 찾기
             for e in ents:
                 if is_comic_file(e.name):
                     return "zip_thumb://" + os.path.relpath(e.path, BASE_PATH).replace(os.sep, '/')
@@ -163,8 +159,6 @@ def get_comic_info(abs_path, rel_path):
 
     if os.path.isdir(abs_path):
         kavita_path = os.path.join(abs_path, "kavita.yaml")
-        json_path = os.path.join(abs_path, "series.json")
-
         if os.path.exists(kavita_path):
             try:
                 with open(kavita_path, 'r', encoding='utf-8') as f:
@@ -181,21 +175,6 @@ def get_comic_info(abs_path, rel_path):
                             check_path = os.path.join(abs_path, val)
                             if os.path.exists(check_path):
                                 poster = os.path.join(rel_path, val).replace(os.sep, '/'); break
-            except Exception as e: logger.error(f"Error reading kavita.yaml: {e}")
-
-        if not poster and os.path.exists(json_path):
-            try:
-                with open(json_path, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                    for key in ['backgroundImage', 'image', 'thumbnail', 'cover', 'poster']:
-                        if key in data and data[key]:
-                            val = data[key].strip()
-                            if val.startswith(('http://', 'https://')): poster = val; break
-                            check_path = os.path.join(abs_path, val)
-                            if os.path.exists(check_path):
-                                poster = os.path.join(rel_path, val).replace(os.sep, '/'); break
-                    if 'title' in data: title = normalize_nfc(data['title'])
-                    meta_dict['summary'] = data.get('description', data.get('summary', meta_dict['summary']))
             except: pass
 
         if not poster:
@@ -207,10 +186,17 @@ def get_comic_info(abs_path, rel_path):
         poster = "zip_thumb://" + rel_path
         title = os.path.splitext(title)[0]
 
-    # 포스터 주소 인코딩 (zip_thumb:// 접두어 유지)
     if poster and not poster.startswith("http"):
         if poster.startswith("zip_thumb://"):
-            poster = "zip_thumb://" + urllib.parse.quote(poster[12:])
+            p_rel = poster[12:]
+            cache_key = hashlib.md5(normalize_nfc(p_rel).encode('utf-8')).hexdigest() + ".jpg"
+            cache_path = os.path.join(THUMB_CACHE_DIR, cache_key)
+            full_p = os.path.join(BASE_PATH, p_rel)
+            if full_p.lower().endswith(('.pdf', '.epub')):
+                generate_file_thumbnail(full_p, cache_path)
+            else:
+                generate_zip_thumbnail(full_p, cache_path)
+            poster = "zip_thumb://" + urllib.parse.quote(p_rel)
         else:
             poster = urllib.parse.quote(poster)
 
@@ -221,42 +207,28 @@ def scan_task(abs_path, series_depth):
     try:
         abs_path = normalize_nfc(abs_path)
         if is_excluded(os.path.basename(abs_path)): return
-
         rel = normalize_nfc(os.path.relpath(abs_path, BASE_PATH).replace(os.sep, '/'))
         if rel == ".": rel = ""
         depth = get_depth(rel)
-
         scan_status["current_item"] = os.path.basename(abs_path)
-
-        # 만화 파일이 직접 들어있는지 확인
         has_comic_files = False
         if os.path.isdir(abs_path):
             try:
                 with os.scandir(abs_path) as it:
                     for e in it:
                         if is_comic_file(e.name):
-                            has_comic_files = True
-                            break
-            except:
-                pass
-
-        # 시리즈 레벨 판단: 설정된 깊이(3)에 도달했거나, 내부에 만화 파일이 있는 경우
+                            has_comic_files = True; break
+            except: pass
         is_series_level = (depth >= series_depth) or has_comic_files
-
         title, poster, meta = get_comic_info(abs_path, rel)
         p_hash = get_path_hash(os.path.dirname(abs_path))
-
-        # 현재 항목(폴더 또는 파일) DB 등록
         item = (get_path_hash(abs_path), p_hash, abs_path, rel, normalize_nfc(os.path.basename(abs_path)),
                 1 if os.path.isdir(abs_path) else 0, poster, title, depth, time.time(), meta)
         db_queue.put([item])
-
         scan_status["processed"] += 1
         scan_status["success"] += 1
-
         if os.path.isdir(abs_path):
             if is_series_level:
-                # 1. 시리즈 레벨이면: 내부 파일들을 에피소드로 등록
                 add_web_log(f"'{title}' updated", "UPDATE")
                 ep_items = []
                 with os.scandir(abs_path) as it:
@@ -268,35 +240,32 @@ def scan_task(abs_path, series_depth):
                             e_poster = None
                             if is_comic_file(e.name):
                                 e_poster = "zip_thumb://" + urllib.parse.quote(e_rel)
+                                cache_key = hashlib.md5(normalize_nfc(e_rel).encode('utf-8')).hexdigest() + ".jpg"
+                                cache_path = os.path.join(THUMB_CACHE_DIR, cache_key)
+                                if e_abs.lower().endswith(('.pdf', '.epub')):
+                                    generate_file_thumbnail(e_abs, cache_path)
+                                else:
+                                    generate_zip_thumbnail(e_abs, cache_path)
                             elif e.is_dir():
                                 found = find_first_image_recursive(e.path)
                                 if found:
                                     if found.startswith("zip_thumb://"):
                                         e_poster = "zip_thumb://" + urllib.parse.quote(found[12:])
-                                    else:
-                                        e_poster = urllib.parse.quote(found)
-                                else:
-                                    e_poster = poster
-                            else:
-                                e_poster = poster
-
-                            ep_items.append(
-                                (get_path_hash(e.path), get_path_hash(abs_path), e_abs, e_rel, normalize_nfc(e.name),
-                                 1 if e.is_dir() else 0, e_poster, normalize_nfc(e_title), depth + 1, time.time(),
-                                 "{}"))
+                                    else: e_poster = urllib.parse.quote(found)
+                                else: e_poster = poster
+                            else: e_poster = poster
+                            ep_items.append((get_path_hash(e.path), get_path_hash(abs_path), e_abs, e_rel, normalize_nfc(e.name),
+                                 1 if e.is_dir() else 0, e_poster, normalize_nfc(e_title), depth + 1, time.time(), "{}"))
                 if ep_items: db_queue.put(ep_items)
             else:
-                # 2. 시리즈 레벨이 아니면(예: '가' 폴더): 하위 폴더들을 재귀적으로 스캔 리스트에 추가
                 with os.scandir(abs_path) as it:
                     for e in it:
                         if e.is_dir() and not is_excluded(e.name):
                             scan_status["total"] += 1
                             scanning_pool.submit(scan_task, e.path, series_depth)
-
     except Exception as e:
         scan_status["failed"] += 1
         add_web_log(f"Error scanning {abs_path}: {e}", "ERROR")
-
     if scan_status["processed"] >= scan_status["total"] and scan_status["total"] > 0:
         scan_status["is_running"] = False
         add_web_log(f"{scan_status['current_type']} Update Completed!", "SUCCESS")
@@ -309,7 +278,6 @@ def start_full_scan(target_type):
     scan_status["failed"] = 0
     scan_status["total"] = 0
     scan_status["logs"] = []
-
     if target_type == "WEBTOON":
         webtoon_root = os.path.join(BASE_PATH, "웹툰")
         if os.path.exists(webtoon_root):
@@ -329,7 +297,6 @@ def start_full_scan(target_type):
         photobook_root = os.path.join(BASE_PATH, "화보")
         if os.path.exists(photobook_root):
             add_web_log("Initializing Photo Book Scan...", "INIT")
-            # 화보 루트에서부터 재귀적으로 탐색하도록 변경 (깊이 4를 시리즈 뎁스로 지정)
             scan_status["total"] += 1
             scanning_pool.submit(scan_task, photobook_root, 4)
     elif target_type == "BOOK":
@@ -337,8 +304,7 @@ def start_full_scan(target_type):
         if os.path.exists(book_root):
             add_web_log("Initializing Book Scan...", "INIT")
             scan_status["total"] += 1
-            # 책 -> 일반 -> 가 -> 제목 -> 도서파일. 즉 깊이 4를 시리즈 뎁스로 지정
-            scanning_pool.submit(scan_task, book_root, 4)
+            scanning_pool.submit(scan_task, book_root, 5)
 
 @app.route('/')
 def index():
@@ -378,13 +344,10 @@ def index():
         <script>
             function startScan(type) {
                 var url = '/start_scan?type=' + type;
-                fetch(url).then(function(response) {
-                    return response.json();
-                });
+                fetch(url).then(function(response) { return response.json(); });
                 var console = document.getElementById('logConsole');
                 console.innerHTML = '<div>[' + type + '] 스캔 시작 중...</div>';
             }
-
             var evtSource = new EventSource("/stream_logs");
             evtSource.onmessage = function(event) {
                 var data = JSON.parse(event.data);
@@ -393,19 +356,12 @@ def index():
                 var percentText = document.getElementById('percentText');
                 var progressBar = document.getElementById('progressBar');
                 var logConsole = document.getElementById('logConsole');
-
                 var runningMsg = data.is_running ? data.current_type + " 처리 중..." : "대기 중";
                 statusLabel.innerText = "상태: " + runningMsg + " (" + data.current_item + ")";
                 progressText.innerText = data.processed + " / " + data.total;
-
-                var percent = 0;
-                if (data.total > 0) {
-                    percent = Math.round((data.processed / data.total) * 100);
-                }
-
+                var percent = data.total > 0 ? Math.round((data.processed / data.total) * 100) : 0;
                 percentText.innerText = percent + "%";
                 progressBar.style.width = percent + "%";
-
                 if (data.new_log) {
                     var div = document.createElement('div');
                     div.innerText = data.new_log;
@@ -435,166 +391,89 @@ def stream_logs():
             yield f"data: {json.dumps(data)}\n\n"
     return Response(stream_with_context(generate()), mimetype='text/event-stream')
 
-@app.route('/files')
-def list_files_api():
-    path = request.args.get('path', '')
-    if not path:
-        target_root = os.path.join(BASE_PATH, "웹툰")
-    else:
-        target_root = os.path.join(BASE_PATH, path)
-
-    phash = get_path_hash(target_root)
-    conn = sqlite3.connect(METADATA_DB_PATH); conn.row_factory = sqlite3.Row
-
-    placeholders = ','.join(['?'] * len(EXCLUDED_FOLDERS))
-    query = f"SELECT * FROM entries WHERE parent_hash = ? AND name NOT IN ({placeholders}) ORDER BY name"
-    rows = conn.execute(query, [phash] + EXCLUDED_FOLDERS).fetchall()
-
-    items = []
-    for r in rows:
-        items.append({
-            'name': r['name'],
-            'isDirectory': bool(r['is_dir']) if 'is_dir' in r.keys() else False,
-            'path': r['rel_path']
-        })
-    conn.close()
-    return jsonify(items)
-
 @app.route('/scan')
 def scan_comics():
-    # 입력 파라미터 정규화
-    path = normalize_nfc(request.args.get('path', ''))
+    path = normalize_nfc(urllib.parse.unquote(request.args.get('path', '')))
     page = request.args.get('page', 1, type=int)
     psize = request.args.get('page_size', 50, type=int)
-
-    conn = sqlite3.connect(METADATA_DB_PATH);
-    conn.row_factory = sqlite3.Row
+    conn = sqlite3.connect(METADATA_DB_PATH); conn.row_factory = sqlite3.Row
     placeholders = ','.join(['?'] * len(EXCLUDED_FOLDERS))
-
-    # Check if is_dir exists to avoid OperationalError during SELECT
-    cursor = conn.execute("PRAGMA table_info(entries)")
-    columns = [info[1] for info in cursor.fetchall()]
-    order_by_clause = "ORDER BY is_dir DESC, depth, title" if 'is_dir' in columns else "ORDER BY depth, title"
-
-    # 웹툰 루트 진입 시 처리
     if not path or path == "웹툰":
-        # LIKE 조건을 더 안전하게 변경하고 depth를 3으로 특정
         query = f"SELECT * FROM entries WHERE depth = 3 AND rel_path LIKE '웹툰/%' AND name NOT IN ({placeholders}) ORDER BY title LIMIT ? OFFSET ?"
         params = EXCLUDED_FOLDERS + [psize, (page - 1) * psize]
         rows = conn.execute(query, params).fetchall()
-
         count_query = f"SELECT COUNT(*) FROM entries WHERE depth = 3 AND rel_path LIKE '웹툰/%' AND name NOT IN ({placeholders})"
         total = conn.execute(count_query, EXCLUDED_FOLDERS).fetchone()[0]
     else:
         target_root = os.path.join(BASE_PATH, path)
         phash = get_path_hash(target_root)
-
-        query = f"SELECT * FROM entries WHERE parent_hash = ? AND name NOT IN ({placeholders}) {order_by_clause} LIMIT ? OFFSET ?"
+        query = f"SELECT * FROM entries WHERE parent_hash = ? AND name NOT IN ({placeholders}) ORDER BY is_dir DESC, title LIMIT ? OFFSET ?"
         params = [phash] + EXCLUDED_FOLDERS + [psize, (page-1)*psize]
-
         rows = conn.execute(query, params).fetchall()
         count_query = f"SELECT COUNT(*) FROM entries WHERE parent_hash = ? AND name NOT IN ({placeholders})"
         total = conn.execute(count_query, [phash] + EXCLUDED_FOLDERS).fetchone()[0]
-
     items = []
     for r in rows:
         meta = json.loads(r['metadata'] or '{}'); meta['poster_url'] = r['poster_url']
-        items.append({'name': r['title'] or r['name'], 'isDirectory': bool(r['is_dir']) if 'is_dir' in r.keys() else False, 'path': r['rel_path'], 'metadata': meta})
+        items.append({'name': r['title'] or r['name'], 'isDirectory': bool(r['is_dir']), 'path': r['rel_path'], 'metadata': meta})
     conn.close()
     return jsonify({'total_items': total, 'page': page, 'page_size': psize, 'items': items})
 
 @app.route('/download')
 def download():
-    p = request.args.get('path', '')
-    p = urllib.parse.unquote(p)
-
+    p = normalize_nfc(urllib.parse.unquote(request.args.get('path', '')))
     if not p: return "Path required", 400
-
-    # 1. 외부 URL (카카오/네이버 등) 프록시 처리
     if p.startswith("http"):
         try:
-            headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
-            if 'kakao' in p: headers['Referer'] = 'https://webtoon.kakao.com/'
-            elif 'naver' in p: headers['Referer'] = 'https://comic.naver.com/'
-
-            req = urllib.request.Request(p, headers=headers)
+            req = urllib.request.Request(p, headers={'User-Agent': 'Mozilla/5.0'})
             with urllib.request.urlopen(req, timeout=10) as response:
                 return send_file(io.BytesIO(response.read()), mimetype=response.headers.get_content_type() or 'image/jpeg')
-        except Exception as e:
-            logger.error(f"Proxy Download Failed: {p}, Error: {e}")
-            return "Image Load Failed", 500
-
-    # 2. 압축 파일/PDF/EPUB 썸네일 캐싱 처리
+        except: return "Image Load Failed", 500
     if p.startswith("zip_thumb://"):
         rel_path = p[12:]
-        # 캐시 키 생성 (NFC 정규화된 상대 경로 기반)
-        cache_key = hashlib.md5(normalize_nfc(rel_path).encode('utf-8')).hexdigest() + ".jpg"
+        cache_key = hashlib.md5(rel_path.encode('utf-8')).hexdigest() + ".jpg"
         cache_path = os.path.join(THUMB_CACHE_DIR, cache_key)
-
         if os.path.exists(cache_path): return send_from_directory(THUMB_CACHE_DIR, cache_key)
-
         azp = os.path.join(BASE_PATH, rel_path)
-
-        # 만약 azp가 폴더라면 그 안에서 만화 파일을 찾음
-        if os.path.isdir(azp):
-            try:
-                with os.scandir(azp) as it:
-                    for e in it:
-                        if is_comic_file(e.name):
-                            azp = e.path
-                            break
-                        if is_image_file(e.name):
-                            return send_from_directory(azp, e.name)
-            except: pass
-
-        # 최종 azp에 대해 PDF/EPUB 또는 ZIP 처리
         if azp.lower().endswith(('.pdf', '.epub')):
-            if generate_file_thumbnail(azp, cache_path):
-                return send_from_directory(THUMB_CACHE_DIR, cache_key)
-            return "File Thumb Failed", 500
-
-        try:
-            with zipfile.ZipFile(azp, 'r') as z:
-                imgs = sorted([n for n in z.namelist() if is_image_file(n)])
-                if imgs:
-                    with z.open(imgs[min(2, len(imgs)-1)]) as f:
-                        img_data = f.read()
-                        with open(cache_path, 'wb') as cf: cf.write(img_data)
-                        return send_file(io.BytesIO(img_data), mimetype='image/jpeg')
-        except Exception as e:
-            logger.error(f"ZIP Error for {azp}: {e}")
-
+            if generate_file_thumbnail(azp, cache_path): return send_from_directory(THUMB_CACHE_DIR, cache_key)
+        else:
+            if generate_zip_thumbnail(azp, cache_path): return send_from_directory(THUMB_CACHE_DIR, cache_key)
         return "No Image", 404
-
-    # 3. 로컬 파일 처리
     target_path = os.path.join(BASE_PATH, p)
     return send_from_directory(os.path.dirname(target_path), os.path.basename(target_path))
 
 @app.route('/zip_entries')
 def zip_entries():
-    path = urllib.parse.unquote(request.args.get('path', ''))
+    path = normalize_nfc(urllib.parse.unquote(request.args.get('path', '')))
     abs_p = os.path.join(BASE_PATH, path)
     if os.path.isdir(abs_p): return jsonify(sorted([e.name for e in os.scandir(abs_p) if is_image_file(e.name)]))
+    if abs_p.lower().endswith(('.pdf', '.epub')) and HAS_FITZ:
+        try:
+            doc = fitz.open(abs_p)
+            pages = [f"page_{i:04d}.jpg" for i in range(doc.page_count)]
+            doc.close()
+            return jsonify(pages)
+        except: return jsonify([])
     try:
         with zipfile.ZipFile(abs_p, 'r') as z: return jsonify(sorted([n for n in z.namelist() if is_image_file(n)]))
     except: return jsonify([])
 
 @app.route('/download_zip_entry')
 def download_zip_entry():
-    path = urllib.parse.unquote(request.args.get('path', ''))
-    entry = urllib.parse.unquote(request.args.get('entry', ''))
-
-    if entry.startswith("http"):
-        try:
-            headers = {'User-Agent': 'Mozilla/5.0'}
-            if 'kakao' in entry: headers['Referer'] = 'https://webtoon.kakao.com/'
-            elif 'naver' in entry: headers['Referer'] = 'https://comic.naver.com/'
-            req = urllib.request.Request(entry, headers=headers)
-            with urllib.request.urlopen(req, timeout=10) as response:
-                return send_file(io.BytesIO(response.read()), mimetype=response.headers.get_content_type() or 'image/jpeg')
-        except: return "Image Proxy Failed", 500
-
+    path = normalize_nfc(urllib.parse.unquote(request.args.get('path', '')))
+    entry = normalize_nfc(urllib.parse.unquote(request.args.get('entry', '')))
     abs_p = os.path.join(BASE_PATH, path)
+    if abs_p.lower().endswith(('.pdf', '.epub')) and entry.startswith("page_") and HAS_FITZ:
+        try:
+            page_idx = int(entry[5:9])
+            doc = fitz.open(abs_p)
+            page = doc.load_page(page_idx)
+            pix = page.get_pixmap(matrix=fitz.Matrix(2.0, 2.0))
+            img_data = pix.tobytes("jpg")
+            doc.close()
+            return send_file(io.BytesIO(img_data), mimetype='image/jpeg')
+        except: return "Error", 500
     if os.path.isdir(abs_p): return send_from_directory(abs_p, entry)
     try:
         with zipfile.ZipFile(abs_p, 'r') as z:
@@ -603,48 +482,43 @@ def download_zip_entry():
 
 @app.route('/metadata')
 def get_metadata():
-    path = request.args.get('path', '')
+    path = normalize_nfc(urllib.parse.unquote(request.args.get('path', '')))
     if not path: return jsonify({})
     abs_p = os.path.join(BASE_PATH, path); phash = get_path_hash(abs_p)
     conn = sqlite3.connect(METADATA_DB_PATH); conn.row_factory = sqlite3.Row
     row = conn.execute("SELECT * FROM entries WHERE path_hash = ?", (phash,)).fetchone()
     if not row: conn.close(); return jsonify({})
-
-    title_val = row['title'] if row['title'] else row['name']
-
-    meta = json.loads(row['metadata'] or '{}');
-    meta['poster_url'] = row['poster_url']
-    meta['title'] = normalize_nfc(title_val)
-
+    meta = json.loads(row['metadata'] or '{}')
+    meta['poster_url'] = row['poster_url']; meta['title'] = normalize_nfc(row['title'] or row['name'])
     placeholders = ','.join(['?'] * len(EXCLUDED_FOLDERS))
     query = f"SELECT * FROM entries WHERE parent_hash = ? AND name NOT IN ({placeholders}) ORDER BY name"
     ep_rows = conn.execute(query, [phash] + EXCLUDED_FOLDERS).fetchall()
-
-    meta['chapters'] = [{'name': ep['title'] or ep['name'], 'isDirectory': bool(ep['is_dir']) if 'is_dir' in ep.keys() else False, 'path': ep['rel_path'], 'metadata': {'poster_url': ep['poster_url'] or row['poster_url']}} for ep in ep_rows]
+    chapters = []
+    if ep_rows:
+        for ep in ep_rows:
+            if is_comic_file(ep['name']) or ep['is_dir'] == 1:
+                chapters.append({'name': ep['title'] or ep['name'], 'isDirectory': bool(ep['is_dir'] == 1), 'path': ep['rel_path'], 'metadata': {'poster_url': ep['poster_url'] or row['poster_url']}})
+    if not chapters and is_comic_file(row['name']):
+        chapters.append({'name': meta['title'], 'isDirectory': False, 'path': row['rel_path'], 'metadata': {'poster_url': row['poster_url']}})
+    meta['chapters'] = chapters
     conn.close()
     return jsonify(meta)
 
 @app.route('/search')
 def search_comics():
     query = request.args.get('query', '')
-    page = request.args.get('page', 1, type=int); psize = request.args.get('page_size', 50, type=int)
-    if not query: return jsonify({'total_items': 0, 'page': page, 'page_size': psize, 'items': []})
+    if not query: return jsonify({'total_items': 0, 'items': []})
     conn = sqlite3.connect(METADATA_DB_PATH); conn.row_factory = sqlite3.Row
     q = f"%{query}%"
-
     placeholders = ','.join(['?'] * len(EXCLUDED_FOLDERS))
-    query_str = f"SELECT * FROM entries WHERE (title LIKE ? OR name LIKE ?) AND depth >= 2 AND name NOT IN ({placeholders}) ORDER BY title LIMIT ? OFFSET ?"
-    params = [q, q] + EXCLUDED_FOLDERS + [psize, (page-1)*psize]
-
-    rows = conn.execute(query_str, params).fetchall()
-    total = conn.execute(f"SELECT COUNT(*) FROM entries WHERE (title LIKE ? OR name LIKE ?) AND depth >= 2 AND name NOT IN ({placeholders})", [q, q] + EXCLUDED_FOLDERS).fetchone()[0]
-
+    query_str = f"SELECT * FROM entries WHERE (title LIKE ? OR name LIKE ?) AND depth >= 2 AND name NOT IN ({placeholders}) ORDER BY title LIMIT 100"
+    rows = conn.execute(query_str, [q, q] + EXCLUDED_FOLDERS).fetchall()
     items = []
     for r in rows:
         meta = json.loads(r['metadata'] or '{}'); meta['poster_url'] = r['poster_url']
-        items.append({'name': r['title'] or r['name'], 'isDirectory': bool(r['is_dir']) if 'is_dir' in r.keys() else False, 'path': r['rel_path'], 'metadata': meta})
+        items.append({'name': r['title'] or r['name'], 'isDirectory': bool(r['is_dir']), 'path': r['rel_path'], 'metadata': meta})
     conn.close()
-    return jsonify({'total_items': total, 'page': page, 'page_size': psize, 'items': items})
+    return jsonify({'total_items': len(items), 'items': items})
 
 if __name__ == '__main__':
     init_db()

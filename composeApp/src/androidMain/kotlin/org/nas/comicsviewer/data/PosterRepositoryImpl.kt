@@ -27,14 +27,15 @@ class AndroidPosterRepository(private val context: Context, private val database
 
     private val client = HttpClient(CIO) {
         install(HttpTimeout) { 
-            requestTimeoutMillis = 30000 
-            connectTimeoutMillis = 10000
+            requestTimeoutMillis = 60000 
+            connectTimeoutMillis = 15000
         }
     }
     private var baseUrl = "http://192.168.0.2:5555"
     private val queries = database.posterCacheQueries
 
-    private val memoryCache: LruCache<String, ImageBitmap> = LruCache(40 * 1024 * 1024)
+    // 메모리 캐시를 512MB로 대폭 확장하여 이미 로드된 이미지가 다시 로딩되지 않도록 함
+    private val memoryCache: LruCache<String, ImageBitmap> = LruCache(512 * 1024 * 1024)
     private val diskCacheDir = File(context.cacheDir, "poster_cache").apply { mkdirs() }
 
     private fun String.toHash(): String {
@@ -69,16 +70,15 @@ class AndroidPosterRepository(private val context: Context, private val database
 
         try {
             val downloadUrl = if (url.startsWith("http") && !url.startsWith(baseUrl)) {
-                // 외부 URL 프록시
                 val encodedUrl = URLEncoder.encode(url, "UTF-8")
                 "$baseUrl/download?path=$encodedUrl"
             } else if (url.startsWith("http")) {
                 url
             } else if (url.startsWith("zip_thumb://")) {
-                // 서버가 이미 인코딩해서 준 zip_thumb 주소는 그대로 사용
-                "$baseUrl/download?path=$url"
+                // # 등의 특수문자가 포함된 경우를 위해 한번 더 인코딩 (서버 unquote 대응)
+                val pathPart = url.substring(12)
+                "$baseUrl/download?path=zip_thumb://" + URLEncoder.encode(pathPart, "UTF-8")
             } else {
-                // 로컬 상대 경로만 인코딩
                 val encodedPath = url.split("/").joinToString("/") { 
                     URLEncoder.encode(it, "UTF-8").replace("+", "%20")
                 }
@@ -86,14 +86,15 @@ class AndroidPosterRepository(private val context: Context, private val database
             }
 
             val response: HttpResponse = client.get(downloadUrl)
-            val bytes: ByteArray = response.body()
-            
-            if (bytes.isNotEmpty()) {
-                val bitmap = bytes.toImageBitmap()
-                if (bitmap != null) {
-                    diskFile.writeBytes(bytes)
-                    memoryCache.put(url, bitmap)
-                    return@withContext bitmap
+            if (response.status.value == 200) {
+                val bytes: ByteArray = response.body()
+                if (bytes.isNotEmpty()) {
+                    val bitmap = bytes.toImageBitmap()
+                    if (bitmap != null) {
+                        diskFile.writeBytes(bytes)
+                        memoryCache.put(url, bitmap)
+                        return@withContext bitmap
+                    }
                 }
             }
         } catch (e: Exception) {
