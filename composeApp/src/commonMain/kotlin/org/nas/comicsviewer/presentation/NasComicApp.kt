@@ -22,7 +22,6 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
-import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
@@ -229,9 +228,8 @@ fun RecentComicsCarousel(recentComics: List<NasFile>, repo: PosterRepository, on
             items(recentComics) { file ->
                 Column(Modifier.width(100.dp).clickable { onFileClick(file) }) {
                     var thumb by remember { mutableStateOf<ImageBitmap?>(null) }
-                    val posterUrl = file.metadata?.posterUrl ?: file.path
-                    LaunchedEffect(posterUrl) {
-                        thumb = repo.getImage(posterUrl)
+                    LaunchedEffect(file.metadata?.posterUrl) {
+                        file.metadata?.posterUrl?.let { thumb = repo.getImage(it) }
                     }
                     Box(Modifier.aspectRatio(0.72f).fillMaxWidth().clip(RoundedCornerShape(8.dp)).background(SurfaceGrey)) {
                         if (thumb != null) {
@@ -439,7 +437,7 @@ fun SeriesDetailScreen(state: ComicBrowserUiState, onVolumeClick: (NasFile) -> U
                 if (!isSimpleMode) {
                     Box(Modifier.fillMaxWidth().height(420.dp)) {
                         if (posterBitmap != null) {
-                            Image(posterBitmap!!, null, Modifier.fillMaxSize().blur(30.dp).alpha(0.3f), contentScale = ContentScale.Crop)
+                            Image(posterBitmap!!, null, Modifier.fillMaxSize().alpha(0.2f), contentScale = ContentScale.Crop)
                             Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color.Transparent, BgBlack.copy(alpha = 0.5f), BgBlack))))
                             
                             Row(
@@ -564,8 +562,9 @@ fun SeriesDetailScreen(state: ComicBrowserUiState, onVolumeClick: (NasFile) -> U
 @Composable
 fun VolumeListItem(file: NasFile, repo: PosterRepository, onClick: () -> Unit) {
     var thumb by remember { mutableStateOf<ImageBitmap?>(null) }
-    val posterUrl = file.metadata?.posterUrl ?: file.path
-    LaunchedEffect(posterUrl) { thumb = repo.getImage(posterUrl) }
+    LaunchedEffect(file.metadata?.posterUrl) { 
+        file.metadata?.posterUrl?.let { thumb = repo.getImage(it) } 
+    }
     Surface(modifier = Modifier.fillMaxWidth().clickable(onClick = onClick), color = Color(0xFF0D0D0D), shape = RoundedCornerShape(8.dp), border = BorderStroke(0.5.dp, Color(0xFF1A1A1A))) {
         Row(Modifier.padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
             Box(Modifier.size(50.dp, 70.dp).clip(RoundedCornerShape(4.dp)).background(SurfaceGrey)) {
@@ -617,9 +616,10 @@ fun FlowRow(mainAxisSpacing: androidx.compose.ui.unit.Dp = 0.dp, crossAxisSpacin
 // ----------------------------------------------------
 // 중앙집중형 이미지 캐싱 및 다운로드 로직 (뮤텍스를 활용한 중복 방지 및 강제 취소 지원)
 // ----------------------------------------------------
+// 메모리 최적화를 위해 캐시 사이즈를 줄였습니다.
 private val viewerImageCache = mutableMapOf<String, ImageBitmap>()
 private val viewerCacheKeys = mutableListOf<String>()
-private const val MAX_CACHE_SIZE = 50
+private const val MAX_CACHE_SIZE = 15
 
 private val cacheLock = Mutex()
 private val downloadLocks = mutableMapOf<String, Mutex>()
@@ -750,7 +750,7 @@ fun WebtoonViewer(
         } else {
             Box(Modifier.fillMaxSize(), Alignment.Center) {
                 if (posterBitmap != null) {
-                    Image(posterBitmap!!, null, Modifier.fillMaxSize().blur(40.dp).alpha(0.4f), contentScale = ContentScale.Crop)
+                    Image(posterBitmap!!, null, Modifier.fillMaxSize().alpha(0.2f), contentScale = ContentScale.Crop)
                 }
                 CircularProgressIndicator(color = KakaoYellow)
             }
@@ -919,7 +919,7 @@ fun MagazineViewer(
         } else {
              Box(Modifier.fillMaxSize(), Alignment.Center) {
                 if (posterBitmap != null) {
-                    Image(posterBitmap!!, null, Modifier.fillMaxSize().blur(40.dp).alpha(0.4f), contentScale = ContentScale.Crop)
+                    Image(posterBitmap!!, null, Modifier.fillMaxSize().alpha(0.2f), contentScale = ContentScale.Crop)
                 }
                 CircularProgressIndicator(color = KakaoYellow)
             }
@@ -998,7 +998,7 @@ fun BookViewer(
         } else {
              Box(Modifier.fillMaxSize(), Alignment.Center) {
                 if (posterBitmap != null) {
-                    Image(posterBitmap!!, null, Modifier.fillMaxSize().blur(40.dp).alpha(0.4f), contentScale = ContentScale.Crop)
+                    Image(posterBitmap!!, null, Modifier.fillMaxSize().alpha(0.2f), contentScale = ContentScale.Crop)
                 }
                 CircularProgressIndicator(color = KakaoYellow)
             }
@@ -1096,7 +1096,7 @@ fun PhotoBookViewer(
         } else {
              Box(Modifier.fillMaxSize(), Alignment.Center) {
                 if (posterBitmap != null) {
-                    Image(posterBitmap!!, null, Modifier.fillMaxSize().blur(40.dp).alpha(0.4f), contentScale = ContentScale.Crop)
+                    Image(posterBitmap!!, null, Modifier.fillMaxSize().alpha(0.2f), contentScale = ContentScale.Crop)
                 }
                 CircularProgressIndicator(color = KakaoYellow)
             }

@@ -34,8 +34,8 @@ class AndroidPosterRepository(private val context: Context, private val database
     private var baseUrl = "http://192.168.0.2:5555"
     private val queries = database.posterCacheQueries
 
-    // 메모리 캐시를 512MB로 대폭 확장하여 이미 로드된 이미지가 다시 로딩되지 않도록 함
-    private val memoryCache: LruCache<String, ImageBitmap> = LruCache(512 * 1024 * 1024)
+    // 최대 200개의 ImageBitmap을 메모리에 캐시
+    private val memoryCache: LruCache<String, ImageBitmap> = LruCache(200)
     private val diskCacheDir = File(context.cacheDir, "poster_cache").apply { mkdirs() }
 
     private fun String.toHash(): String {

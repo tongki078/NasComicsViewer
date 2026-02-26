@@ -22,6 +22,8 @@ import platform.Foundation.dataWithBytes
 import platform.Foundation.dataWithContentsOfFile
 import platform.Foundation.writeToFile
 import platform.posix.memcpy
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 actual fun providePosterRepository(context: Any?): PosterRepository {
     return IosPosterRepository
@@ -35,6 +37,9 @@ object IosPosterRepository : PosterRepository {
     private val RECENT_SEARCHES_KEY = "recent_queries"
 
     private val memoryCache = mutableMapOf<String, ImageBitmap>()
+    private val cacheLock = Mutex()
+    private const val MAX_CACHE_SIZE = 15
+
     private val diskCacheDir: String by lazy {
         val cacheDir = NSSearchPathForDirectoriesInDomains(NSCachesDirectory, NSUserDomainMask, true).first() as String
         val posterCacheDir = "$cacheDir/poster_cache"
@@ -48,11 +53,31 @@ object IosPosterRepository : PosterRepository {
         baseUrl = if (isWebtoon) "http://192.168.0.2:5556" else "http://192.168.0.2:5555"
     }
 
+    private suspend fun getCachedBitmap(key: String): ImageBitmap? = cacheLock.withLock {
+        val bitmap = memoryCache[key]
+        if (bitmap != null) {
+            // Update order for LRU
+            memoryCache.remove(key)
+            memoryCache[key] = bitmap
+        }
+        bitmap
+    }
+
+    private suspend fun putCachedBitmap(key: String, bitmap: ImageBitmap) = cacheLock.withLock {
+        if (!memoryCache.containsKey(key)) {
+            if (memoryCache.size >= MAX_CACHE_SIZE) {
+                val oldestKey = memoryCache.keys.first()
+                memoryCache.remove(oldestKey)
+            }
+        }
+        memoryCache[key] = bitmap
+    }
+
     override suspend fun getImage(url: String): ImageBitmap? = withContext(Dispatchers.Default) {
         if (url.isBlank()) return@withContext null
         val key = url.encodeURLPathPart()
 
-        memoryCache[key]?.let { return@withContext it }
+        getCachedBitmap(key)?.let { return@withContext it }
 
         val diskFile = "$diskCacheDir/$key"
         if (NSFileManager.defaultManager.fileExistsAtPath(diskFile)) {
@@ -60,8 +85,7 @@ object IosPosterRepository : PosterRepository {
                 val data = NSData.dataWithContentsOfFile(diskFile)
                 val bytes = data?.toByteArray()
                 bytes?.toImageBitmap()?.let {
-                    if (memoryCache.size > 20 * 1024 * 1024) memoryCache.clear()
-                    memoryCache[key] = it
+                    putCachedBitmap(key, it)
                     return@withContext it
                 }
             } catch (e: Exception) { /* Fall through */ }
@@ -81,8 +105,7 @@ object IosPosterRepository : PosterRepository {
                     data?.writeToFile(diskFile, true)
                 }
                 bytes.toImageBitmap()?.let {
-                    if (memoryCache.size > 20 * 1024 * 1024) memoryCache.clear()
-                    memoryCache[key] = it
+                    putCachedBitmap(key, it)
                     return@withContext it
                 }
             }
