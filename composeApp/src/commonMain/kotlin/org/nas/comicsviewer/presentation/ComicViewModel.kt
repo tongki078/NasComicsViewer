@@ -71,6 +71,7 @@ class ComicViewModel(
     private var currentPage = 1
     private var canLoadMore = true
     private val pageSize = 50
+    private var isInitialLoad = true
 
     private val listCache = mutableMapOf<String, List<NasFile>>()
 
@@ -89,20 +90,21 @@ class ComicViewModel(
 
     private fun checkServerAndLoadCategories() {
         viewModelScope.launch {
-            _uiState.update { it.copy(isLoading = true, isIntroShowing = true) }
+            // 처음 앱 켤때만 인트로 보여줌, 모드 변경 시에는 로딩바만 보여줌
+            _uiState.update { it.copy(isLoading = true, isIntroShowing = isInitialLoad) }
             try {
                 when (_uiState.value.appMode) {
                     AppMode.WEBTOON -> {
-                        _uiState.update { it.copy(categories = emptyList(), isLoading = false, isIntroShowing = false) }
+                        _uiState.update { it.copy(categories = emptyList()) }
                         scanBooks("")
                     }
                     AppMode.MAGAZINE -> {
-                        _uiState.update { it.copy(categories = emptyList(), isLoading = false, isIntroShowing = false) }
+                        _uiState.update { it.copy(categories = emptyList()) }
                         scanBooks("잡지")
                     }
                     AppMode.PHOTO_BOOK -> {
                         val categories = getCategoriesUseCase.execute("화보")
-                        _uiState.update { it.copy(categories = categories, isLoading = false, isIntroShowing = false) }
+                        _uiState.update { it.copy(categories = categories) }
                         if (categories.isNotEmpty()) {
                             scanBooks(categories[0].path, 0)
                         } else {
@@ -110,19 +112,22 @@ class ComicViewModel(
                         }
                     }
                     AppMode.BOOK -> {
-                        _uiState.update { it.copy(categories = emptyList(), isLoading = false, isIntroShowing = false) }
+                        _uiState.update { it.copy(categories = emptyList()) }
                         scanBooks("책")
                     }
                     AppMode.MANGA -> {
                         val categories = getCategoriesUseCase.execute("")
-                        _uiState.update { it.copy(categories = categories, isLoading = false, isIntroShowing = false) }
+                        _uiState.update { it.copy(categories = categories) }
                         if (categories.isNotEmpty()) {
                             scanBooks(categories[0].path, 0)
                         }
                     }
                 }
+                isInitialLoad = false
             } catch (e: Exception) {
-                _uiState.update { it.copy(errorMessage = "서버 연결 실패", isLoading = false, isIntroShowing = false) }
+                _uiState.update { it.copy(errorMessage = "서버 연결 실패") }
+            } finally {
+                _uiState.update { it.copy(isLoading = false, isIntroShowing = false) }
             }
         }
     }
@@ -259,13 +264,12 @@ class ComicViewModel(
             AppMode.BOOK -> slashCount < 3 
             AppMode.PHOTO_BOOK -> slashCount < 2 
             AppMode.MAGAZINE -> slashCount < 1 
-            AppMode.WEBTOON -> slashCount < 1 // 유저의 최신 커밋 상태 복원
+            AppMode.WEBTOON -> slashCount < 1 
             AppMode.MANGA -> {
                 if (file.path.startsWith("ㅈㄱ/") || file.path.startsWith("작가/")) slashCount < 2 else slashCount < 1
             }
         }
 
-        // 1. 단순 네비게이션 폴더 클릭 (초성, 작가명 등)
         if (shouldNavigate) {
             scanBooks(file.path)
             return
@@ -274,7 +278,7 @@ class ComicViewModel(
         val isViewerItem = if (_uiState.value.isSeriesView) {
             when (_uiState.value.appMode) {
                 AppMode.MANGA, AppMode.BOOK -> !file.isDirectory
-                else -> true // 웹툰, 잡지, 화보 모드에서는 상세페이지 내부 항목은 모두 에피소드
+                else -> true 
             }
         } else if (_uiState.value.isSearchMode && file.isDirectory) {
             when (_uiState.value.appMode) {
@@ -287,20 +291,17 @@ class ComicViewModel(
             !file.isDirectory
         }
 
-        // 2. 이미 상세 페이지인데 클릭한 항목이 "폴더"인 경우 (Manga/Book 모드에서 에피소드 대신 하위 폴더들이 있는 케이스)
         if (file.isDirectory && _uiState.value.isSeriesView && !isViewerItem) {
             scanBooks(file.path)
             return
         }
 
-        // 3. 실제 열람 가능한 작품이나 에피소드인 경우에만 최근 본 작품에 추가
         if (isViewerItem) {
             viewModelScope.launch {
                 posterRepository.addToRecent(file)
                 loadRecentComics()
             }
             
-            // 4. 단일 파일이거나 에피소드 폴더인 경우 뷰어 바로 열기
             val episodes = if (_uiState.value.isSearchMode && _uiState.value.searchResults.isNotEmpty()) _uiState.value.searchResults else if (_uiState.value.isSeriesView) _uiState.value.seriesEpisodes else _uiState.value.currentFiles
             val index = episodes.indexOfFirst { it.path == file.path }
             _uiState.update { it.copy(
@@ -311,7 +312,6 @@ class ComicViewModel(
             return
         }
         
-        // 5. 작품명 폴더 클릭 시 상세 페이지로 진입하여 메타데이터 및 에피소드 스캔
         detailJob?.cancel()
         detailJob = viewModelScope.launch {
             _uiState.update { it.copy(

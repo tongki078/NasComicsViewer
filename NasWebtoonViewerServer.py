@@ -134,23 +134,28 @@ def generate_zip_thumbnail(zip_path, cache_path):
     except: pass
     return False
 
-def find_first_image_recursive(path, depth_limit=3):
+def find_first_image_recursive(path, depth_limit=6): # 탐색 깊이를 6으로 확대
     if depth_limit <= 0: return None
     try:
         with os.scandir(path) as it:
             ents = sorted(list(it), key=lambda x: x.name)
+            # 1. 현재 폴더에서 이미지 파일 우선 찾기
             for e in ents:
                 if is_image_file(e.name):
                     return os.path.relpath(e.path, BASE_PATH).replace(os.sep, '/')
+            # 2. 하위 폴더로 더 깊이 들어가기
             for e in ents:
                 if e.is_dir() and not is_excluded(e.name):
                     res = find_first_image_recursive(e.path, depth_limit - 1)
                     if res: return res
+            # 3. 만화/도서 파일 찾기 (찾으면 썸네일 생성 대상이 됨)
             for e in ents:
                 if is_comic_file(e.name):
                     return "zip_thumb://" + os.path.relpath(e.path, BASE_PATH).replace(os.sep, '/')
     except: pass
     return None
+
+
 
 def get_comic_info(abs_path, rel_path):
     title = normalize_nfc(os.path.basename(abs_path))
@@ -158,6 +163,7 @@ def get_comic_info(abs_path, rel_path):
     meta_dict = {"summary": "줄거리 정보가 없습니다.", "writers": [], "genres": [], "status": "Unknown", "publisher": ""}
 
     if os.path.isdir(abs_path):
+        # 1. 메타데이터 파일 확인
         kavita_path = os.path.join(abs_path, "kavita.yaml")
         if os.path.exists(kavita_path):
             try:
@@ -168,37 +174,26 @@ def get_comic_info(abs_path, rel_path):
                     meta_dict['summary'] = m.get('summary', meta_dict['summary'])
                     meta_dict['writers'] = m.get('writers', [])
                     meta_dict['genres'] = m.get('genres', [])
-                    for key in ['backgroundImage', 'image', 'thumbnail', 'cover', 'poster']:
+                    for key in ['image', 'thumbnail', 'cover', 'poster']:
                         if key in m and m[key]:
                             val = str(m[key]).strip()
                             if val.startswith(('http://', 'https://')): poster = val; break
-                            check_path = os.path.join(abs_path, val)
-                            if os.path.exists(check_path):
-                                poster = os.path.join(rel_path, val).replace(os.sep, '/'); break
+                            poster = os.path.join(rel_path, val).replace(os.sep, '/'); break
             except: pass
 
+        # 2. 포스터 주소만 찾기 (렌더링은 안 함)
         if not poster:
-            cover_path = os.path.join(abs_path, "cover.png")
-            if os.path.exists(cover_path): poster = os.path.join(rel_path, "cover.png").replace(os.sep, '/')
-
-        if not poster: poster = find_first_image_recursive(abs_path)
+            poster = find_first_image_recursive(abs_path, depth_limit=6)
     else:
         poster = "zip_thumb://" + rel_path
         title = os.path.splitext(title)[0]
 
+    # 3. 주소 정규화 (앱 통신용)
     if poster and not poster.startswith("http"):
         if poster.startswith("zip_thumb://"):
-            p_rel = poster[12:]
-            cache_key = hashlib.md5(normalize_nfc(p_rel).encode('utf-8')).hexdigest() + ".jpg"
-            cache_path = os.path.join(THUMB_CACHE_DIR, cache_key)
-            full_p = os.path.join(BASE_PATH, p_rel)
-            if full_p.lower().endswith(('.pdf', '.epub')):
-                generate_file_thumbnail(full_p, cache_path)
-            else:
-                generate_zip_thumbnail(full_p, cache_path)
-            poster = "zip_thumb://" + urllib.parse.quote(p_rel)
+            poster = "zip_thumb://" + urllib.parse.quote(poster[12:], safe='/')
         else:
-            poster = urllib.parse.quote(poster)
+            poster = urllib.parse.quote(poster, safe='/')
 
     meta_dict['poster_url'] = poster
     return title, poster, json.dumps(meta_dict, ensure_ascii=False)
@@ -211,22 +206,29 @@ def scan_task(abs_path, series_depth):
         if rel == ".": rel = ""
         depth = get_depth(rel)
         scan_status["current_item"] = os.path.basename(abs_path)
+
         has_comic_files = False
         if os.path.isdir(abs_path):
             try:
                 with os.scandir(abs_path) as it:
                     for e in it:
                         if is_comic_file(e.name):
-                            has_comic_files = True; break
-            except: pass
+                            has_comic_files = True;
+                            break
+            except:
+                pass
+
         is_series_level = (depth >= series_depth) or has_comic_files
         title, poster, meta = get_comic_info(abs_path, rel)
         p_hash = get_path_hash(os.path.dirname(abs_path))
+
         item = (get_path_hash(abs_path), p_hash, abs_path, rel, normalize_nfc(os.path.basename(abs_path)),
                 1 if os.path.isdir(abs_path) else 0, poster, title, depth, time.time(), meta)
         db_queue.put([item])
+
         scan_status["processed"] += 1
         scan_status["success"] += 1
+
         if os.path.isdir(abs_path):
             if is_series_level:
                 add_web_log(f"'{title}' updated", "UPDATE")
@@ -234,28 +236,13 @@ def scan_task(abs_path, series_depth):
                 with os.scandir(abs_path) as it:
                     for e in it:
                         if (is_comic_file(e.name) or e.is_dir()) and not is_excluded(e.name):
-                            e_abs = normalize_nfc(e.path)
-                            e_rel = normalize_nfc(os.path.relpath(e_abs, BASE_PATH).replace(os.sep, '/'))
-                            e_title = os.path.splitext(e.name)[0]
-                            e_poster = None
-                            if is_comic_file(e.name):
-                                e_poster = "zip_thumb://" + urllib.parse.quote(e_rel)
-                                cache_key = hashlib.md5(normalize_nfc(e_rel).encode('utf-8')).hexdigest() + ".jpg"
-                                cache_path = os.path.join(THUMB_CACHE_DIR, cache_key)
-                                if e_abs.lower().endswith(('.pdf', '.epub')):
-                                    generate_file_thumbnail(e_abs, cache_path)
-                                else:
-                                    generate_zip_thumbnail(e_abs, cache_path)
-                            elif e.is_dir():
-                                found = find_first_image_recursive(e.path)
-                                if found:
-                                    if found.startswith("zip_thumb://"):
-                                        e_poster = "zip_thumb://" + urllib.parse.quote(found[12:])
-                                    else: e_poster = urllib.parse.quote(found)
-                                else: e_poster = poster
-                            else: e_poster = poster
-                            ep_items.append((get_path_hash(e.path), get_path_hash(abs_path), e_abs, e_rel, normalize_nfc(e.name),
-                                 1 if e.is_dir() else 0, e_poster, normalize_nfc(e_title), depth + 1, time.time(), "{}"))
+                            e_rel = normalize_nfc(os.path.relpath(e.path, BASE_PATH).replace(os.sep, '/'))
+                            e_poster = "zip_thumb://" + urllib.parse.quote(e_rel, safe='/') if is_comic_file(
+                                e.name) else poster
+                            ep_items.append((get_path_hash(e.path), get_path_hash(abs_path), normalize_nfc(e.path),
+                                             e_rel, normalize_nfc(e.name),
+                                             1 if e.is_dir() else 0, e_poster,
+                                             normalize_nfc(os.path.splitext(e.name)[0]), depth + 1, time.time(), "{}"))
                 if ep_items: db_queue.put(ep_items)
             else:
                 with os.scandir(abs_path) as it:
@@ -265,10 +252,11 @@ def scan_task(abs_path, series_depth):
                             scanning_pool.submit(scan_task, e.path, series_depth)
     except Exception as e:
         scan_status["failed"] += 1
-        add_web_log(f"Error scanning {abs_path}: {e}", "ERROR")
-    if scan_status["processed"] >= scan_status["total"] and scan_status["total"] > 0:
+        add_web_log(f"Error: {e}", "ERROR")
+
+    if scan_status["processed"] >= scan_status["total"] > 0:
         scan_status["is_running"] = False
-        add_web_log(f"{scan_status['current_type']} Update Completed!", "SUCCESS")
+        add_web_log(f"{scan_status['current_type']} Completed!", "SUCCESS")
 
 def start_full_scan(target_type):
     scan_status["is_running"] = True
@@ -306,7 +294,7 @@ def start_full_scan(target_type):
             scan_status["total"] += 1
             scanning_pool.submit(scan_task, book_root, 5)
 
-@app.route('/')
+@app.route('/admin')
 def index():
     html = """
     <!DOCTYPE html><html><head><title>NasWebtoon Admin</title>
@@ -421,64 +409,87 @@ def scan_comics():
 
 @app.route('/download')
 def download():
-    p = normalize_nfc(urllib.parse.unquote(request.args.get('path', '')))
+    raw_path = request.args.get('path', '')
+    p = normalize_nfc(urllib.parse.unquote(raw_path)).replace('+', ' ')
     if not p: return "Path required", 400
+
+    # 외부 URL 처리
     if p.startswith("http"):
         try:
-            req = urllib.request.Request(p, headers={'User-Agent': 'Mozilla/5.0'})
+            headers = {'User-Agent': 'Mozilla/5.0'}
+            req = urllib.request.Request(p, headers=headers)
             with urllib.request.urlopen(req, timeout=10) as response:
                 return send_file(io.BytesIO(response.read()), mimetype=response.headers.get_content_type() or 'image/jpeg')
         except: return "Image Load Failed", 500
+
+    # 썸네일 캐시 및 렌더링 처리
     if p.startswith("zip_thumb://"):
         rel_path = p[12:]
-        cache_key = hashlib.md5(rel_path.encode('utf-8')).hexdigest() + ".jpg"
+        cache_key = hashlib.md5(normalize_nfc(rel_path).encode('utf-8')).hexdigest() + ".jpg"
         cache_path = os.path.join(THUMB_CACHE_DIR, cache_key)
         if os.path.exists(cache_path): return send_from_directory(THUMB_CACHE_DIR, cache_key)
-        azp = os.path.join(BASE_PATH, rel_path)
+
+        azp = os.path.abspath(os.path.join(BASE_PATH, rel_path)).replace('\\', '/')
         if azp.lower().endswith(('.pdf', '.epub')):
             if generate_file_thumbnail(azp, cache_path): return send_from_directory(THUMB_CACHE_DIR, cache_key)
         else:
             if generate_zip_thumbnail(azp, cache_path): return send_from_directory(THUMB_CACHE_DIR, cache_key)
         return "No Image", 404
-    target_path = os.path.join(BASE_PATH, p)
+
+    target_path = os.path.abspath(os.path.join(BASE_PATH, p)).replace('\\', '/')
     return send_from_directory(os.path.dirname(target_path), os.path.basename(target_path))
 
 @app.route('/zip_entries')
 def zip_entries():
-    path = normalize_nfc(urllib.parse.unquote(request.args.get('path', '')))
-    abs_p = os.path.join(BASE_PATH, path)
+    path = urllib.parse.unquote_plus(request.args.get('path', ''))
+    p_nfc = normalize_nfc(path); p_nfd = unicodedata.normalize('NFD', path)
+    abs_p = os.path.abspath(os.path.join(BASE_PATH, p_nfc)).replace('\\', '/')
+    if not os.path.exists(abs_p):
+        abs_p = os.path.abspath(os.path.join(BASE_PATH, p_nfd)).replace('\\', '/')
+        if not os.path.exists(abs_p): return "File Not Found", 404
+
+    if abs_p.lower().endswith(('.pdf', '.epub')):
+        if HAS_FITZ:
+            try:
+                doc = fitz.open(abs_p)
+                pages = [f"page_{i:04d}.jpg" for i in range(doc.page_count)]
+                doc.close()
+                return jsonify(pages)
+            except: return jsonify([])
+        return jsonify([])
     if os.path.isdir(abs_p): return jsonify(sorted([e.name for e in os.scandir(abs_p) if is_image_file(e.name)]))
-    if abs_p.lower().endswith(('.pdf', '.epub')) and HAS_FITZ:
-        try:
-            doc = fitz.open(abs_p)
-            pages = [f"page_{i:04d}.jpg" for i in range(doc.page_count)]
-            doc.close()
-            return jsonify(pages)
-        except: return jsonify([])
     try:
         with zipfile.ZipFile(abs_p, 'r') as z: return jsonify(sorted([n for n in z.namelist() if is_image_file(n)]))
     except: return jsonify([])
 
+
 @app.route('/download_zip_entry')
 def download_zip_entry():
-    path = normalize_nfc(urllib.parse.unquote(request.args.get('path', '')))
-    entry = normalize_nfc(urllib.parse.unquote(request.args.get('entry', '')))
-    abs_p = os.path.join(BASE_PATH, path)
+    path = urllib.parse.unquote_plus(request.args.get('path', ''))
+    entry = urllib.parse.unquote_plus(request.args.get('entry', ''))
+    p_nfc = normalize_nfc(path);
+    p_nfd = unicodedata.normalize('NFD', path)
+    abs_p = os.path.abspath(os.path.join(BASE_PATH, p_nfc)).replace('\\', '/')
+    if not os.path.exists(abs_p): abs_p = os.path.abspath(os.path.join(BASE_PATH, p_nfd)).replace('\\', '/')
+
     if abs_p.lower().endswith(('.pdf', '.epub')) and entry.startswith("page_") and HAS_FITZ:
         try:
             page_idx = int(entry[5:9])
-            doc = fitz.open(abs_p)
+            doc = fitz.open(abs_p);
             page = doc.load_page(page_idx)
             pix = page.get_pixmap(matrix=fitz.Matrix(2.0, 2.0))
-            img_data = pix.tobytes("jpg")
+            img_data = pix.tobytes("jpg");
             doc.close()
             return send_file(io.BytesIO(img_data), mimetype='image/jpeg')
-        except: return "Error", 500
+        except:
+            return "Error", 500
     if os.path.isdir(abs_p): return send_from_directory(abs_p, entry)
     try:
         with zipfile.ZipFile(abs_p, 'r') as z:
             with z.open(entry) as f: return send_file(io.BytesIO(f.read()), mimetype='image/jpeg')
-    except: return "Error", 500
+    except:
+        return "Error", 500
+
 
 @app.route('/metadata')
 def get_metadata():

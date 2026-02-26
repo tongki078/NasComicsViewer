@@ -930,6 +930,10 @@ fun PhotoBookViewer(
     var posterBitmap by remember { mutableStateOf<ImageBitmap?>(null) }
     val scope = rememberCoroutineScope()
     
+    var isAutoFlipEnabled by remember { mutableStateOf(false) }
+    var autoFlipInterval by remember { mutableStateOf(3f) }
+    var showSettings by remember { mutableStateOf(false) }
+
     val pagerState = rememberPagerState { imageNames.size }
 
     LaunchedEffect(posterUrl) { posterUrl?.let { posterBitmap = repo.getImage(it) } }
@@ -952,11 +956,26 @@ fun PhotoBookViewer(
         }
     }
 
+    LaunchedEffect(isAutoFlipEnabled, autoFlipInterval) {
+        if (isAutoFlipEnabled) {
+            while (isActive && pagerState.currentPage < pagerState.pageCount - 1) {
+                delay((autoFlipInterval * 1000).toLong())
+                pagerState.animateScrollToPage(pagerState.currentPage + 1)
+            }
+            if (pagerState.currentPage >= pagerState.pageCount - 1) {
+                isAutoFlipEnabled = false
+            }
+        }
+    }
+
     Box(Modifier.fillMaxSize().background(Color.Black)) {
         if (isListLoaded) {
             HorizontalPager(
                 state = pagerState,
-                modifier = Modifier.fillMaxSize().clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) { showControls = !showControls },
+                modifier = Modifier.fillMaxSize().clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) { 
+                    showControls = !showControls 
+                    if (showControls) showSettings = false
+                },
                 pageSpacing = 16.dp
             ) { page ->
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -969,6 +988,21 @@ fun PhotoBookViewer(
             Box(Modifier.fillMaxWidth().height(60.dp).background(BgBlack.copy(0.8f)).align(Alignment.TopCenter).padding(horizontal = 12.dp)) {
                 IconButton(onClick = onClose, modifier = Modifier.align(Alignment.CenterStart).size(36.dp)) { Icon(Icons.Default.Close, null, tint = TextPureWhite, modifier = Modifier.size(20.dp)) }
                 Text("${pagerState.currentPage + 1} / ${imageNames.size}", Modifier.align(Alignment.Center), color = TextPureWhite, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                Row(Modifier.align(Alignment.CenterEnd)) {
+                    IconButton(onClick = { isAutoFlipEnabled = !isAutoFlipEnabled }, modifier = Modifier.size(36.dp)) { Icon(if (isAutoFlipEnabled) Icons.Default.Close else Icons.Default.PlayArrow, null, tint = if (isAutoFlipEnabled) KakaoYellow else TextPureWhite, modifier = Modifier.size(20.dp)) }
+                    IconButton(onClick = { showSettings = !showSettings }, modifier = Modifier.size(36.dp)) { Icon(Icons.Default.Settings, null, tint = TextPureWhite, modifier = Modifier.size(20.dp)) }
+                }
+            }
+        }
+
+        if (showSettings) {
+            Surface(modifier = Modifier.align(Alignment.CenterEnd).padding(16.dp).width(220.dp), color = Color(0xFF222222), shape = RoundedCornerShape(12.dp), border = BorderStroke(1.dp, Color.White.copy(0.1f))) {
+                Column(Modifier.padding(16.dp)) {
+                    Text("자동 넘김 간격 (${autoFlipInterval.toInt()}초)", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                    Slider(value = autoFlipInterval, onValueChange = { autoFlipInterval = it }, valueRange = 2f..10f, steps = 8, colors = SliderDefaults.colors(thumbColor = KakaoYellow, activeTrackColor = KakaoYellow))
+                    Spacer(Modifier.height(8.dp))
+                    Text("슬라이드 쇼 모드를 지원합니다.", color = TextMuted, fontSize = 10.sp)
+                }
             }
         }
     }
