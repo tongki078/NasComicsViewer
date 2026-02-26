@@ -214,7 +214,7 @@ class ComicViewModel(
         scanJob = viewModelScope.launch {
             try {
                 val result = nasRepository.scanComicFolders(path, currentPage, pageSize)
-                val processedFiles = processScanResult(result.items)
+                val processedFiles = processScanResult(path, result.items)
                 canLoadMore = processedFiles.size < result.total_items
                 listCache[path] = processedFiles
                 _uiState.update { it.copy(currentFiles = processedFiles, totalItems = result.total_items, isLoading = false, isRefreshing = false) }
@@ -231,7 +231,7 @@ class ComicViewModel(
             try {
                 currentPage++
                 val result = nasRepository.scanComicFolders(uiState.value.currentPath, currentPage, pageSize)
-                val processedFiles = processScanResult(result.items)
+                val processedFiles = processScanResult(uiState.value.currentPath, result.items)
                 val newFiles = (uiState.value.currentFiles + processedFiles).distinctBy { it.path }
                 canLoadMore = newFiles.size < result.total_items
                 listCache[uiState.value.currentPath] = newFiles
@@ -242,12 +242,25 @@ class ComicViewModel(
         }
     }
 
-    private fun processScanResult(files: List<NasFile>): List<NasFile> {
-        return files.distinctBy { it.path }.map { file ->
+    private fun processScanResult(path: String, files: List<NasFile>, skipGrouping: Boolean = false): List<NasFile> {
+        val mapped = files.distinctBy { it.path }.map { file ->
             val originalName = file.path.substringAfterLast('/')
             val finalName = nameMap[originalName.removeSuffix(".zip").removeSuffix(".cbz")] ?: cleanTitle(originalName)
             file.copy(name = finalName)
         }
+
+        if (!skipGrouping && _uiState.value.appMode == AppMode.PHOTO_BOOK && path.count { it == '/' } == 2) {
+            val grouped = mapped.groupBy { it.name }
+            return grouped.map { (groupName, filesInGroup) ->
+                NasFile(
+                    name = groupName,
+                    isDirectory = true,
+                    path = "$path/GROUP:$groupName",
+                    metadata = filesInGroup.first().metadata
+                )
+            }
+        }
+        return mapped
     }
 
     fun saveListScrollPosition(path: String, index: Int) {
@@ -262,7 +275,7 @@ class ComicViewModel(
         val slashCount = file.path.count { it == '/' }
         val shouldNavigate = file.isDirectory && !_uiState.value.isSeriesView && when (_uiState.value.appMode) {
             AppMode.BOOK -> slashCount < 3 
-            AppMode.PHOTO_BOOK -> slashCount < 2 
+            AppMode.PHOTO_BOOK -> slashCount < 3 
             AppMode.MAGAZINE -> slashCount < 1 
             AppMode.WEBTOON -> slashCount < 1 
             AppMode.MANGA -> {
@@ -326,20 +339,41 @@ class ComicViewModel(
                     _uiState.update { it.copy(isSearchMode = false) }
                 }
 
-                val metadataDeferred = async { nasRepository.getMetadata(file.path) }
-                val resultDeferred = async { nasRepository.scanComicFolders(file.path, 1, 300) }
-                
-                val metadata = metadataDeferred.await()
-                val result = resultDeferred.await()
-                
-                val processedFiles = processScanResult(result.items)
-                
-                _uiState.update { it.copy(
-                    selectedMetadata = metadata ?: ComicMetadata(title = file.name, summary = "상세 정보가 없습니다."),
-                    seriesEpisodes = if (metadata?.chapters?.isNotEmpty() == true) processScanResult(metadata.chapters!!) else processedFiles,
-                    pathHistory = it.pathHistory + file.path,
-                    isLoading = false
-                ) }
+                if (file.path.contains("/GROUP:")) {
+                    val realPath = file.path.substringBeforeLast("/GROUP:")
+                    val groupName = file.path.substringAfterLast("/GROUP:")
+                    
+                    val metadataDeferred = async { nasRepository.getMetadata(realPath) }
+                    val resultDeferred = async { nasRepository.scanComicFolders(realPath, 1, 1000) }
+                    
+                    val metadata = metadataDeferred.await()
+                    val result = resultDeferred.await()
+                    
+                    val allFilesInParent = processScanResult(realPath, result.items, skipGrouping = true)
+                    val groupFiles = allFilesInParent.filter { it.name == groupName }
+                    
+                    _uiState.update { it.copy(
+                        selectedMetadata = file.metadata ?: ComicMetadata(title = file.name, summary = metadata?.summary ?: "상세 정보가 없습니다."),
+                        seriesEpisodes = groupFiles,
+                        pathHistory = it.pathHistory + file.path,
+                        isLoading = false
+                    ) }
+                } else {
+                    val metadataDeferred = async { nasRepository.getMetadata(file.path) }
+                    val resultDeferred = async { nasRepository.scanComicFolders(file.path, 1, 300) }
+                    
+                    val metadata = metadataDeferred.await()
+                    val result = resultDeferred.await()
+                    
+                    val processedFiles = processScanResult(file.path, result.items)
+                    
+                    _uiState.update { it.copy(
+                        selectedMetadata = metadata ?: ComicMetadata(title = file.name, summary = "상세 정보가 없습니다."),
+                        seriesEpisodes = if (metadata?.chapters?.isNotEmpty() == true) processScanResult(file.path, metadata.chapters!!) else processedFiles,
+                        pathHistory = it.pathHistory + file.path,
+                        isLoading = false
+                    ) }
+                }
 
             } catch (e: Exception) {
                 _uiState.update { it.copy(
@@ -408,7 +442,7 @@ class ComicViewModel(
                 loadRecentSearches()
                 
                 val searchResult = nasRepository.searchComics(query, 1, 100)
-                val processed = processScanResult(searchResult.items)
+                val processed = processScanResult("", searchResult.items, skipGrouping = true)
                 
                 _uiState.update { it.copy(searchResults = processed, isLoading = false) }
             } catch (e: Exception) {
