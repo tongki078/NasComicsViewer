@@ -528,32 +528,23 @@ fun SeriesDetailScreen(state: ComicBrowserUiState, onVolumeClick: (NasFile) -> U
                 }
             }
 
-            items(state.seriesEpisodes) { file ->
-                Box(Modifier.padding(horizontal = 20.dp)) {
-                    VolumeListItem(file, repo) { onVolumeClick(file) }
+            if (state.isLoading) {
+                item {
+                    Box(Modifier.fillMaxWidth().padding(40.dp), contentAlignment = Alignment.Center) {
+                        CircularProgressIndicator(color = KakaoYellow)
+                    }
                 }
-                Spacer(Modifier.height(12.dp))
+            } else {
+                items(state.seriesEpisodes) { file ->
+                    Box(Modifier.padding(horizontal = 20.dp)) {
+                        VolumeListItem(file, repo) { onVolumeClick(file) }
+                    }
+                    Spacer(Modifier.height(12.dp))
+                }
             }
 
             item {
                 Spacer(Modifier.height(60.dp))
-            }
-        }
-        
-        // 상세 데이터 로딩 시 오버레이 UI 표시
-        if (state.isLoading) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(Color.Black.copy(alpha = 0.7f))
-                    .clickable(enabled = false) {}, // 뒷 배경 클릭 방지
-                contentAlignment = Alignment.Center
-            ) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    CircularProgressIndicator(color = KakaoYellow)
-                    Spacer(Modifier.height(16.dp))
-                    Text("목록을 불러오는 중입니다...", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold)
-                }
             }
         }
     }
@@ -616,10 +607,9 @@ fun FlowRow(mainAxisSpacing: androidx.compose.ui.unit.Dp = 0.dp, crossAxisSpacin
 // ----------------------------------------------------
 // 중앙집중형 이미지 캐싱 및 다운로드 로직 (뮤텍스를 활용한 중복 방지 및 강제 취소 지원)
 // ----------------------------------------------------
-// 메모리 최적화를 위해 캐시 사이즈를 줄였습니다.
 private val viewerImageCache = mutableMapOf<String, ImageBitmap>()
 private val viewerCacheKeys = mutableListOf<String>()
-private const val MAX_CACHE_SIZE = 15
+private const val MAX_CACHE_SIZE = 30
 
 private val cacheLock = Mutex()
 private val downloadLocks = mutableMapOf<String, Mutex>()
@@ -649,9 +639,8 @@ private suspend fun loadAndCacheImage(zipPath: String, imageName: String, manage
         downloadLocks.getOrPut(cacheKey) { Mutex() }
     }
     
-    // 여기서 사용자가 화면을 스와이프해 코루틴이 취소되면, 이 withLock 역시 취소되며 Ktor 다운로드도 함께 즉시 중단됩니다.
     return lock.withLock {
-        // Lock 획득 후 다시 캐시 확인 (대기하던 다른 코루틴 처리)
+        // Lock 획득 후 다시 캐시 확인
         getCachedBitmap(cacheKey)?.let { return@withLock it }
         
         val bytes = manager.extractImage(zipPath, imageName)
@@ -694,7 +683,6 @@ fun WebtoonViewer(
 
     LaunchedEffect(posterUrl) { posterUrl?.let { posterBitmap = repo.getImage(it) } }
 
-    // 파일 목록 1회성 로드
     LaunchedEffect(path) {
         isListLoaded = false; imageNames.clear(); viewerImageCache.clear(); viewerCacheKeys.clear()
         try {
@@ -707,21 +695,22 @@ fun WebtoonViewer(
         } catch (e: Exception) { onError("파일을 열 수 없습니다: ${e.message}"); onClose() }
     }
 
-    // 스크롤 시 우선순위 프리로딩 (빠른 스크롤 시 네트워크 폭주 방지를 위해 delay 추가)
     LaunchedEffect(listState.firstVisibleItemIndex) {
         if (isListLoaded) {
             viewModel.saveReadingPosition(path, listState.firstVisibleItemIndex)
             
-            // 0.3초 대기하여 현재 보이는 이미지가 먼저 서버 요청을 보내게 양보함
-            delay(300)
+            // 디바운스: 빠른 스크롤 도중 불필요한 네트워크 요청 방지
+            delay(100)
             
-            launch {
+            // LaunchedEffect가 스크롤 변경으로 취소되더라도 프리패치는 중단되지 않도록 scope.launch 사용
+            scope.launch {
                 val currentIndex = listState.firstVisibleItemIndex
-                // 바로 앞의 2장 정도만 프리로딩 시도
-                for (i in 1..2) {
+                for (i in 1..3) {
                     val nextIndex = currentIndex + i
                     if (nextIndex < imageNames.size) {
-                        loadAndCacheImage(path, imageNames[nextIndex], manager)
+                        launch {
+                            loadAndCacheImage(path, imageNames[nextIndex], manager)
+                        }
                     }
                 }
             }
@@ -881,13 +870,19 @@ fun MagazineViewer(
         if (isListLoaded) {
             viewModel.saveReadingPosition(path, pagerState.currentPage * 2)
             
-            // 빠른 스크롤 무시
-            delay(300)
-            launch {
+            delay(100)
+            scope.launch {
                 val currentIndex = pagerState.currentPage * 2
-                for (i in 2..3) {
-                    if (currentIndex + i < imageNames.size) {
-                        loadAndCacheImage(path, imageNames[currentIndex + i], manager)
+                val prefetchIndices = listOf(
+                    currentIndex + 2, currentIndex + 3,
+                    currentIndex + 4, currentIndex + 5,
+                    currentIndex - 1, currentIndex - 2
+                )
+                prefetchIndices.forEach { idx ->
+                    if (idx in imageNames.indices) {
+                        launch {
+                            loadAndCacheImage(path, imageNames[idx], manager)
+                        }
                     }
                 }
             }
@@ -972,12 +967,15 @@ fun BookViewer(
         if (isListLoaded) {
             viewModel.saveReadingPosition(path, pagerState.currentPage)
             
-            delay(300)
-            launch {
+            delay(100)
+            scope.launch {
                 val currentIndex = pagerState.currentPage
-                for (i in 1..2) {
-                    if (currentIndex + i < imageNames.size) {
-                        loadAndCacheImage(path, imageNames[currentIndex + i], manager)
+                val prefetchIndices = listOf(currentIndex + 1, currentIndex + 2, currentIndex - 1)
+                prefetchIndices.forEach { idx ->
+                    if (idx in imageNames.indices) {
+                        launch {
+                            loadAndCacheImage(path, imageNames[idx], manager)
+                        }
                     }
                 }
             }
@@ -1055,12 +1053,15 @@ fun PhotoBookViewer(
         if (isListLoaded) {
             viewModel.saveReadingPosition(path, pagerState.currentPage)
             
-            delay(300)
-            launch {
+            delay(100)
+            scope.launch {
                 val currentIndex = pagerState.currentPage
-                for (i in 1..2) {
-                    if (currentIndex + i < imageNames.size) {
-                        loadAndCacheImage(path, imageNames[currentIndex + i], manager)
+                val prefetchIndices = listOf(currentIndex + 1, currentIndex + 2, currentIndex - 1)
+                prefetchIndices.forEach { idx ->
+                    if (idx in imageNames.indices) {
+                        launch {
+                            loadAndCacheImage(path, imageNames[idx], manager)
+                        }
                     }
                 }
             }
