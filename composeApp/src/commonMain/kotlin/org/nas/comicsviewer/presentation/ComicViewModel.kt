@@ -369,7 +369,7 @@ class ComicViewModel(
                     
                     _uiState.update { it.copy(
                         selectedMetadata = metadata ?: ComicMetadata(title = file.name, summary = "상세 정보가 없습니다."),
-                        seriesEpisodes = if (metadata?.chapters?.isNotEmpty() == true) processScanResult(file.path, metadata.chapters!!) else processedFiles,
+                        seriesEpisodes = if (_uiState.value.appMode != AppMode.BOOK && metadata?.chapters?.isNotEmpty() == true) processScanResult(file.path, metadata.chapters!!) else processedFiles,
                         pathHistory = it.pathHistory + file.path,
                         isLoading = false
                     ) }
