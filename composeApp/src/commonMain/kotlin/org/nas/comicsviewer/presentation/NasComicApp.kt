@@ -65,7 +65,7 @@ fun NasComicApp(viewModel: ComicViewModel) {
 
     val canBack by remember {
         derivedStateOf {
-            uiState.selectedZipPath != null || uiState.pathHistory.size > 1 || uiState.isSearchMode || uiState.isSeriesView
+            uiState.selectedZipPath != null || uiState.selectedPdfPath != null || uiState.pathHistory.size > 1 || uiState.isSearchMode || uiState.isSeriesView
         }
     }
 
@@ -96,11 +96,12 @@ fun NasComicApp(viewModel: ComicViewModel) {
         Box(Modifier.fillMaxSize().background(BgBlack)) {
             if (uiState.isIntroShowing) {
                 IntroScreen()
-            } else if (uiState.selectedZipPath != null) {
+            } else if (uiState.selectedZipPath != null || uiState.selectedPdfPath != null) {
+                val viewerPath = uiState.selectedZipPath ?: uiState.selectedPdfPath!!
                 when (uiState.appMode) {
                     AppMode.MAGAZINE -> {
                         MagazineViewer(
-                            path = uiState.selectedZipPath!!,
+                            path = viewerPath,
                             manager = zipManager,
                             posterUrl = uiState.viewerPosterUrl,
                             repo = viewModel.posterRepository,
@@ -112,7 +113,7 @@ fun NasComicApp(viewModel: ComicViewModel) {
                     }
                     AppMode.PHOTO_BOOK -> {
                         PhotoBookViewer(
-                            path = uiState.selectedZipPath!!,
+                            path = viewerPath,
                             manager = zipManager,
                             posterUrl = uiState.viewerPosterUrl,
                             repo = viewModel.posterRepository,
@@ -124,7 +125,7 @@ fun NasComicApp(viewModel: ComicViewModel) {
                     }
                     AppMode.BOOK -> {
                         BookViewer(
-                            path = uiState.selectedZipPath!!,
+                            path = viewerPath,
                             manager = zipManager,
                             posterUrl = uiState.viewerPosterUrl,
                             repo = viewModel.posterRepository,
@@ -136,7 +137,7 @@ fun NasComicApp(viewModel: ComicViewModel) {
                     }
                     else -> {
                         WebtoonViewer(
-                            path = uiState.selectedZipPath!!, 
+                            path = viewerPath,
                             manager = zipManager, 
                             posterUrl = uiState.viewerPosterUrl,
                             repo = viewModel.posterRepository,

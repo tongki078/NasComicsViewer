@@ -37,6 +37,7 @@ data class ComicBrowserUiState(
     val selectedMetadata: ComicMetadata? = null,
     val seriesEpisodes: List<NasFile> = emptyList(),
     val selectedZipPath: String? = null,
+    val selectedPdfPath: String? = null,
     val viewerPosterUrl: String? = null,
     val currentChapterIndex: Int = -1,
     val isSearchMode: Boolean = false,
@@ -274,7 +275,7 @@ class ComicViewModel(
     fun onFileClick(file: NasFile) {
         val slashCount = file.path.count { it == '/' }
         val shouldNavigate = file.isDirectory && !_uiState.value.isSeriesView && when (_uiState.value.appMode) {
-            AppMode.BOOK -> slashCount < 3 
+            AppMode.BOOK -> slashCount < 4 
             AppMode.PHOTO_BOOK -> slashCount < 3 
             AppMode.MAGAZINE -> slashCount < 1 
             AppMode.WEBTOON -> slashCount < 1 
@@ -288,10 +289,12 @@ class ComicViewModel(
             return
         }
 
+        // 도서 모드 상세페이지에서는 항목을 항상 뷰어로 열도록 수정!
         val isViewerItem = if (_uiState.value.isSeriesView) {
             when (_uiState.value.appMode) {
-                AppMode.MANGA, AppMode.BOOK -> !file.isDirectory
-                else -> true 
+                AppMode.BOOK -> true
+                AppMode.MANGA -> !file.isDirectory
+                else -> true
             }
         } else if (_uiState.value.isSearchMode && file.isDirectory) {
             when (_uiState.value.appMode) {
@@ -317,11 +320,24 @@ class ComicViewModel(
             
             val episodes = if (_uiState.value.isSearchMode && _uiState.value.searchResults.isNotEmpty()) _uiState.value.searchResults else if (_uiState.value.isSeriesView) _uiState.value.seriesEpisodes else _uiState.value.currentFiles
             val index = episodes.indexOfFirst { it.path == file.path }
-            _uiState.update { it.copy(
-                selectedZipPath = file.path, 
-                viewerPosterUrl = file.metadata?.posterUrl ?: it.selectedMetadata?.posterUrl,
-                currentChapterIndex = index
-            ) }
+            
+            val isPdf = file.path.endsWith(".pdf", ignoreCase = true) || (_uiState.value.appMode == AppMode.BOOK && !file.path.endsWith(".zip", ignoreCase = true) && !file.path.endsWith(".cbz", ignoreCase = true))
+
+            if (isPdf) {
+                _uiState.update { it.copy(
+                    selectedPdfPath = file.path,
+                    selectedZipPath = null,
+                    viewerPosterUrl = file.metadata?.posterUrl ?: it.selectedMetadata?.posterUrl,
+                    currentChapterIndex = index
+                ) }
+            } else {
+                _uiState.update { it.copy(
+                    selectedZipPath = file.path, 
+                    selectedPdfPath = null,
+                    viewerPosterUrl = file.metadata?.posterUrl ?: it.selectedMetadata?.posterUrl,
+                    currentChapterIndex = index
+                ) }
+            }
             return
         }
         
@@ -367,6 +383,7 @@ class ComicViewModel(
                     
                     val processedFiles = processScanResult(file.path, result.items)
                     
+                    // 도서 모드에서는 메타데이터 챕터 대신 무조건 실제 파일 목록을 사용하여 PDF 확장자가 유지되도록 보장!
                     _uiState.update { it.copy(
                         selectedMetadata = metadata ?: ComicMetadata(title = file.name, summary = "상세 정보가 없습니다."),
                         seriesEpisodes = if (_uiState.value.appMode != AppMode.BOOK && metadata?.chapters?.isNotEmpty() == true) processScanResult(file.path, metadata.chapters!!) else processedFiles,
@@ -391,11 +408,23 @@ class ComicViewModel(
         
         if (nextIndex in episodes.indices) {
             val nextFile = episodes[nextIndex]
-            _uiState.update { it.copy(
-                selectedZipPath = nextFile.path,
-                viewerPosterUrl = nextFile.metadata?.posterUrl ?: it.selectedMetadata?.posterUrl,
-                currentChapterIndex = nextIndex
-            ) }
+            val isPdf = nextFile.path.endsWith(".pdf", ignoreCase = true) || (_uiState.value.appMode == AppMode.BOOK && !nextFile.path.endsWith(".zip", ignoreCase = true) && !nextFile.path.endsWith(".cbz", ignoreCase = true))
+
+            if (isPdf) {
+                _uiState.update { it.copy(
+                    selectedZipPath = null,
+                    selectedPdfPath = nextFile.path,
+                    viewerPosterUrl = nextFile.metadata?.posterUrl ?: it.selectedMetadata?.posterUrl,
+                    currentChapterIndex = nextIndex
+                ) }
+            } else {
+                _uiState.update { it.copy(
+                    selectedZipPath = nextFile.path,
+                    selectedPdfPath = null,
+                    viewerPosterUrl = nextFile.metadata?.posterUrl ?: it.selectedMetadata?.posterUrl,
+                    currentChapterIndex = nextIndex
+                ) }
+            }
         }
     }
 
@@ -479,7 +508,7 @@ class ComicViewModel(
     }
 
     fun closeViewer() { 
-        _uiState.update { it.copy(selectedZipPath = null, viewerPosterUrl = null, currentChapterIndex = -1) } 
+        _uiState.update { it.copy(selectedZipPath = null, selectedPdfPath = null, viewerPosterUrl = null, currentChapterIndex = -1) } 
     }
 
     fun onBack() {
@@ -487,7 +516,7 @@ class ComicViewModel(
             toggleSearchMode(false)
             return
         }
-        if (_uiState.value.selectedZipPath != null) {
+        if (_uiState.value.selectedZipPath != null || _uiState.value.selectedPdfPath != null) {
             closeViewer()
             return
         }
