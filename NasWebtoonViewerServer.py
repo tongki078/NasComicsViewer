@@ -42,6 +42,9 @@ log_queue = queue.Queue()
 db_queue = queue.Queue()
 scanning_pool = ThreadPoolExecutor(max_workers=10)
 
+# 페이지 수 캐시 (PDF/EPUB 로딩 속도 향상용)
+doc_page_cache = {}
+
 def add_web_log(msg, type="INFO"):
     prefix = "✅ [SUCCESS]" if type=="SUCCESS" else "❌ [FAILED]" if type=="ERROR" else "🚢 [INIT]" if type=="INIT" else "📝 [UPDATE]"
     formatted_msg = f"{prefix} {msg}"
@@ -53,8 +56,20 @@ def normalize_nfc(s):
     if s is None: return ""
     return unicodedata.normalize('NFC', str(s))
 
+def get_abs_path(rel_path):
+    """NFC와 NFD 경로를 모두 시도하여 실제 존재하는 절대 경로를 반환합니다."""
+    if not rel_path: return BASE_PATH
+    rel_nfc = normalize_nfc(rel_path)
+    abs_path = os.path.abspath(os.path.join(BASE_PATH, rel_nfc)).replace(os.sep, '/')
+    if os.path.exists(abs_path): return abs_path
+    rel_nfd = unicodedata.normalize('NFD', rel_nfc)
+    abs_path_nfd = os.path.abspath(os.path.join(BASE_PATH, rel_nfd)).replace(os.sep, '/')
+    if os.path.exists(abs_path_nfd): return abs_path_nfd
+    return abs_path
+
 def is_excluded(name):
-    return normalize_nfc(name) in [normalize_nfc(f) for f in EXCLUDED_FOLDERS]
+    n = normalize_nfc(name)
+    return n in [normalize_nfc(f) for f in EXCLUDED_FOLDERS] or n.lower() == "kavita.yaml"
 
 def get_path_hash(path):
     p = os.path.abspath(path).replace(os.sep, '/')
@@ -116,8 +131,7 @@ def generate_file_thumbnail(file_path, cache_path):
             doc.close()
             return True
         doc.close()
-    except Exception as e:
-        logger.error(f"Thumbnail generation error for {file_path}: {e}")
+    except: pass
     return False
 
 def generate_zip_thumbnail(zip_path, cache_path):
@@ -134,37 +148,33 @@ def generate_zip_thumbnail(zip_path, cache_path):
     except: pass
     return False
 
-def find_first_image_recursive(path, depth_limit=6): # 탐색 깊이를 6으로 확대
+def find_first_image_recursive(path, depth_limit=4):
     if depth_limit <= 0: return None
     try:
         with os.scandir(path) as it:
-            ents = sorted(list(it), key=lambda x: x.name)
-            # 1. 현재 폴더에서 이미지 파일 우선 찾기
-            for e in ents:
-                if is_image_file(e.name):
+            entries = sorted(list(it), key=lambda x: x.name)
+            subdirs = []
+            comic_files = []
+            for e in entries:
+                if e.name.startswith('.') or is_excluded(e.name): continue
+                if e.is_file() and is_image_file(e.name):
                     return os.path.relpath(e.path, BASE_PATH).replace(os.sep, '/')
-            # 2. 하위 폴더로 더 깊이 들어가기
-            for e in ents:
-                if e.is_dir() and not is_excluded(e.name):
-                    res = find_first_image_recursive(e.path, depth_limit - 1)
-                    if res: return res
-            # 3. 만화/도서 파일 찾기 (찾으면 썸네일 생성 대상이 됨)
-            for e in ents:
-                if is_comic_file(e.name):
-                    return "zip_thumb://" + os.path.relpath(e.path, BASE_PATH).replace(os.sep, '/')
+                if e.is_dir(): subdirs.append(e.path)
+                elif e.is_file() and is_comic_file(e.name): comic_files.append(e.path)
+            for sd in subdirs[:5]:
+                res = find_first_image_recursive(sd, depth_limit - 1)
+                if res: return res
+            if comic_files: return "zip_thumb://" + os.path.relpath(comic_files[0], BASE_PATH).replace(os.sep, '/')
     except: pass
     return None
-
-
 
 def get_comic_info(abs_path, rel_path):
     title = normalize_nfc(os.path.basename(abs_path))
     poster = None
     meta_dict = {"summary": "줄거리 정보가 없습니다.", "writers": [], "genres": [], "status": "Unknown", "publisher": ""}
-
     if os.path.isdir(abs_path):
-        # 1. 메타데이터 파일 확인
         kavita_path = os.path.join(abs_path, "kavita.yaml")
+        if not os.path.exists(kavita_path): kavita_path = os.path.join(abs_path, "Kavita.yaml")
         if os.path.exists(kavita_path):
             try:
                 with open(kavita_path, 'r', encoding='utf-8') as f:
@@ -180,204 +190,85 @@ def get_comic_info(abs_path, rel_path):
                             if val.startswith(('http://', 'https://')): poster = val; break
                             poster = os.path.join(rel_path, val).replace(os.sep, '/'); break
             except: pass
-
-        # 2. 포스터 주소만 찾기 (렌더링은 안 함)
-        if not poster:
-            poster = find_first_image_recursive(abs_path, depth_limit=6)
+        if not poster: poster = find_first_image_recursive(abs_path, depth_limit=4)
     else:
         poster = "zip_thumb://" + rel_path
         title = os.path.splitext(title)[0]
-
-    # 3. 주소 정규화 (앱 통신용)
     if poster and not poster.startswith("http"):
-        if poster.startswith("zip_thumb://"):
-            poster = "zip_thumb://" + urllib.parse.quote(poster[12:], safe='/')
-        else:
-            poster = urllib.parse.quote(poster, safe='/')
-
+        if poster.startswith("zip_thumb://"): poster = "zip_thumb://" + urllib.parse.quote(poster[12:], safe='/')
+        else: poster = urllib.parse.quote(poster, safe='/')
     meta_dict['poster_url'] = poster
     return title, poster, json.dumps(meta_dict, ensure_ascii=False)
 
-def scan_task(abs_path, series_depth):
+def scan_folder_sync(abs_path, series_depth):
     try:
         abs_path = normalize_nfc(abs_path)
-        if is_excluded(os.path.basename(abs_path)): return
+        if not os.path.exists(abs_path): return []
         rel = normalize_nfc(os.path.relpath(abs_path, BASE_PATH).replace(os.sep, '/'))
         if rel == ".": rel = ""
         depth = get_depth(rel)
         scan_status["current_item"] = os.path.basename(abs_path)
-
         has_comic_files = False
         if os.path.isdir(abs_path):
-            try:
-                with os.scandir(abs_path) as it:
-                    for e in it:
-                        if is_comic_file(e.name):
-                            has_comic_files = True;
-                            break
-            except:
-                pass
-
+            with os.scandir(abs_path) as it:
+                for e in it:
+                    if is_comic_file(e.name): has_comic_files = True; break
         is_series_level = (depth >= series_depth) or has_comic_files
         title, poster, meta = get_comic_info(abs_path, rel)
-        p_hash = get_path_hash(os.path.dirname(abs_path))
+        item = (get_path_hash(abs_path), get_path_hash(os.path.dirname(abs_path)), abs_path, rel, os.path.basename(abs_path), 1 if os.path.isdir(abs_path) else 0, poster, title, depth, time.time(), meta)
 
-        item = (get_path_hash(abs_path), p_hash, abs_path, rel, normalize_nfc(os.path.basename(abs_path)),
-                1 if os.path.isdir(abs_path) else 0, poster, title, depth, time.time(), meta)
-        db_queue.put([item])
+        # 1. 현재 폴더 정보 저장
+        conn = sqlite3.connect(METADATA_DB_PATH, timeout=20)
+        conn.execute('INSERT OR REPLACE INTO entries VALUES (?,?,?,?,?,?,?,?,?,?,?)', item)
+
+        # 2. 직계 하위 항목들 즉시 스캔 (브라우징을 위해)
+        child_items = []
+        if os.path.isdir(abs_path):
+            with os.scandir(abs_path) as it:
+                for e in it:
+                    if not is_excluded(e.name) and (e.is_dir() or is_comic_file(e.name)):
+                        e_rel = normalize_nfc(os.path.relpath(e.path, BASE_PATH).replace(os.sep, '/'))
+                        # 하위 항목의 포스터는 일단 부모 포스터나 기본값으로 빠르게 설정 (상세 스캔은 나중에)
+                        e_poster = "zip_thumb://" + urllib.parse.quote(e_rel, safe='/') if is_comic_file(e.name) else poster
+                        child_items.append((get_path_hash(e.path), get_path_hash(abs_path), normalize_nfc(e.path), e_rel, normalize_nfc(e.name), 1 if e.is_dir() else 0, e_poster, normalize_nfc(os.path.splitext(e.name)[0]), depth + 1, time.time(), "{}"))
+            if child_items:
+                conn.executemany('INSERT OR REPLACE INTO entries VALUES (?,?,?,?,?,?,?,?,?,?,?)', child_items)
+
+        conn.commit()
+        conn.close()
+
+        # 3. 비동기 전체 스캔 (하위 깊이까지)
+        if not is_series_level and os.path.isdir(abs_path):
+            for child in child_items:
+                if child[5] == 1: # Directory
+                    scan_status["total"] += 1
+                    scanning_pool.submit(scan_task, child[2], series_depth)
 
         scan_status["processed"] += 1
         scan_status["success"] += 1
-
-        if os.path.isdir(abs_path):
-            if is_series_level:
-                add_web_log(f"'{title}' updated", "UPDATE")
-                ep_items = []
-                with os.scandir(abs_path) as it:
-                    for e in it:
-                        if (is_comic_file(e.name) or e.is_dir()) and not is_excluded(e.name):
-                            e_rel = normalize_nfc(os.path.relpath(e.path, BASE_PATH).replace(os.sep, '/'))
-                            e_poster = "zip_thumb://" + urllib.parse.quote(e_rel, safe='/') if is_comic_file(
-                                e.name) else poster
-                            ep_items.append((get_path_hash(e.path), get_path_hash(abs_path), normalize_nfc(e.path),
-                                             e_rel, normalize_nfc(e.name),
-                                             1 if e.is_dir() else 0, e_poster,
-                                             normalize_nfc(os.path.splitext(e.name)[0]), depth + 1, time.time(), "{}"))
-                if ep_items: db_queue.put(ep_items)
-            else:
-                with os.scandir(abs_path) as it:
-                    for e in it:
-                        if e.is_dir() and not is_excluded(e.name):
-                            scan_status["total"] += 1
-                            scanning_pool.submit(scan_task, e.path, series_depth)
+        return child_items
     except Exception as e:
         scan_status["failed"] += 1
-        add_web_log(f"Error: {e}", "ERROR")
+        logger.error(f"Scan error in {abs_path}: {e}")
+        return []
 
+def scan_task(abs_path, series_depth):
+    scan_folder_sync(abs_path, series_depth)
     if scan_status["processed"] >= scan_status["total"] > 0:
         scan_status["is_running"] = False
         add_web_log(f"{scan_status['current_type']} Completed!", "SUCCESS")
 
-def start_full_scan(target_type):
-    scan_status["is_running"] = True
-    scan_status["current_type"] = target_type
-    scan_status["processed"] = 0
-    scan_status["success"] = 0
-    scan_status["failed"] = 0
-    scan_status["total"] = 0
-    scan_status["logs"] = []
-    if target_type == "WEBTOON":
-        webtoon_root = os.path.join(BASE_PATH, "웹툰")
-        if os.path.exists(webtoon_root):
-            add_web_log("Initializing Webtoon Scan...", "INIT")
-            with os.scandir(webtoon_root) as it:
-                for entry in it:
-                    if entry.is_dir() and normalize_nfc(entry.name) in WEBTOON_CATEGORIES and not is_excluded(entry.name):
-                        scan_status["total"] += 1
-                        scanning_pool.submit(scan_task, entry.path, 3)
-    elif target_type == "MAGAZINE":
-        magazine_root = os.path.join(BASE_PATH, "잡지")
-        if os.path.exists(magazine_root):
-            add_web_log("Initializing Magazine Scan...", "INIT")
-            scan_status["total"] += 1
-            scanning_pool.submit(scan_task, magazine_root, 2)
-    elif target_type == "PHOTO_BOOK":
-        photobook_root = os.path.join(BASE_PATH, "화보")
-        if os.path.exists(photobook_root):
-            add_web_log("Initializing Photo Book Scan...", "INIT")
-            scan_status["total"] += 1
-            scanning_pool.submit(scan_task, photobook_root, 4)
-    elif target_type == "BOOK":
-        book_root = os.path.join(BASE_PATH, "책")
-        if os.path.exists(book_root):
-            add_web_log("Initializing Book Scan...", "INIT")
-            scan_status["total"] += 1
-            scanning_pool.submit(scan_task, book_root, 5)
-
-@app.route('/admin')
-def index():
-    html = """
-    <!DOCTYPE html><html><head><title>NasWebtoon Admin</title>
-    <style>
-        body { font-family: 'Segoe UI', sans-serif; background: #121212; color: #eee; padding: 40px; }
-        .container { max-width: 1000px; margin: 0 auto; background: #1e1e1e; padding: 30px; border-radius: 12px; }
-        .grid-buttons { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 20px; margin-bottom: 30px; }
-        .btn { padding: 20px; border-radius: 8px; border: none; font-size: 16px; font-weight: bold; cursor: pointer; transition: 0.3s; color: white; }
-        .btn-webtoon { background: #E91E63; } .btn-magazine { background: #2196F3; } .btn-photobook { background: #9C27B0; } .btn-book { background: #4CAF50; }
-        .btn:hover { opacity: 0.8; transform: translateY(-2px); }
-        .status-box { background: #252525; padding: 20px; border-radius: 8px; margin-bottom: 20px; border: 1px solid #333; }
-        .log-window { background: #000; color: #0f0; padding: 15px; border-radius: 4px; height: 400px; overflow-y: auto; font-family: 'Consolas', monospace; font-size: 13px; }
-        .progress-container { background: #333; height: 10px; border-radius: 5px; margin-top: 10px; overflow: hidden; }
-        .progress-bar { background: #4caf50; height: 100%; width: 0%; transition: 0.3s; }
-    </style>
-    </head><body>
-        <div class="container">
-            <h1>🛠️ Nas 통합 콘텐츠 관리</h1>
-            <div class="grid-buttons">
-                <button class="btn btn-webtoon" onclick="startScan('WEBTOON')">웹툰 메타데이터 갱신</button>
-                <button class="btn btn-magazine" onclick="startScan('MAGAZINE')">잡지 메타데이터 갱신</button>
-                <button class="btn btn-photobook" onclick="startScan('PHOTO_BOOK')">화보 메타데이터 갱신</button>
-                <button class="btn btn-book" onclick="startScan('BOOK')">도서 메타데이터 갱신</button>
-            </div>
-            <div class="status-box">
-                <div id="statusLabel">상태: 대기 중</div>
-                <div class="progress-container"><div id="progressBar" class="progress-bar"></div></div>
-                <div style="margin-top: 10px; display: flex; justify-content: space-between; font-size: 14px;">
-                    <span id="progressText">0 / 0</span>
-                    <span id="percentText">0%</span>
-                </div>
-            </div>
-            <div class="log-window" id="logConsole"></div>
-        </div>
-        <script>
-            function startScan(type) {
-                var url = '/start_scan?type=' + type;
-                fetch(url).then(function(response) { return response.json(); });
-                var console = document.getElementById('logConsole');
-                console.innerHTML = '<div>[' + type + '] 스캔 시작 중...</div>';
-            }
-            var evtSource = new EventSource("/stream_logs");
-            evtSource.onmessage = function(event) {
-                var data = JSON.parse(event.data);
-                var statusLabel = document.getElementById('statusLabel');
-                var progressText = document.getElementById('progressText');
-                var percentText = document.getElementById('percentText');
-                var progressBar = document.getElementById('progressBar');
-                var logConsole = document.getElementById('logConsole');
-                var runningMsg = data.is_running ? data.current_type + " 처리 중..." : "대기 중";
-                statusLabel.innerText = "상태: " + runningMsg + " (" + data.current_item + ")";
-                progressText.innerText = data.processed + " / " + data.total;
-                var percent = data.total > 0 ? Math.round((data.processed / data.total) * 100) : 0;
-                percentText.innerText = percent + "%";
-                progressBar.style.width = percent + "%";
-                if (data.new_log) {
-                    var div = document.createElement('div');
-                    div.innerText = data.new_log;
-                    logConsole.appendChild(div);
-                    logConsole.scrollTop = logConsole.scrollHeight;
-                }
-            };
-        </script>
-    </body></html>
-    """
-    return render_template_string(html)
-
-@app.route('/start_scan')
-def start_scan_api():
-    t = request.args.get('type', 'WEBTOON')
-    threading.Thread(target=start_full_scan, args=(t,)).start()
-    return jsonify({"status": "started", "type": t})
-
-@app.route('/stream_logs')
-def stream_logs():
-    def generate():
-        while True:
-            new_log = None
-            try: new_log = log_queue.get(timeout=0.5)
-            except: pass
-            data = {"is_running": scan_status["is_running"], "current_type": scan_status["current_type"], "current_item": scan_status["current_item"], "total": scan_status["total"], "processed": scan_status["processed"], "new_log": new_log}
-            yield f"data: {json.dumps(data)}\n\n"
-    return Response(stream_with_context(generate()), mimetype='text/event-stream')
+@app.route('/files')
+def list_files():
+    path = normalize_nfc(urllib.parse.unquote(request.args.get('path', '')))
+    abs_p = get_abs_path(path)
+    items = []
+    if os.path.exists(abs_p) and os.path.isdir(abs_p):
+        for e in os.scandir(abs_p):
+            if not is_excluded(e.name) and (e.is_dir() or is_comic_file(e.name)):
+                e_rel = normalize_nfc(os.path.relpath(e.path, BASE_PATH).replace(os.sep, '/'))
+                items.append({'name': e.name, 'isDirectory': e.is_dir(), 'path': e_rel, 'metadata': {}})
+    return jsonify(items)
 
 @app.route('/scan')
 def scan_comics():
@@ -386,20 +277,30 @@ def scan_comics():
     psize = request.args.get('page_size', 50, type=int)
     conn = sqlite3.connect(METADATA_DB_PATH); conn.row_factory = sqlite3.Row
     placeholders = ','.join(['?'] * len(EXCLUDED_FOLDERS))
+    abs_p = os.path.abspath(os.path.join(BASE_PATH, path)).replace(os.sep, '/')
+    phash = get_path_hash(abs_p)
     if not path or path == "웹툰":
-        query = f"SELECT * FROM entries WHERE depth = 3 AND rel_path LIKE '웹툰/%' AND name NOT IN ({placeholders}) ORDER BY title LIMIT ? OFFSET ?"
+        query = f"SELECT * FROM entries WHERE depth = 3 AND rel_path LIKE '웹툰/%' AND name NOT IN ({placeholders}) AND name NOT LIKE 'kavita.yaml' ORDER BY title LIMIT ? OFFSET ?"
         params = EXCLUDED_FOLDERS + [psize, (page - 1) * psize]
         rows = conn.execute(query, params).fetchall()
-        count_query = f"SELECT COUNT(*) FROM entries WHERE depth = 3 AND rel_path LIKE '웹툰/%' AND name NOT IN ({placeholders})"
+        count_query = f"SELECT COUNT(*) FROM entries WHERE depth = 3 AND rel_path LIKE '웹툰/%' AND name NOT IN ({placeholders}) AND name NOT LIKE 'kavita.yaml'"
         total = conn.execute(count_query, EXCLUDED_FOLDERS).fetchone()[0]
     else:
-        target_root = os.path.join(BASE_PATH, path)
-        phash = get_path_hash(target_root)
-        query = f"SELECT * FROM entries WHERE parent_hash = ? AND name NOT IN ({placeholders}) ORDER BY is_dir DESC, title LIMIT ? OFFSET ?"
+        query = f"SELECT * FROM entries WHERE parent_hash = ? AND name NOT IN ({placeholders}) AND name NOT LIKE 'kavita.yaml' ORDER BY is_dir DESC, title LIMIT ? OFFSET ?"
         params = [phash] + EXCLUDED_FOLDERS + [psize, (page-1)*psize]
         rows = conn.execute(query, params).fetchall()
-        count_query = f"SELECT COUNT(*) FROM entries WHERE parent_hash = ? AND name NOT IN ({placeholders})"
+        count_query = f"SELECT COUNT(*) FROM entries WHERE parent_hash = ? AND name NOT IN ({placeholders}) AND name NOT LIKE 'kavita.yaml'"
         total = conn.execute(count_query, [phash] + EXCLUDED_FOLDERS).fetchone()[0]
+        if not rows and page == 1:
+            conn.close()
+            real_abs_path = get_abs_path(path)
+            if os.path.exists(real_abs_path):
+                depth = 3
+                if path.startswith("잡지"): depth = 2
+                elif path.startswith("화보"): depth = 4
+                elif path.startswith("책"): depth = 5
+                scan_folder_sync(real_abs_path, depth)
+                return scan_comics()
     items = []
     for r in rows:
         meta = json.loads(r['metadata'] or '{}'); meta['poster_url'] = r['poster_url']
@@ -412,48 +313,39 @@ def download():
     raw_path = request.args.get('path', '')
     p = normalize_nfc(urllib.parse.unquote(raw_path)).replace('+', ' ')
     if not p: return "Path required", 400
-
-    # 외부 URL 처리
     if p.startswith("http"):
         try:
-            headers = {'User-Agent': 'Mozilla/5.0'}
-            req = urllib.request.Request(p, headers=headers)
+            req = urllib.request.Request(p, headers={'User-Agent': 'Mozilla/5.0'})
             with urllib.request.urlopen(req, timeout=10) as response:
                 return send_file(io.BytesIO(response.read()), mimetype=response.headers.get_content_type() or 'image/jpeg')
         except: return "Image Load Failed", 500
-
-    # 썸네일 캐시 및 렌더링 처리
     if p.startswith("zip_thumb://"):
         rel_path = p[12:]
         cache_key = hashlib.md5(normalize_nfc(rel_path).encode('utf-8')).hexdigest() + ".jpg"
         cache_path = os.path.join(THUMB_CACHE_DIR, cache_key)
         if os.path.exists(cache_path): return send_from_directory(THUMB_CACHE_DIR, cache_key)
-
-        azp = os.path.abspath(os.path.join(BASE_PATH, rel_path)).replace('\\', '/')
+        azp = get_abs_path(rel_path)
         if azp.lower().endswith(('.pdf', '.epub')):
             if generate_file_thumbnail(azp, cache_path): return send_from_directory(THUMB_CACHE_DIR, cache_key)
         else:
             if generate_zip_thumbnail(azp, cache_path): return send_from_directory(THUMB_CACHE_DIR, cache_key)
         return "No Image", 404
-
-    target_path = os.path.abspath(os.path.join(BASE_PATH, p)).replace('\\', '/')
+    target_path = get_abs_path(p)
     return send_from_directory(os.path.dirname(target_path), os.path.basename(target_path))
 
 @app.route('/zip_entries')
 def zip_entries():
     path = urllib.parse.unquote_plus(request.args.get('path', ''))
-    p_nfc = normalize_nfc(path); p_nfd = unicodedata.normalize('NFD', path)
-    abs_p = os.path.abspath(os.path.join(BASE_PATH, p_nfc)).replace('\\', '/')
-    if not os.path.exists(abs_p):
-        abs_p = os.path.abspath(os.path.join(BASE_PATH, p_nfd)).replace('\\', '/')
-        if not os.path.exists(abs_p): return "File Not Found", 404
-
+    abs_p = get_abs_path(path)
+    if not os.path.exists(abs_p): return "File Not Found", 404
     if abs_p.lower().endswith(('.pdf', '.epub')):
+        if abs_p in doc_page_cache: return jsonify(doc_page_cache[abs_p])
         if HAS_FITZ:
             try:
                 doc = fitz.open(abs_p)
                 pages = [f"page_{i:04d}.jpg" for i in range(doc.page_count)]
                 doc.close()
+                doc_page_cache[abs_p] = pages
                 return jsonify(pages)
             except: return jsonify([])
         return jsonify([])
@@ -462,47 +354,47 @@ def zip_entries():
         with zipfile.ZipFile(abs_p, 'r') as z: return jsonify(sorted([n for n in z.namelist() if is_image_file(n)]))
     except: return jsonify([])
 
-
 @app.route('/download_zip_entry')
 def download_zip_entry():
     path = urllib.parse.unquote_plus(request.args.get('path', ''))
     entry = urllib.parse.unquote_plus(request.args.get('entry', ''))
-    p_nfc = normalize_nfc(path);
-    p_nfd = unicodedata.normalize('NFD', path)
-    abs_p = os.path.abspath(os.path.join(BASE_PATH, p_nfc)).replace('\\', '/')
-    if not os.path.exists(abs_p): abs_p = os.path.abspath(os.path.join(BASE_PATH, p_nfd)).replace('\\', '/')
-
+    abs_p = get_abs_path(path)
     if abs_p.lower().endswith(('.pdf', '.epub')) and entry.startswith("page_") and HAS_FITZ:
         try:
             page_idx = int(entry[5:9])
-            doc = fitz.open(abs_p);
+            doc = fitz.open(abs_p)
             page = doc.load_page(page_idx)
             pix = page.get_pixmap(matrix=fitz.Matrix(2.0, 2.0))
-            img_data = pix.tobytes("jpg");
+            img_data = pix.tobytes("jpg")
             doc.close()
             return send_file(io.BytesIO(img_data), mimetype='image/jpeg')
-        except:
-            return "Error", 500
+        except: return "Error", 500
     if os.path.isdir(abs_p): return send_from_directory(abs_p, entry)
     try:
         with zipfile.ZipFile(abs_p, 'r') as z:
             with z.open(entry) as f: return send_file(io.BytesIO(f.read()), mimetype='image/jpeg')
-    except:
-        return "Error", 500
-
+    except: return "Error", 500
 
 @app.route('/metadata')
 def get_metadata():
     path = normalize_nfc(urllib.parse.unquote(request.args.get('path', '')))
     if not path: return jsonify({})
-    abs_p = os.path.join(BASE_PATH, path); phash = get_path_hash(abs_p)
+    real_abs_path = get_abs_path(path)
+    phash = get_path_hash(real_abs_path)
     conn = sqlite3.connect(METADATA_DB_PATH); conn.row_factory = sqlite3.Row
     row = conn.execute("SELECT * FROM entries WHERE path_hash = ?", (phash,)).fetchone()
+    if not row:
+        depth = 3
+        if path.startswith("잡지"): depth = 2
+        elif path.startswith("화보"): depth = 4
+        elif path.startswith("책"): depth = 5
+        scan_folder_sync(real_abs_path, depth)
+        row = conn.execute("SELECT * FROM entries WHERE path_hash = ?", (phash,)).fetchone()
     if not row: conn.close(); return jsonify({})
     meta = json.loads(row['metadata'] or '{}')
     meta['poster_url'] = row['poster_url']; meta['title'] = normalize_nfc(row['title'] or row['name'])
     placeholders = ','.join(['?'] * len(EXCLUDED_FOLDERS))
-    query = f"SELECT * FROM entries WHERE parent_hash = ? AND name NOT IN ({placeholders}) ORDER BY name"
+    query = f"SELECT * FROM entries WHERE parent_hash = ? AND name NOT IN ({placeholders}) AND name NOT LIKE 'kavita.yaml' ORDER BY name"
     ep_rows = conn.execute(query, [phash] + EXCLUDED_FOLDERS).fetchall()
     chapters = []
     if ep_rows:
@@ -514,22 +406,6 @@ def get_metadata():
     meta['chapters'] = chapters
     conn.close()
     return jsonify(meta)
-
-@app.route('/search')
-def search_comics():
-    query = request.args.get('query', '')
-    if not query: return jsonify({'total_items': 0, 'items': []})
-    conn = sqlite3.connect(METADATA_DB_PATH); conn.row_factory = sqlite3.Row
-    q = f"%{query}%"
-    placeholders = ','.join(['?'] * len(EXCLUDED_FOLDERS))
-    query_str = f"SELECT * FROM entries WHERE (title LIKE ? OR name LIKE ?) AND depth >= 2 AND name NOT IN ({placeholders}) ORDER BY title LIMIT 100"
-    rows = conn.execute(query_str, [q, q] + EXCLUDED_FOLDERS).fetchall()
-    items = []
-    for r in rows:
-        meta = json.loads(r['metadata'] or '{}'); meta['poster_url'] = r['poster_url']
-        items.append({'name': r['title'] or r['name'], 'isDirectory': bool(r['is_dir']), 'path': r['rel_path'], 'metadata': meta})
-    conn.close()
-    return jsonify({'total_items': len(items), 'items': items})
 
 if __name__ == '__main__':
     init_db()
