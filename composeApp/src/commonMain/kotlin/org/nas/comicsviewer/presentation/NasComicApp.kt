@@ -610,7 +610,7 @@ fun FlowRow(mainAxisSpacing: androidx.compose.ui.unit.Dp = 0.dp, crossAxisSpacin
 // ----------------------------------------------------
 private val viewerImageCache = mutableMapOf<String, ImageBitmap>()
 private val viewerCacheKeys = mutableListOf<String>()
-private const val MAX_CACHE_SIZE = 30
+private var MAX_CACHE_SIZE = 40 // 기본 캐시 사이즈 상향 (30 -> 40)
 
 private val cacheLock = Mutex()
 private val downloadLocks = mutableMapOf<String, Mutex>()
@@ -644,8 +644,16 @@ private suspend fun loadAndCacheImage(zipPath: String, imageName: String, manage
         // Lock 획득 후 다시 캐시 확인
         getCachedBitmap(cacheKey)?.let { return@withLock it }
         
+        // 1. 이미지 데이터 추출 (네트워크 IO)
         val bytes = manager.extractImage(zipPath, imageName)
-        val bitmap = bytes?.let { withContext(Dispatchers.Main) { it.toImageBitmap() } }
+        
+        // 2. 비트맵 디코딩 (UI 블로킹 방지를 위해 Default 디스패처에서 실행)
+        // 기존 Main에서 Default로 변경하여 스와이프 버벅임 해결
+        val bitmap = bytes?.let { 
+            withContext(Dispatchers.Default) { 
+                it.toImageBitmap() 
+            } 
+        }
         
         if (bitmap != null) {
             putCachedBitmap(cacheKey, bitmap)
@@ -685,6 +693,7 @@ fun WebtoonViewer(
     LaunchedEffect(posterUrl) { posterUrl?.let { posterBitmap = repo.getImage(it) } }
 
     LaunchedEffect(path) {
+        MAX_CACHE_SIZE = 50 // 웹툰 모드는 세로로 길어서 좀 더 많이 캐시
         isListLoaded = false; imageNames.clear(); viewerImageCache.clear(); viewerCacheKeys.clear()
         try {
             val names = manager.listImagesInZip(path)
@@ -700,13 +709,10 @@ fun WebtoonViewer(
         if (isListLoaded) {
             viewModel.saveReadingPosition(path, listState.firstVisibleItemIndex)
             
-            // 디바운스: 빠른 스크롤 도중 불필요한 네트워크 요청 방지
-            delay(100)
-            
-            // LaunchedEffect가 스크롤 변경으로 취소되더라도 프리패치는 중단되지 않도록 scope.launch 사용
+            // 프리패치 범위를 3개에서 5개로 확장
             scope.launch {
                 val currentIndex = listState.firstVisibleItemIndex
-                for (i in 1..3) {
+                for (i in 1..5) {
                     val nextIndex = currentIndex + i
                     if (nextIndex < imageNames.size) {
                         launch {
@@ -856,6 +862,7 @@ fun MagazineViewer(
     LaunchedEffect(posterUrl) { posterUrl?.let { posterBitmap = repo.getImage(it) } }
 
     LaunchedEffect(path) {
+        MAX_CACHE_SIZE = 60 // 잡지 모드는 두 장씩 보여주므로 캐시 확장
         isListLoaded = false; imageNames.clear(); viewerImageCache.clear(); viewerCacheKeys.clear()
         try {
             val names = manager.listImagesInZip(path)
@@ -871,12 +878,13 @@ fun MagazineViewer(
         if (isListLoaded) {
             viewModel.saveReadingPosition(path, pagerState.currentPage * 2)
             
-            delay(100)
+            // 프리패치 범위를 더 공격적으로 설정 (+3페이지(6장) 앞까지)
             scope.launch {
                 val currentIndex = pagerState.currentPage * 2
                 val prefetchIndices = listOf(
                     currentIndex + 2, currentIndex + 3,
                     currentIndex + 4, currentIndex + 5,
+                    currentIndex + 6, currentIndex + 7,
                     currentIndex - 1, currentIndex - 2
                 )
                 prefetchIndices.forEach { idx ->
@@ -953,6 +961,7 @@ fun BookViewer(
     LaunchedEffect(posterUrl) { posterUrl?.let { posterBitmap = repo.getImage(it) } }
 
     LaunchedEffect(path) {
+        MAX_CACHE_SIZE = 40
         isListLoaded = false; imageNames.clear(); viewerImageCache.clear(); viewerCacheKeys.clear()
         try {
             val names = manager.listImagesInZip(path)
@@ -968,10 +977,9 @@ fun BookViewer(
         if (isListLoaded) {
             viewModel.saveReadingPosition(path, pagerState.currentPage)
             
-            delay(100)
             scope.launch {
                 val currentIndex = pagerState.currentPage
-                val prefetchIndices = listOf(currentIndex + 1, currentIndex + 2, currentIndex - 1)
+                val prefetchIndices = listOf(currentIndex + 1, currentIndex + 2, currentIndex + 3, currentIndex - 1)
                 prefetchIndices.forEach { idx ->
                     if (idx in imageNames.indices) {
                         launch {
@@ -1039,6 +1047,7 @@ fun PhotoBookViewer(
     LaunchedEffect(posterUrl) { posterUrl?.let { posterBitmap = repo.getImage(it) } }
 
     LaunchedEffect(path) {
+        MAX_CACHE_SIZE = 60 // 화보 모드는 고해상도라 캐시를 넉넉하게 잡음
         isListLoaded = false; imageNames.clear(); viewerImageCache.clear(); viewerCacheKeys.clear()
         try {
             val names = manager.listImagesInZip(path)
@@ -1054,11 +1063,15 @@ fun PhotoBookViewer(
         if (isListLoaded) {
             viewModel.saveReadingPosition(path, pagerState.currentPage)
             
-            delay(100)
+            // 화보 모드 최적화: 딜레이 없이 즉시 프리패치 시작 & 범위 확장 (+5페이지)
             scope.launch {
                 val currentIndex = pagerState.currentPage
-                val prefetchIndices = listOf(currentIndex + 1, currentIndex + 2, currentIndex - 1)
-                prefetchIndices.forEach { idx ->
+                val prefetchIndices = mutableListOf<Int>()
+                for (i in 1..5) prefetchIndices.add(currentIndex + i)
+                prefetchIndices.add(currentIndex - 1)
+                prefetchIndices.add(currentIndex - 2)
+                
+                prefetchIndices.distinct().forEach { idx ->
                     if (idx in imageNames.indices) {
                         launch {
                             loadAndCacheImage(path, imageNames[idx], manager)

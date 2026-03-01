@@ -12,12 +12,16 @@ actual fun ByteArray.toImageBitmap(): ImageBitmap? {
         }
         BitmapFactory.decodeByteArray(this, 0, this.size, options)
         
-        // 화보 감상에 적합하면서도 메모리 OOM을 방지하는 최적 사이즈 (약 1.5MP)
-        // 기존 1200x1800에서 1000x1500으로 하향 조정하여 로딩 속도 및 메모리 안정성 확보
-        options.inSampleSize = calculateInSampleSize(options, 1000, 1500)
+        // 화보 감상에 적합하면서도 메모리 OOM을 방지하는 최적 사이즈
+        // 로딩 속도를 위해 1200x1800 수준으로 유지
+        options.inSampleSize = calculateInSampleSize(options, 1200, 1800)
         options.inJustDecodeBounds = false
-        // 메모리 절약을 위해 RGB_565 사용 고려 가능하나 화질을 위해 기본값 유지 (필요시 변경)
-        options.inPreferredConfig = android.graphics.Bitmap.Config.ARGB_8888
+        
+        // 화보 모드에서 로딩 속도와 메모리 효율을 극대화하기 위해 RGB_565 사용
+        // ARGB_8888 대비 메모리 사용량이 절반이며 디코딩 속도가 빠름
+        options.inPreferredConfig = android.graphics.Bitmap.Config.RGB_565
+        // 디코딩 성능 향상을 위한 옵션
+        options.inMutable = false
         
         val bitmap = BitmapFactory.decodeByteArray(this, 0, this.size, options)
         bitmap?.asImageBitmap()
