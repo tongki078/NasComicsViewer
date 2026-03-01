@@ -111,11 +111,8 @@ fun NasComicApp(viewModel: ComicViewModel) {
                         }
                     }
                 }
-                // 메인 리스트에서 로딩 시 (상세 페이지 진입 전) 프리미엄 로딩바 표시
                 if (uiState.isLoading) {
-                    Box(Modifier.fillMaxSize().background(Color.Black.copy(0.4f))) {
-                        HorizontalLoadingBar(Modifier.align(Alignment.TopCenter).padding(top = 60.dp).fillMaxWidth(0.8f))
-                    }
+                    PremiumLoadingOverlay()
                 }
             }
             uiState.errorMessage?.let { msg -> Snackbar(Modifier.align(Alignment.BottomCenter).padding(16.dp), containerColor = Color(0xFF222222), action = { TextButton({ viewModel.clearError() }) { Text("OK") } }) { Text(msg) } }
@@ -124,12 +121,30 @@ fun NasComicApp(viewModel: ComicViewModel) {
 }
 
 @Composable
-fun HorizontalLoadingBar(modifier: Modifier = Modifier) {
+fun PremiumLoadingBar(modifier: Modifier = Modifier, showPercentage: Boolean = true) {
     var progress by remember { mutableStateOf(0f) }
-    val animatedProgress by animateFloatAsState(targetValue = progress, animationSpec = tween(durationMillis = 5000, easing = LinearOutSlowInEasing))
+    val animatedProgress by animateFloatAsState(targetValue = progress, animationSpec = tween(durationMillis = 8000, easing = LinearOutSlowInEasing))
     LaunchedEffect(Unit) { progress = 0.98f }
-    Box(modifier.height(4.dp).clip(CircleShape).background(Color.White.copy(alpha = 0.1f))) {
-        Box(Modifier.fillMaxWidth(animatedProgress).fillMaxHeight().background(Brush.horizontalGradient(listOf(KakaoYellow.copy(alpha = 0.7f), KakaoYellow))))
+    
+    Column(modifier = modifier, horizontalAlignment = Alignment.CenterHorizontally) {
+        Box(Modifier.fillMaxWidth().height(6.dp).clip(RoundedCornerShape(3.dp)).background(Color.White.copy(alpha = 0.1f))) {
+            Box(Modifier.fillMaxWidth(animatedProgress).fillMaxHeight().background(Brush.horizontalGradient(listOf(KakaoYellow.copy(alpha = 0.7f), KakaoYellow))))
+        }
+        if (showPercentage) {
+            Spacer(Modifier.height(12.dp))
+            Text(text = "${(animatedProgress * 100).toInt()}%", color = KakaoYellow, fontSize = 14.sp, fontWeight = FontWeight.Black)
+        }
+    }
+}
+
+@Composable
+fun PremiumLoadingOverlay() {
+    Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.7f)).clickable(enabled = false) {}, Alignment.Center) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.fillMaxWidth().padding(horizontal = 60.dp)) {
+            PremiumLoadingBar(Modifier.fillMaxWidth())
+            Spacer(Modifier.height(8.dp))
+            Text("데이터를 동기화하고 있습니다", color = TextMuted, fontSize = 11.sp)
+        }
     }
 }
 
@@ -139,10 +154,10 @@ fun ViewerLoadingScreen(posterBitmap: ImageBitmap?, title: String = "파일을 �
         if (posterBitmap != null) Image(posterBitmap, null, Modifier.fillMaxSize().alpha(0.2f), contentScale = ContentScale.Crop)
         Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.fillMaxWidth().padding(horizontal = 48.dp)) {
             Text(text = title, color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Bold)
-            Spacer(Modifier.height(24.dp))
-            HorizontalLoadingBar(Modifier.fillMaxWidth())
-            Spacer(Modifier.height(12.dp))
-            Text(text = "파일을 읽는 중...", color = KakaoYellow, fontSize = 12.sp, fontWeight = FontWeight.Medium)
+            Spacer(Modifier.height(30.dp))
+            PremiumLoadingBar(Modifier.fillMaxWidth())
+            Spacer(Modifier.height(4.dp))
+            Text(text = "대용량 파일은 시간이 걸릴 수 있습니다", color = TextMuted, fontSize = 11.sp)
         }
     }
 }
@@ -151,29 +166,28 @@ fun ViewerLoadingScreen(posterBitmap: ImageBitmap?, title: String = "파일을 �
 // 이미지 캐시
 // ----------------------------------------------------
 private val viewerImageCache = mutableMapOf<String, ImageBitmap>()
-private val viewerCacheKeys = mutableListOf<String>()
-private var MAX_CACHE_SIZE = 40
 private val cacheLock = Mutex()
 private val downloadLocks = mutableMapOf<String, Mutex>()
 private val mapLock = Mutex()
 
-private suspend fun getCachedBitmap(key: String): ImageBitmap? = cacheLock.withLock { viewerImageCache[key] }
-private suspend fun putCachedBitmap(key: String, bitmap: ImageBitmap) = cacheLock.withLock {
-    if (viewerImageCache.containsKey(key)) viewerCacheKeys.remove(key)
-    else if (viewerCacheKeys.size >= MAX_CACHE_SIZE) viewerImageCache.remove(viewerCacheKeys.removeAt(0))
-    viewerCacheKeys.add(key); viewerImageCache[key] = bitmap
-}
-private suspend fun loadAndCacheImage(zipPath: String, imageName: String, manager: ZipManager): ImageBitmap? {
-    val cacheKey = "$zipPath|$imageName"
-    getCachedBitmap(cacheKey)?.let { return it }
+private suspend fun loadAndCacheImage(zipPath: String, imageName: String, manager: ZipManager, repo: PosterRepository): ImageBitmap? {
+    val cacheKey = "viewer_${zipPath}_$imageName"
+    viewerImageCache[cacheKey]?.let { return it }
+    val bitmap = repo.getImage(cacheKey) 
+    if (bitmap != null) {
+        cacheLock.withLock { viewerImageCache[cacheKey] = bitmap }
+        return bitmap
+    }
     val lock = mapLock.withLock { downloadLocks.getOrPut(cacheKey) { Mutex() } }
     return lock.withLock {
-        getCachedBitmap(cacheKey)?.let { return@withLock it }
+        viewerImageCache[cacheKey]?.let { return@withLock it }
         val bytes = manager.extractImage(zipPath, imageName)
-        val bitmap = bytes?.let { withContext(Dispatchers.Default) { it.toImageBitmap() } }
-        if (bitmap != null) putCachedBitmap(cacheKey, bitmap)
+        val resultBitmap = bytes?.let { withContext(Dispatchers.Default) { it.toImageBitmap() } }
+        if (resultBitmap != null) {
+            cacheLock.withLock { viewerImageCache[cacheKey] = resultBitmap }
+        }
         mapLock.withLock { downloadLocks.remove(cacheKey) }
-        bitmap
+        resultBitmap
     }
 }
 
@@ -188,17 +202,10 @@ fun WebtoonViewer(path: String, manager: ZipManager, posterUrl: String?, repo: P
     var showControls by remember { mutableStateOf(true) }
     var posterBitmap by remember { mutableStateOf<ImageBitmap?>(null) }
     val scope = rememberCoroutineScope()
-    var brightness by remember { mutableStateOf(1f) }
-    var isSepia by remember { mutableStateOf(false) }
-    var isGray by remember { mutableStateOf(false) }
-    var showSettings by remember { mutableStateOf(false) }
-    var showEpisodeList by remember { mutableStateOf(false) }
-    var isAutoScrollEnabled by remember { mutableStateOf(false) }
-    var autoScrollSpeed by remember { mutableStateOf(1f) } 
 
     LaunchedEffect(posterUrl) { posterUrl?.let { posterBitmap = repo.getImage(it) } }
     LaunchedEffect(path) {
-        isListLoaded = false; imageNames.clear(); viewerImageCache.clear(); viewerCacheKeys.clear()
+        isListLoaded = false; imageNames.clear()
         try {
             val names = manager.listImagesInZip(path)
             if (names.isNotEmpty()) {
@@ -210,43 +217,33 @@ fun WebtoonViewer(path: String, manager: ZipManager, posterUrl: String?, repo: P
             onError("서버 연결 오류: ${e.message}"); delay(1000); onClose() 
         }
     }
-    LaunchedEffect(listState.firstVisibleItemIndex) {
-        if (isListLoaded) {
-            viewModel.saveReadingPosition(path, listState.firstVisibleItemIndex)
-            scope.launch {
-                val currentIndex = listState.firstVisibleItemIndex
-                for (i in 1..5) {
-                    val nextIndex = currentIndex + i
-                    if (nextIndex < imageNames.size) launch { loadAndCacheImage(path, imageNames[nextIndex], manager) }
-                }
-            }
-        }
-    }
-    LaunchedEffect(isAutoScrollEnabled, autoScrollSpeed) {
-        if (isAutoScrollEnabled) {
-            while (isActive) {
-                try { listState.scrollBy(autoScrollSpeed) } catch (e: Exception) { isAutoScrollEnabled = false; break }
-                delay(16)
-            }
-        }
-    }
-    Box(Modifier.fillMaxSize().background(Color.Black)) {
+    Box(Modifier.fillMaxSize().background(BgBlack)) {
         if (isListLoaded) {
             LazyColumn(state = listState, modifier = Modifier.fillMaxSize().clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) { 
-                showControls = !showControls; if (showControls) { showSettings = false; showEpisodeList = false }
-            }) { itemsIndexed(imageNames) { _, name -> WebtoonPage(path, name, manager, isSepia, isGray) } }
+                showControls = !showControls
+            }) { itemsIndexed(imageNames) { _, name -> WebtoonPage(path, name, manager, repo) } }
         } else { ViewerLoadingScreen(posterBitmap) }
-        if (brightness < 1f) Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 1f - brightness)))
         if (showControls && isListLoaded) {
             Box(Modifier.fillMaxWidth().height(60.dp).background(BgBlack.copy(0.8f)).align(Alignment.TopCenter).padding(horizontal = 12.dp)) {
                 IconButton(onClick = onClose, modifier = Modifier.align(Alignment.CenterStart).size(36.dp)) { Icon(Icons.Default.Close, null, tint = TextPureWhite, modifier = Modifier.size(20.dp)) }
                 Text("${listState.firstVisibleItemIndex + 1} / ${imageNames.size}", Modifier.align(Alignment.Center), color = TextPureWhite, fontSize = 13.sp, fontWeight = FontWeight.Bold)
-                Row(Modifier.align(Alignment.CenterEnd)) {
-                    IconButton(onClick = { isAutoScrollEnabled = !isAutoScrollEnabled }, modifier = Modifier.size(36.dp)) { Icon(Icons.Default.PlayArrow, null, tint = if (isAutoScrollEnabled) KakaoYellow else TextPureWhite, modifier = Modifier.size(20.dp)) }
-                    IconButton(onClick = { showEpisodeList = !showEpisodeList }, modifier = Modifier.size(36.dp)) { Icon(Icons.AutoMirrored.Filled.List, null, tint = TextPureWhite, modifier = Modifier.size(20.dp)) }
-                    IconButton(onClick = { showSettings = !showSettings }, modifier = Modifier.size(36.dp)) { Icon(Icons.Default.Settings, null, tint = TextPureWhite, modifier = Modifier.size(20.dp)) }
-                }
             }
+        }
+    }
+}
+
+@Composable
+fun WebtoonPage(zipPath: String, imageName: String, manager: ZipManager, repo: PosterRepository) {
+    var pageBitmap by remember(imageName) { mutableStateOf<ImageBitmap?>(null) }
+    var isLoading by remember(imageName) { mutableStateOf(true) }
+    LaunchedEffect(imageName) {
+        isLoading = true; pageBitmap = loadAndCacheImage(zipPath, imageName, manager, repo); isLoading = false
+    }
+    Box(Modifier.fillMaxWidth().wrapContentHeight().defaultMinSize(minHeight = 400.dp), contentAlignment = Alignment.Center) {
+        if (pageBitmap != null) {
+            Image(bitmap = pageBitmap!!, contentDescription = null, modifier = Modifier.fillMaxWidth(), contentScale = ContentScale.FillWidth)
+        } else if (isLoading) {
+            PremiumLoadingBar(Modifier.fillMaxWidth(0.5f).padding(vertical = 120.dp), showPercentage = false)
         }
     }
 }
@@ -262,7 +259,7 @@ fun MagazineViewer(path: String, manager: ZipManager, posterUrl: String?, repo: 
     val pagerState = rememberPagerState { if (imageNames.isEmpty()) 0 else (imageNames.size + 1) / 2 }
     LaunchedEffect(posterUrl) { posterUrl?.let { posterBitmap = repo.getImage(it) } }
     LaunchedEffect(path) {
-        isListLoaded = false; imageNames.clear(); viewerImageCache.clear(); viewerCacheKeys.clear()
+        isListLoaded = false; imageNames.clear()
         try {
             val names = manager.listImagesInZip(path)
             if (names.isNotEmpty()) {
@@ -274,23 +271,13 @@ fun MagazineViewer(path: String, manager: ZipManager, posterUrl: String?, repo: 
             onError("서버 연결 실패: ${e.message}"); delay(1000); onClose() 
         }
     }
-    LaunchedEffect(pagerState.currentPage) {
-        if (isListLoaded) {
-            viewModel.saveReadingPosition(path, pagerState.currentPage * 2)
-            scope.launch {
-                val currentIndex = pagerState.currentPage * 2
-                val prefetchIndices = listOf(currentIndex + 2, currentIndex + 3, currentIndex + 4, currentIndex + 5, currentIndex + 6, currentIndex + 7, currentIndex - 1, currentIndex - 2)
-                prefetchIndices.forEach { idx -> if (idx in imageNames.indices) launch { loadAndCacheImage(path, imageNames[idx], manager) } }
-            }
-        }
-    }
-    Box(Modifier.fillMaxSize().background(Color.Black)) {
+    Box(Modifier.fillMaxSize().background(BgBlack)) {
         if (isListLoaded) {
             HorizontalPager(state = pagerState, modifier = Modifier.fillMaxSize().clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) { showControls = !showControls }) { page ->
                 Row(Modifier.fillMaxSize(), verticalAlignment = Alignment.CenterVertically) {
                     val leftIdx = page * 2; val rightIdx = page * 2 + 1
-                    Box(Modifier.weight(1f).fillMaxHeight(), contentAlignment = Alignment.Center) { if (leftIdx < imageNames.size) MagazinePage(path, imageNames[leftIdx], manager) }
-                    Box(Modifier.weight(1f).fillMaxHeight(), contentAlignment = Alignment.Center) { if (rightIdx < imageNames.size) MagazinePage(path, imageNames[rightIdx], manager) }
+                    Box(Modifier.weight(1f).fillMaxHeight(), contentAlignment = Alignment.Center) { if (leftIdx < imageNames.size) MagazinePage(path, imageNames[leftIdx], manager, repo) }
+                    Box(Modifier.weight(1f).fillMaxHeight(), contentAlignment = Alignment.Center) { if (rightIdx < imageNames.size) MagazinePage(path, imageNames[rightIdx], manager, repo) }
                 }
             }
         } else { ViewerLoadingScreen(posterBitmap) }
@@ -314,7 +301,7 @@ fun BookViewer(path: String, manager: ZipManager, posterUrl: String?, repo: Post
     val pagerState = rememberPagerState { imageNames.size }
     LaunchedEffect(posterUrl) { posterUrl?.let { posterBitmap = repo.getImage(it) } }
     LaunchedEffect(path) {
-        isListLoaded = false; imageNames.clear(); viewerImageCache.clear(); viewerCacheKeys.clear()
+        isListLoaded = false; imageNames.clear()
         try {
             val names = manager.listImagesInZip(path)
             if (names.isNotEmpty()) {
@@ -326,20 +313,10 @@ fun BookViewer(path: String, manager: ZipManager, posterUrl: String?, repo: Post
             onError("로드 실패: ${e.message}"); delay(1000); onClose() 
         }
     }
-    LaunchedEffect(pagerState.currentPage) {
-        if (isListLoaded) {
-            viewModel.saveReadingPosition(path, pagerState.currentPage)
-            scope.launch {
-                val currentIndex = pagerState.currentPage
-                val prefetchIndices = listOf(currentIndex + 1, currentIndex + 2, currentIndex + 3, currentIndex - 1)
-                prefetchIndices.forEach { idx -> if (idx in imageNames.indices) launch { loadAndCacheImage(path, imageNames[idx], manager) } }
-            }
-        }
-    }
-    Box(Modifier.fillMaxSize().background(Color.Black)) {
+    Box(Modifier.fillMaxSize().background(BgBlack)) {
         if (isListLoaded) {
             HorizontalPager(state = pagerState, modifier = Modifier.fillMaxSize().clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) { showControls = !showControls }, pageSpacing = 16.dp) { page ->
-                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { MagazinePage(path, imageNames[page], manager) }
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { MagazinePage(path, imageNames[page], manager, repo) }
             }
         } else { ViewerLoadingScreen(posterBitmap) }
         if (showControls && isListLoaded) {
@@ -359,13 +336,10 @@ fun PhotoBookViewer(path: String, manager: ZipManager, posterUrl: String?, repo:
     var showControls by remember { mutableStateOf(true) }
     var posterBitmap by remember { mutableStateOf<ImageBitmap?>(null) }
     val scope = rememberCoroutineScope()
-    var isAutoFlipEnabled by remember { mutableStateOf(false) }
-    var autoFlipInterval by remember { mutableStateOf(3f) }
-    var showSettings by remember { mutableStateOf(false) }
     val pagerState = rememberPagerState { imageNames.size }
     LaunchedEffect(posterUrl) { posterUrl?.let { posterBitmap = repo.getImage(it) } }
     LaunchedEffect(path) {
-        isListLoaded = false; imageNames.clear(); viewerImageCache.clear(); viewerCacheKeys.clear()
+        isListLoaded = false; imageNames.clear()
         try {
             val names = manager.listImagesInZip(path)
             if (names.isNotEmpty()) {
@@ -377,84 +351,31 @@ fun PhotoBookViewer(path: String, manager: ZipManager, posterUrl: String?, repo:
             onError("로드 실패: ${e.message}"); delay(1000); onClose() 
         }
     }
-    LaunchedEffect(pagerState.currentPage) {
+    Box(Modifier.fillMaxSize().background(BgBlack)) {
         if (isListLoaded) {
-            viewModel.saveReadingPosition(path, pagerState.currentPage)
-            scope.launch {
-                val currentIndex = pagerState.currentPage
-                val prefetchIndices = mutableListOf<Int>()
-                for (i in 1..5) prefetchIndices.add(currentIndex + i)
-                prefetchIndices.add(currentIndex - 1); prefetchIndices.add(currentIndex - 2)
-                prefetchIndices.distinct().forEach { idx -> if (idx in imageNames.indices) launch { loadAndCacheImage(path, imageNames[idx], manager) } }
-            }
-        }
-    }
-    LaunchedEffect(isAutoFlipEnabled, autoFlipInterval) {
-        if (isAutoFlipEnabled) {
-            while (isActive && pagerState.currentPage < pagerState.pageCount - 1) {
-                delay((autoFlipInterval * 1000).toLong())
-                pagerState.animateScrollToPage(pagerState.currentPage + 1)
-            }
-            if (pagerState.currentPage >= pagerState.pageCount - 1) isAutoFlipEnabled = false
-        }
-    }
-    Box(Modifier.fillMaxSize().background(Color.Black)) {
-        if (isListLoaded) {
-            HorizontalPager(state = pagerState, modifier = Modifier.fillMaxSize().clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) { showControls = !showControls; if (showControls) showSettings = false }, pageSpacing = 16.dp) { page ->
-                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { MagazinePage(path, imageNames[page], manager) }
+            HorizontalPager(state = pagerState, modifier = Modifier.fillMaxSize().clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) { showControls = !showControls }, pageSpacing = 16.dp) { page ->
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { MagazinePage(path, imageNames[page], manager, repo) }
             }
         } else { ViewerLoadingScreen(posterBitmap) }
         if (showControls && isListLoaded) {
             Box(Modifier.fillMaxWidth().height(60.dp).background(BgBlack.copy(0.8f)).align(Alignment.TopCenter).padding(horizontal = 12.dp)) {
                 IconButton(onClick = onClose, modifier = Modifier.align(Alignment.CenterStart).size(36.dp)) { Icon(Icons.Default.Close, null, tint = TextPureWhite, modifier = Modifier.size(20.dp)) }
                 Text("${pagerState.currentPage + 1} / ${imageNames.size}", Modifier.align(Alignment.Center), color = TextPureWhite, fontSize = 13.sp, fontWeight = FontWeight.Bold)
-                Row(Modifier.align(Alignment.CenterEnd)) {
-                    IconButton(onClick = { isAutoFlipEnabled = !isAutoFlipEnabled }, modifier = Modifier.size(36.dp)) { Icon(if (isAutoFlipEnabled) Icons.Default.Close else Icons.Default.PlayArrow, null, tint = if (isAutoFlipEnabled) KakaoYellow else TextPureWhite, modifier = Modifier.size(20.dp)) }
-                    IconButton(onClick = { showSettings = !showSettings }, modifier = Modifier.size(36.dp)) { Icon(Icons.Default.Settings, null, tint = TextPureWhite, modifier = Modifier.size(20.dp)) }
-                }
-            }
-        }
-        if (showSettings) {
-            Surface(modifier = Modifier.align(Alignment.CenterEnd).padding(16.dp).width(220.dp), color = Color(0xFF222222), shape = RoundedCornerShape(12.dp), border = BorderStroke(1.dp, Color.White.copy(0.1f))) {
-                Column(Modifier.padding(16.dp)) {
-                    Text("자동 넘김 간격 (${autoFlipInterval.toInt()}초)", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
-                    Slider(value = autoFlipInterval, onValueChange = { autoFlipInterval = it }, valueRange = 2f..10f, steps = 8, colors = SliderDefaults.colors(thumbColor = KakaoYellow, activeTrackColor = KakaoYellow))
-                    Spacer(Modifier.height(8.dp)); Text("슬라이드 쇼 모드를 지원합니다.", color = TextMuted, fontSize = 10.sp)
-                }
             }
         }
     }
 }
 
 @Composable
-fun MagazinePage(zipPath: String, imageName: String, manager: ZipManager) {
+fun MagazinePage(zipPath: String, imageName: String, manager: ZipManager, repo: PosterRepository) {
     var pageBitmap by remember(imageName) { mutableStateOf<ImageBitmap?>(null) }
     var isLoading by remember(imageName) { mutableStateOf(true) }
     LaunchedEffect(imageName) {
-        isLoading = true; pageBitmap = loadAndCacheImage(zipPath, imageName, manager); isLoading = false
+        isLoading = true; pageBitmap = loadAndCacheImage(zipPath, imageName, manager, repo); isLoading = false
     }
     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
         if (pageBitmap != null) Image(bitmap = pageBitmap!!, contentDescription = null, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Fit)
-        else if (isLoading) CircularProgressIndicator(color = KakaoYellow)
-    }
-}
-
-@Composable
-fun WebtoonPage(zipPath: String, imageName: String, manager: ZipManager, isSepia: Boolean, isGray: Boolean) {
-    var pageBitmap by remember(imageName) { mutableStateOf<ImageBitmap?>(null) }
-    var isLoading by remember(imageName) { mutableStateOf(true) }
-    LaunchedEffect(imageName) {
-        isLoading = true; pageBitmap = loadAndCacheImage(zipPath, imageName, manager); isLoading = false
-    }
-    Box(Modifier.fillMaxWidth().wrapContentHeight().defaultMinSize(minHeight = 400.dp), contentAlignment = Alignment.Center) {
-        if (pageBitmap != null) {
-            val colorFilter = when {
-                isSepia -> ColorFilter.colorMatrix(ColorMatrix(floatArrayOf(0.393f, 0.769f, 0.189f, 0f, 0f, 0.349f, 0.686f, 0.168f, 0f, 0f, 0.272f, 0.534f, 0.131f, 0f, 0f, 0f, 0f, 0f, 1f, 0f)))
-                isGray -> ColorFilter.colorMatrix(ColorMatrix().apply { setToSaturation(0f) })
-                else -> null
-            }
-            Image(bitmap = pageBitmap!!, contentDescription = null, modifier = Modifier.fillMaxWidth(), contentScale = ContentScale.FillWidth, colorFilter = colorFilter)
-        } else if (isLoading) CircularProgressIndicator(color = KakaoYellow)
+        else if (isLoading) PremiumLoadingBar(Modifier.fillMaxWidth(0.6f), showPercentage = false)
     }
 }
 
@@ -491,7 +412,7 @@ fun SearchScreen(uiState: ComicBrowserUiState, onQueryChange: (String) -> Unit, 
                 }
             }
         } else {
-            if (uiState.isLoading) { Box(Modifier.fillMaxSize(), Alignment.Center) { HorizontalLoadingBar(Modifier.fillMaxWidth(0.7f)) } }
+            if (uiState.isLoading) { Box(Modifier.fillMaxSize(), Alignment.Center) { PremiumLoadingBar(Modifier.fillMaxWidth(0.7f)) } }
             else if (uiState.isSearchExecuted && uiState.searchResults.isEmpty()) { Box(Modifier.fillMaxSize(), Alignment.Center) { Text("검색 결과가 없습니다.", color = TextMuted) } }
             else if (uiState.searchResults.isNotEmpty()) {
                 Text("검색 결과 ${uiState.searchResults.size}건", color = TextPureWhite, fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 24.dp, vertical = 12.dp))
@@ -537,10 +458,8 @@ fun SeriesDetailScreen(uiState: ComicBrowserUiState, onFileClick: (NasFile) -> U
                             }
                         }
                         IconButton(onClick = onBack, modifier = Modifier.statusBarsPadding().padding(8.dp).background(Color.Black.copy(0.3f), CircleShape)) { Icon(Icons.AutoMirrored.Filled.ArrowBack, null, tint = Color.White) }
-                        
-                        // 상세 페이지 내 로딩 표시 (포스터 영역 하단에 프리미엄 바 노출)
                         if (uiState.isLoading) {
-                            HorizontalLoadingBar(Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(horizontal = 24.dp, vertical = 2.dp))
+                            PremiumLoadingBar(Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(horizontal = 24.dp, vertical = 10.dp), showPercentage = false)
                         }
                     }
                     Column(Modifier.padding(horizontal = 24.dp)) {
@@ -563,16 +482,14 @@ fun SeriesDetailScreen(uiState: ComicBrowserUiState, onFileClick: (NasFile) -> U
                                 Text(text = metadata?.title ?: "폴더 항목", style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Black), color = TextPureWhite, maxLines = 1, overflow = TextOverflow.Ellipsis)
                             }
                         }
-                        // 심플 모드에서도 로딩 중이면 바 노출
                         if (uiState.isLoading) {
-                            HorizontalLoadingBar(Modifier.fillMaxWidth().padding(horizontal = 16.dp))
+                            PremiumLoadingBar(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp), showPercentage = false)
                         }
                         HorizontalDivider(color = SurfaceGrey, thickness = 0.5.dp)
                     }
                     Spacer(Modifier.height(16.dp)); Text("항목 (${uiState.seriesEpisodes.size})", modifier = Modifier.padding(horizontal = 24.dp), color = TextPureWhite, fontWeight = FontWeight.Black, fontSize = 16.sp); Spacer(Modifier.height(16.dp))
                 }
             }
-            // 하단 에피소드 리스트
             if (!uiState.isLoading || uiState.seriesEpisodes.isNotEmpty()) {
                 items(uiState.seriesEpisodes) { file -> Box(Modifier.padding(horizontal = 20.dp)) { VolumeListItem(file, repo) { onFileClick(file) } }; Spacer(Modifier.height(12.dp)) }
             }
@@ -658,10 +575,10 @@ fun FolderGridView(files: List<NasFile>, recentComics: List<NasFile>, isLoading:
             if (isLoading && files.isEmpty()) items(16) { Box(Modifier.aspectRatio(0.72f).fillMaxWidth().clip(RoundedCornerShape(4.dp)).background(SurfaceGrey)) }
             else {
                 items(files, key = { it.path }) { file -> ComicCard(file, repo, showCategory, isBook) { onFileClick(file) } }
-                if (isLoadingMore) item(span = { GridItemSpan(maxLineSpan) }) { Box(Modifier.fillMaxWidth().padding(vertical = 24.dp), Alignment.Center) { CircularProgressIndicator(color = KakaoYellow, strokeWidth = 2.dp, modifier = Modifier.size(24.dp)) } }
+                if (isLoadingMore) item(span = { GridItemSpan(maxLineSpan) }) { Box(Modifier.fillMaxWidth().padding(vertical = 24.dp), Alignment.Center) { PremiumLoadingBar(Modifier.fillMaxWidth(0.5f), showPercentage = false) } }
             }
         }
-        if (isRefreshing) Box(Modifier.fillMaxSize(), Alignment.TopCenter) { CircularProgressIndicator(color = KakaoYellow, modifier = Modifier.padding(top = 16.dp).size(32.dp), strokeWidth = 3.dp) }
+        if (isRefreshing) Box(Modifier.fillMaxSize(), Alignment.TopCenter) { PremiumLoadingBar(Modifier.fillMaxWidth(), showPercentage = false) }
     }
 }
 
