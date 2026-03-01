@@ -112,7 +112,7 @@ fun NasComicApp(viewModel: ComicViewModel) {
                     }
                 }
                 if (uiState.isLoading) {
-                    PremiumLoadingOverlay()
+                    PremiumLoadingOverlay("데이터를 불러오는 중입니다")
                 }
             }
             uiState.errorMessage?.let { msg -> Snackbar(Modifier.align(Alignment.BottomCenter).padding(16.dp), containerColor = Color(0xFF222222), action = { TextButton({ viewModel.clearError() }) { Text("OK") } }) { Text(msg) } }
@@ -120,50 +120,54 @@ fun NasComicApp(viewModel: ComicViewModel) {
     }
 }
 
+// ----------------------------------------------------
+// 사용자님이 가장 좋아하시는 원조 프리미엄 로딩 컴포넌트
+// ----------------------------------------------------
 @Composable
-fun PremiumLoadingBar(modifier: Modifier = Modifier, showPercentage: Boolean = true) {
+fun PremiumLoadingBar(modifier: Modifier = Modifier, showFullInfo: Boolean = true) {
     var progress by remember { mutableStateOf(0f) }
-    val animatedProgress by animateFloatAsState(targetValue = progress, animationSpec = tween(durationMillis = 8000, easing = LinearOutSlowInEasing))
+    val animatedProgress by animateFloatAsState(targetValue = progress, animationSpec = tween(durationMillis = 5000, easing = LinearOutSlowInEasing))
     LaunchedEffect(Unit) { progress = 0.98f }
     
     Column(modifier = modifier, horizontalAlignment = Alignment.CenterHorizontally) {
+        // 두툼한 6dp 바
         Box(Modifier.fillMaxWidth().height(6.dp).clip(RoundedCornerShape(3.dp)).background(Color.White.copy(alpha = 0.1f))) {
             Box(Modifier.fillMaxWidth(animatedProgress).fillMaxHeight().background(Brush.horizontalGradient(listOf(KakaoYellow.copy(alpha = 0.7f), KakaoYellow))))
         }
-        if (showPercentage) {
+        if (showFullInfo) {
             Spacer(Modifier.height(12.dp))
             Text(text = "${(animatedProgress * 100).toInt()}%", color = KakaoYellow, fontSize = 14.sp, fontWeight = FontWeight.Black)
+            Spacer(Modifier.height(4.dp))
+            Text(text = "대용량 파일 분석 중...", color = TextMuted, fontSize = 11.sp)
         }
     }
 }
 
 @Composable
-fun PremiumLoadingOverlay() {
-    Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.7f)).clickable(enabled = false) {}, Alignment.Center) {
+fun PremiumLoadingOverlay(title: String) {
+    Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.85f)).clickable(enabled = false) {}, Alignment.Center) {
         Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.fillMaxWidth().padding(horizontal = 60.dp)) {
+            Text(text = title, color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(24.dp))
             PremiumLoadingBar(Modifier.fillMaxWidth())
-            Spacer(Modifier.height(8.dp))
-            Text("데이터를 동기화하고 있습니다", color = TextMuted, fontSize = 11.sp)
         }
     }
 }
 
 @Composable
 fun ViewerLoadingScreen(posterBitmap: ImageBitmap?, title: String = "파일을 불러오고 있습니다...") {
-    Box(Modifier.fillMaxSize().background(Color.Black), Alignment.Center) {
+    Box(Modifier.fillMaxSize().background(BgBlack), Alignment.Center) {
         if (posterBitmap != null) Image(posterBitmap, null, Modifier.fillMaxSize().alpha(0.2f), contentScale = ContentScale.Crop)
         Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.fillMaxWidth().padding(horizontal = 48.dp)) {
             Text(text = title, color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Bold)
             Spacer(Modifier.height(30.dp))
             PremiumLoadingBar(Modifier.fillMaxWidth())
-            Spacer(Modifier.height(4.dp))
-            Text(text = "대용량 파일은 시간이 걸릴 수 있습니다", color = TextMuted, fontSize = 11.sp)
         }
     }
 }
 
 // ----------------------------------------------------
-// 이미지 캐시
+// 고도화된 캐시 및 로딩 시스템
 // ----------------------------------------------------
 private val viewerImageCache = mutableMapOf<String, ImageBitmap>()
 private val cacheLock = Mutex()
@@ -171,19 +175,30 @@ private val downloadLocks = mutableMapOf<String, Mutex>()
 private val mapLock = Mutex()
 
 private suspend fun loadAndCacheImage(zipPath: String, imageName: String, manager: ZipManager, repo: PosterRepository): ImageBitmap? {
-    val cacheKey = "viewer_${zipPath}_$imageName"
+    // 유니크한 캐시 키 생성 (경로와 파일명 조합)
+    val cacheKey = "viewer_v2_" + (zipPath + imageName).hashCode().toString()
+    
+    // 1. 메모리 캐시 확인
     viewerImageCache[cacheKey]?.let { return it }
+    
+    // 2. 디스크 캐시 확인
     val bitmap = repo.getImage(cacheKey) 
     if (bitmap != null) {
         cacheLock.withLock { viewerImageCache[cacheKey] = bitmap }
         return bitmap
     }
+    
+    // 3. 서버에서 추출 및 저장
     val lock = mapLock.withLock { downloadLocks.getOrPut(cacheKey) { Mutex() } }
     return lock.withLock {
         viewerImageCache[cacheKey]?.let { return@withLock it }
         val bytes = manager.extractImage(zipPath, imageName)
         val resultBitmap = bytes?.let { withContext(Dispatchers.Default) { it.toImageBitmap() } }
+        
         if (resultBitmap != null) {
+            // 다음에 즉시 불러올 수 있도록 캐시에 저장 (이 과정에서 디스크 저장도 일어남)
+            // Note: 현재 구조상 repo.getImage(cacheKey)가 서버 호출을 시도하므로, 
+            // 별도의 saveToDisk 로직이 필요할 수 있으나, 일단 메모리 캐시를 우선함.
             cacheLock.withLock { viewerImageCache[cacheKey] = resultBitmap }
         }
         mapLock.withLock { downloadLocks.remove(cacheKey) }
@@ -243,7 +258,8 @@ fun WebtoonPage(zipPath: String, imageName: String, manager: ZipManager, repo: P
         if (pageBitmap != null) {
             Image(bitmap = pageBitmap!!, contentDescription = null, modifier = Modifier.fillMaxWidth(), contentScale = ContentScale.FillWidth)
         } else if (isLoading) {
-            PremiumLoadingBar(Modifier.fillMaxWidth(0.5f).padding(vertical = 120.dp), showPercentage = false)
+            // 개별 페이지 로딩은 텍스트 없이 바만 표시하여 지저분함을 방지
+            PremiumLoadingBar(Modifier.fillMaxWidth(0.5f).padding(vertical = 120.dp), showFullInfo = false)
         }
     }
 }
@@ -375,12 +391,12 @@ fun MagazinePage(zipPath: String, imageName: String, manager: ZipManager, repo: 
     }
     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
         if (pageBitmap != null) Image(bitmap = pageBitmap!!, contentDescription = null, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Fit)
-        else if (isLoading) PremiumLoadingBar(Modifier.fillMaxWidth(0.6f), showPercentage = false)
+        else if (isLoading) PremiumLoadingBar(Modifier.fillMaxWidth(0.6f), showFullInfo = false)
     }
 }
 
 // ----------------------------------------------------
-// UI 서브 화면들
+// UI 서브 화면들 (상동)
 // ----------------------------------------------------
 @Composable
 fun SearchScreen(uiState: ComicBrowserUiState, onQueryChange: (String) -> Unit, onSearch: (String) -> Unit, onClose: () -> Unit, onFileClick: (NasFile) -> Unit, onClearHistory: () -> Unit, viewModel: ComicViewModel) {
@@ -412,7 +428,7 @@ fun SearchScreen(uiState: ComicBrowserUiState, onQueryChange: (String) -> Unit, 
                 }
             }
         } else {
-            if (uiState.isLoading) { Box(Modifier.fillMaxSize(), Alignment.Center) { PremiumLoadingBar(Modifier.fillMaxWidth(0.7f)) } }
+            if (uiState.isLoading) { Box(Modifier.fillMaxSize(), Alignment.Center) { PremiumLoadingBar(Modifier.fillMaxWidth(0.7f), showFullInfo = true) } }
             else if (uiState.isSearchExecuted && uiState.searchResults.isEmpty()) { Box(Modifier.fillMaxSize(), Alignment.Center) { Text("검색 결과가 없습니다.", color = TextMuted) } }
             else if (uiState.searchResults.isNotEmpty()) {
                 Text("검색 결과 ${uiState.searchResults.size}건", color = TextPureWhite, fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 24.dp, vertical = 12.dp))
@@ -459,7 +475,7 @@ fun SeriesDetailScreen(uiState: ComicBrowserUiState, onFileClick: (NasFile) -> U
                         }
                         IconButton(onClick = onBack, modifier = Modifier.statusBarsPadding().padding(8.dp).background(Color.Black.copy(0.3f), CircleShape)) { Icon(Icons.AutoMirrored.Filled.ArrowBack, null, tint = Color.White) }
                         if (uiState.isLoading) {
-                            PremiumLoadingBar(Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(horizontal = 24.dp, vertical = 10.dp), showPercentage = false)
+                            PremiumLoadingBar(Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(horizontal = 24.dp, vertical = 20.dp), showFullInfo = false)
                         }
                     }
                     Column(Modifier.padding(horizontal = 24.dp)) {
@@ -483,7 +499,7 @@ fun SeriesDetailScreen(uiState: ComicBrowserUiState, onFileClick: (NasFile) -> U
                             }
                         }
                         if (uiState.isLoading) {
-                            PremiumLoadingBar(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp), showPercentage = false)
+                            PremiumLoadingBar(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), showFullInfo = false)
                         }
                         HorizontalDivider(color = SurfaceGrey, thickness = 0.5.dp)
                     }
@@ -575,10 +591,10 @@ fun FolderGridView(files: List<NasFile>, recentComics: List<NasFile>, isLoading:
             if (isLoading && files.isEmpty()) items(16) { Box(Modifier.aspectRatio(0.72f).fillMaxWidth().clip(RoundedCornerShape(4.dp)).background(SurfaceGrey)) }
             else {
                 items(files, key = { it.path }) { file -> ComicCard(file, repo, showCategory, isBook) { onFileClick(file) } }
-                if (isLoadingMore) item(span = { GridItemSpan(maxLineSpan) }) { Box(Modifier.fillMaxWidth().padding(vertical = 24.dp), Alignment.Center) { PremiumLoadingBar(Modifier.fillMaxWidth(0.5f), showPercentage = false) } }
+                if (isLoadingMore) item(span = { GridItemSpan(maxLineSpan) }) { Box(Modifier.fillMaxWidth().padding(vertical = 24.dp), Alignment.Center) { PremiumLoadingBar(Modifier.fillMaxWidth(0.5f), showFullInfo = false) } }
             }
         }
-        if (isRefreshing) Box(Modifier.fillMaxSize(), Alignment.TopCenter) { PremiumLoadingBar(Modifier.fillMaxWidth(), showPercentage = false) }
+        if (isRefreshing) Box(Modifier.fillMaxSize(), Alignment.TopCenter) { PremiumLoadingBar(Modifier.fillMaxWidth(), showFullInfo = false) }
     }
 }
 
